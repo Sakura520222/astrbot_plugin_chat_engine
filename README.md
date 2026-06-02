@@ -1,4 +1,4 @@
-# Chat Engine - AstrBot 聊天引擎插件
+# Chat Engine - AstrBot 聊天增强插件
 
 完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、人格系统、Tool Calls 和上下文压缩。
 
