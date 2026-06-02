@@ -1,0 +1,84 @@
+{
+    "compression_mode": {
+        "description": "上下文压缩模式",
+        "type": "string",
+        "_special": {
+            "select": {
+                "options": ["turn_limit", "token"]
+            }
+        },
+        "default": "turn_limit",
+        "hint": "turn_limit: 超过轮数限制直接丢弃最早消息。token: 达到模型上下文 Token 阈值时用 LLM 总结旧消息。"
+    },
+    "max_turns": {
+        "description": "最大保留轮数 (轮数模式)",
+        "type": "int",
+        "default": 50,
+        "hint": "超过此轮数时，丢弃最早的对话轮次。"
+    },
+    "token_threshold_ratio": {
+        "description": "Token 触发阈值比例 (Token模式)",
+        "type": "float",
+        "default": 0.8,
+        "hint": "上下文 Token 占模型最大 Token 的比例达到此值时触发压缩。"
+    },
+    "keep_recent_turns": {
+        "description": "压缩后保留最近轮数 (Token模式)",
+        "type": "int",
+        "default": 5,
+        "hint": "LLM 总结压缩后，保留最近多少轮原始对话。"
+    },
+    "fallback_max_context_tokens": {
+        "description": "模型最大上下文 Token (Fallback)",
+        "type": "int",
+        "default": 32000,
+        "hint": "当模型未报告 max_context_tokens 时使用此值。"
+    },
+    "user_id_format": {
+        "description": "用户标识格式 (群聊)",
+        "type": "string",
+        "default": "{{user}{NAME}({ID})}说：",
+        "hint": "群聊中用户消息前缀格式。{NAME}=昵称, {ID}=用户ID。"
+    },
+    "require_at_in_group": {
+        "description": "群聊需要 @Bot",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后群聊中只有 @Bot 才会触发回复。关闭则回复所有群消息。"
+    },
+    "web_port": {
+        "description": "WebUI 端口",
+        "type": "int",
+        "default": 8765,
+        "hint": "插件管理 WebUI 的独立端口。修改后需重启插件。"
+    },
+    "enable_tool_calls": {
+        "description": "启用 Tool Calls",
+        "type": "bool",
+        "default": true,
+        "hint": "是否在 LLM 请求中启用原生 Function Calling。"
+    },
+    "max_tool_rounds": {
+        "description": "最大工具调用轮数",
+        "type": "int",
+        "default": 10,
+        "hint": "单次对话中工具调用的最大循环次数。"
+    },
+    "db_type": {
+        "description": "数据库类型",
+        "type": "string",
+        "_special": {
+            "select": {
+                "options": ["sqlite", "mysql"]
+            }
+        },
+        "default": "sqlite",
+        "hint": "sqlite: 本地文件数据库。mysql: 远程 MySQL 数据库。"
+    },
+    "mysql_url": {
+        "description": "MySQL 连接 URL",
+        "type": "string",
+        "default": "",
+        "hint": "格式: mysql+aiomysql://user:password@host:port/dbname"
+    }
+}

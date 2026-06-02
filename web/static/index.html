@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Engine 管理面板</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- 侧边栏 -->
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <h2>⚙️ Chat Engine</h2>
+            </div>
+            <ul class="nav-list">
+                <li class="nav-item active" data-tab="personas">🎭 人格管理</li>
+                <li class="nav-item" data-tab="sessions">💬 会话管理</li>
+                <li class="nav-item" data-tab="tools">🔧 工具管理</li>
+                <li class="nav-item" data-tab="config">📝 配置设置</li>
+            </ul>
+        </nav>
+
+        <!-- 主内容区 -->
+        <main class="content">
+            <!-- 人格管理 -->
+            <section id="tab-personas" class="tab-panel active">
+                <div class="panel-header">
+                    <h3>人格管理</h3>
+                    <button class="btn btn-primary" onclick="showPersonaModal()">+ 新建人格</button>
+                </div>
+                <div id="persona-list" class="card-list"></div>
+            </section>
+
+            <!-- 会话管理 -->
+            <section id="tab-sessions" class="tab-panel">
+                <div class="panel-header">
+                    <h3>会话管理</h3>
+                    <button class="btn btn-secondary" onclick="loadSessions()">🔄 刷新</button>
+                </div>
+                <div id="session-list" class="card-list"></div>
+                <div id="session-pagination" class="pagination"></div>
+            </section>
+
+            <!-- 工具管理 -->
+            <section id="tab-tools" class="tab-panel">
+                <div class="panel-header">
+                    <h3>工具管理</h3>
+                    <button class="btn btn-secondary" onclick="refreshTools()">🔄 重新扫描</button>
+                </div>
+                <div id="tool-list" class="card-list"></div>
+            </section>
+
+            <!-- 配置设置 -->
+            <section id="tab-config" class="tab-panel">
+                <div class="panel-header">
+                    <h3>配置设置</h3>
+                </div>
+                <div id="config-form" class="config-form"></div>
+            </section>
+        </main>
+    </div>
+
+    <!-- 人格编辑模态框 -->
+    <div id="persona-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">新建人格</h3>
+                <button class="btn-close" onclick="hidePersonaModal()">&times;</button>
+            </div>
+            <form id="persona-form" onsubmit="savePersona(event)">
+                <input type="hidden" id="persona-id">
+                <div class="form-group">
+                    <label for="persona-name">名称</label>
+                    <input type="text" id="persona-name" required placeholder="给这个人格起个名字">
+                </div>
+                <div class="form-group">
+                    <label for="persona-prompt">System Prompt</label>
+                    <textarea id="persona-prompt" rows="12" required placeholder="定义这个 AI 人格的系统提示词..."></textarea>
+                </div>
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" id="persona-default"> 设为默认人格
+                    </label>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="hidePersonaModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 会话详情模态框 -->
+    <div id="session-modal" class="modal hidden">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3>会话上下文</h3>
+                <button class="btn-close" onclick="hideSessionModal()">&times;</button>
+            </div>
+            <div id="session-detail" class="session-detail"></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

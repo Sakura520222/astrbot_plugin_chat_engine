@@ -1,0 +1,137 @@
+"""Context manager — orchestrates session key building, context loading/saving,
+user message formatting, and compression triggering.
+"""
+
+from astrbot.api import logger
+from astrbot.api.platform import MessageType
+
+from ..db.persona_repo import PersonaRepository
+from ..db.session_repo import SessionRepository
+from .compressor import BaseCompressor, ContextCompressorFactory
+from .token_counter import TokenEstimator
+
+
+class ChatContextManager:
+    """上下文管理器 — 管理会话、用户标识、上下文存取与压缩"""
+
+    def __init__(
+        self,
+        session_repo: SessionRepository,
+        persona_repo: PersonaRepository,
+        config: dict,
+        provider_getter=None,
+    ):
+        self.repo = session_repo
+        self.persona_repo = persona_repo
+        self.config = config
+        self.provider_getter = provider_getter
+        self.compressor: BaseCompressor = ContextCompressorFactory.create(
+            config, provider_getter
+        )
+        self.token_counter = TokenEstimator()
+
+    def build_session_key(self, event) -> str:
+        """根据消息事件构建会话 key。
+
+        群聊: "{platform}:{group_id}"
+        私聊: "{platform}:private:{sender_id}"
+        """
+        platform = event.get_platform_name() or "unknown"
+        group_id = event.get_group_id()
+        if group_id:
+            return f"{platform}:{group_id}"
+        sender_id = event.get_sender_id() or "unknown"
+        return f"{platform}:private:{sender_id}"
+
+    def is_group_message(self, event) -> bool:
+        """判断是否为群聊消息"""
+        try:
+            return event.get_message_type() == MessageType.GROUP_MESSAGE
+        except Exception:
+            return event.get_group_id() is not None
+
+    def format_user_message(self, event) -> str:
+        """格式化用户消息。添加用户标识前缀。
+
+        格式: "{{user}{昵称}({ID})}说：消息内容"
+        群聊和私聊都添加用户标识前缀，确保 AI 能识别用户。
+        """
+        text = event.message_str or ""
+
+        fmt = self.config.get("user_id_format", "{{user}{NAME}({ID})}说：")
+        name = event.get_sender_name() or "unknown"
+        uid = event.get_sender_id() or "unknown"
+        prefix = fmt.replace("{NAME}", name).replace("{ID}", uid)
+        return f"{prefix}{text}"
+
+    def should_respond(self, event) -> bool:
+        """判断是否应该响应此消息。
+
+        - 私聊: 始终响应
+        - 群聊: 根据 require_at_in_group 配置决定
+        """
+        if not self.is_group_message(event):
+            return True  # 私聊始终响应
+
+        if not self.config.get("require_at_in_group", True):
+            return True  # 配置为不需要@，响应所有群消息
+
+        return event.is_at_or_wake_command  # 需要@Bot
+
+    async def load_context(self, session_key: str) -> list[dict]:
+        """从数据库加载上下文"""
+        try:
+            return await self.repo.get_context(session_key)
+        except Exception as e:
+            logger.error(f"[ChatEngine] 加载上下文失败 [{session_key}]: {e}")
+            return []
+
+    async def get_max_context_tokens(self, provider) -> int:
+        """获取模型最大上下文 Token 数"""
+        max_tokens = 0
+        try:
+            max_tokens = provider.provider_config.get("max_context_tokens", 0)
+        except Exception:
+            pass
+        if max_tokens <= 0:
+            max_tokens = self.config.get("fallback_max_context_tokens", 32000)
+        return max_tokens
+
+    async def append_and_save(
+        self,
+        session_key: str,
+        user_msg: dict,
+        assistant_msg: dict,
+        provider=None,
+    ) -> list[dict]:
+        """追加用户+助手消息，运行压缩检查，保存到数据库。"""
+        try:
+            messages = await self.repo.get_context(session_key)
+        except Exception:
+            messages = []
+
+        messages.append(user_msg)
+        messages.append(assistant_msg)
+
+        # 压缩检查
+        try:
+            max_tokens = 0
+            if provider:
+                max_tokens = await self.get_max_context_tokens(provider)
+            messages = await self.compressor.compress(messages, max_tokens)
+        except Exception as e:
+            logger.error(f"[ChatEngine] 上下文压缩失败: {e}")
+
+        # 保存
+        try:
+            await self.repo.save_context(session_key, messages)
+        except Exception as e:
+            logger.error(f"[ChatEngine] 保存上下文失败 [{session_key}]: {e}")
+
+        return messages
+
+    def reload_compressor(self):
+        """重新加载压缩器 (配置变更后调用)"""
+        self.compressor = ContextCompressorFactory.create(
+            self.config, self.provider_getter
+        )

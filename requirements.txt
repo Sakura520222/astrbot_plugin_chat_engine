@@ -1,0 +1,4 @@
+sqlalchemy[asyncio]>=2.0
+aiosqlite>=0.19
+aiohttp>=3.9
+pymysql>=1.1

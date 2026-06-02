@@ -1,0 +1,322 @@
+"""Independent aiohttp Web server for the Chat Engine plugin management UI."""
+
+from pathlib import Path
+
+from aiohttp import web
+
+from astrbot.api import logger
+
+
+class ChatWebServer:
+    """独立 Web 服务器 — 提供 Chat Engine 管理 API 和前端页面"""
+
+    def __init__(self, plugin, port: int = 8765):
+        self.plugin = plugin
+        self.port = port
+        self.app = web.Application()
+        self.runner = None
+        self.site = None
+        self.static_dir = Path(__file__).parent / "static"
+        self._setup_routes()
+        self._setup_cors()
+
+    def _setup_cors(self):
+        """设置 CORS 中间件"""
+
+        @web.middleware
+        async def cors_middleware(request, handler):
+            if request.method == "OPTIONS":
+                response = web.Response()
+            else:
+                try:
+                    response = await handler(request)
+                except web.HTTPException as ex:
+                    response = ex
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = (
+                "GET, POST, PUT, DELETE, OPTIONS"
+            )
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            return response
+
+        self.app.middlewares.append(cors_middleware)
+
+    def _setup_routes(self):
+        """注册所有 API 路由"""
+        # ---- 人格管理 ----
+        self.app.router.add_get("/api/personas", self._api_list_personas)
+        self.app.router.add_post("/api/personas", self._api_create_persona)
+        self.app.router.add_put("/api/personas/{id}", self._api_update_persona)
+        self.app.router.add_delete("/api/personas/{id}", self._api_delete_persona)
+        self.app.router.add_post(
+            "/api/personas/{id}/set_default", self._api_set_default_persona
+        )
+
+        # ---- 会话管理 ----
+        self.app.router.add_get("/api/sessions", self._api_list_sessions)
+        self.app.router.add_get("/api/sessions/{key:.*}", self._api_get_session)
+        self.app.router.add_delete("/api/sessions/{key:.*}", self._api_delete_session)
+
+        # ---- 配置管理 ----
+        self.app.router.add_get("/api/config", self._api_get_config)
+        self.app.router.add_put("/api/config", self._api_update_config)
+
+        # ---- 工具管理 ----
+        self.app.router.add_get("/api/tools", self._api_list_tools)
+        self.app.router.add_post("/api/tools/refresh", self._api_refresh_tools)
+        self.app.router.add_post("/api/tools/{name}/enable", self._api_enable_tool)
+        self.app.router.add_post("/api/tools/{name}/disable", self._api_disable_tool)
+
+        # ---- 前端页面 ----
+        self.app.router.add_get("/", self._serve_index)
+        self.app.router.add_get("/{filename}", self._serve_static)
+
+    async def start(self):
+        """启动 Web 服务器"""
+        try:
+            self.runner = web.AppRunner(self.app)
+            await self.runner.setup()
+            self.site = web.TCPSite(self.runner, "0.0.0.0", self.port)
+            await self.site.start()
+            logger.info(f"[ChatEngine] WebUI 已启动: http://0.0.0.0:{self.port}")
+        except Exception as e:
+            logger.error(f"[ChatEngine] WebUI 启动失败: {e}")
+
+    async def stop(self):
+        """停止 Web 服务器"""
+        if self.runner:
+            await self.runner.cleanup()
+            logger.info("[ChatEngine] WebUI 已关闭")
+
+    # ========================================================================
+    # 人格 API
+    # ========================================================================
+
+    async def _api_list_personas(self, request: web.Request) -> web.Response:
+        personas = await self.plugin.persona_mgr.list_personas()
+        return web.json_response(
+            {
+                "personas": [
+                    {
+                        "id": p.id,
+                        "name": p.name,
+                        "system_prompt": p.system_prompt,
+                        "is_default": p.is_default,
+                        "created_at": p.created_at.isoformat()
+                        if p.created_at
+                        else None,
+                        "updated_at": p.updated_at.isoformat()
+                        if p.updated_at
+                        else None,
+                    }
+                    for p in personas
+                ]
+            }
+        )
+
+    async def _api_create_persona(self, request: web.Request) -> web.Response:
+        data = await request.json()
+        name = data.get("name", "").strip()
+        if not name:
+            return web.json_response({"error": "名称不能为空"}, status=400)
+
+        system_prompt = data.get("system_prompt", "")
+        is_default = data.get("is_default", False)
+
+        try:
+            persona = await self.plugin.persona_mgr.create_persona(
+                name, system_prompt, is_default
+            )
+            return web.json_response(
+                {
+                    "persona": {
+                        "id": persona.id,
+                        "name": persona.name,
+                        "system_prompt": persona.system_prompt,
+                        "is_default": persona.is_default,
+                    }
+                }
+            )
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def _api_update_persona(self, request: web.Request) -> web.Response:
+        persona_id = int(request.match_info["id"])
+        data = await request.json()
+
+        kwargs = {}
+        if "name" in data:
+            kwargs["name"] = data["name"]
+        if "system_prompt" in data:
+            kwargs["system_prompt"] = data["system_prompt"]
+        if "is_default" in data:
+            kwargs["is_default"] = data["is_default"]
+
+        persona = await self.plugin.persona_mgr.update_persona(persona_id, **kwargs)
+        if persona is None:
+            return web.json_response({"error": "人格不存在"}, status=404)
+
+        return web.json_response(
+            {
+                "persona": {
+                    "id": persona.id,
+                    "name": persona.name,
+                    "system_prompt": persona.system_prompt,
+                    "is_default": persona.is_default,
+                }
+            }
+        )
+
+    async def _api_delete_persona(self, request: web.Request) -> web.Response:
+        persona_id = int(request.match_info["id"])
+        ok = await self.plugin.persona_mgr.delete_persona(persona_id)
+        if not ok:
+            return web.json_response({"error": "人格不存在"}, status=404)
+        return web.json_response({"ok": True})
+
+    async def _api_set_default_persona(self, request: web.Request) -> web.Response:
+        persona_id = int(request.match_info["id"])
+        ok = await self.plugin.persona_mgr.set_default(persona_id)
+        if not ok:
+            return web.json_response({"error": "人格不存在"}, status=404)
+        return web.json_response({"ok": True})
+
+    # ========================================================================
+    # 会话 API
+    # ========================================================================
+
+    async def _api_list_sessions(self, request: web.Request) -> web.Response:
+        page = int(request.query.get("page", 1))
+        page_size = int(request.query.get("page_size", 50))
+        sessions, total = await self.plugin.context_mgr.repo.list_sessions(
+            page, page_size
+        )
+        return web.json_response(
+            {
+                "sessions": sessions,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
+
+    async def _api_get_session(self, request: web.Request) -> web.Response:
+        session_key = request.match_info["key"]
+        messages = await self.plugin.context_mgr.load_context(session_key)
+        return web.json_response(
+            {
+                "session_key": session_key,
+                "messages": messages,
+            }
+        )
+
+    async def _api_delete_session(self, request: web.Request) -> web.Response:
+        session_key = request.match_info["key"]
+        ok = await self.plugin.context_mgr.repo.delete_session(session_key)
+        if not ok:
+            return web.json_response({"error": "会话不存在"}, status=404)
+        return web.json_response({"ok": True})
+
+    # ========================================================================
+    # 配置 API
+    # ========================================================================
+
+    async def _api_get_config(self, request: web.Request) -> web.Response:
+        config_keys = [
+            "compression_mode",
+            "max_turns",
+            "token_threshold_ratio",
+            "keep_recent_turns",
+            "fallback_max_context_tokens",
+            "user_id_format",
+            "require_at_in_group",
+            "web_port",
+            "enable_tool_calls",
+            "max_tool_rounds",
+            "db_type",
+            "mysql_url",
+        ]
+        config_data = {}
+        for key in config_keys:
+            config_data[key] = self.plugin.config.get(key)
+        return web.json_response(config_data)
+
+    async def _api_update_config(self, request: web.Request) -> web.Response:
+        data = await request.json()
+        allowed_keys = [
+            "compression_mode",
+            "max_turns",
+            "token_threshold_ratio",
+            "keep_recent_turns",
+            "fallback_max_context_tokens",
+            "user_id_format",
+            "require_at_in_group",
+            "enable_tool_calls",
+            "max_tool_rounds",
+        ]
+        for key in allowed_keys:
+            if key in data:
+                self.plugin.config[key] = data[key]
+
+        # 保存配置
+        try:
+            self.plugin.config.save_config()
+        except Exception:
+            pass
+
+        # 重载压缩器
+        self.plugin.context_mgr.config = self.plugin.config
+        self.plugin.context_mgr.reload_compressor()
+
+        return web.json_response({"ok": True})
+
+    # ========================================================================
+    # 工具 API
+    # ========================================================================
+
+    async def _api_list_tools(self, request: web.Request) -> web.Response:
+        tools = await self.plugin.tool_mgr.get_all_tools_info()
+        return web.json_response({"tools": tools})
+
+    async def _api_refresh_tools(self, request: web.Request) -> web.Response:
+        tools = await self.plugin.tool_mgr.refresh_tools()
+        return web.json_response({"tools": tools, "count": len(tools)})
+
+    async def _api_enable_tool(self, request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        await self.plugin.tool_mgr.enable_tool(name)
+        return web.json_response({"ok": True})
+
+    async def _api_disable_tool(self, request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        await self.plugin.tool_mgr.disable_tool(name)
+        return web.json_response({"ok": True})
+
+    # ========================================================================
+    # 静态文件
+    # ========================================================================
+
+    async def _serve_index(self, request: web.Request) -> web.Response:
+        return await self._serve_file("index.html")
+
+    async def _serve_static(self, request: web.Request) -> web.Response:
+        filename = request.match_info["filename"]
+        return await self._serve_file(filename)
+
+    async def _serve_file(self, filename: str) -> web.Response:
+        filepath = self.static_dir / filename
+        if not filepath.exists():
+            return web.Response(status=404, text="Not Found")
+
+        content_types = {
+            ".html": "text/html; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".json": "application/json; charset=utf-8",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+        }
+        suffix = filepath.suffix
+        content_type = content_types.get(suffix, "application/octet-stream")
+
+        return web.FileResponse(filepath, headers={"Content-Type": content_type})
