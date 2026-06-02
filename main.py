@@ -20,6 +20,7 @@ from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .context.manager import ChatContextManager
+from .context.token_counter import TokenEstimator
 from .db.engine import ChatEngineDB
 from .persona.manager import ChatPersonaManager
 from .tools.manager import ChatToolManager
@@ -248,6 +249,11 @@ class ChatEnginePlugin(Star):
                     logger.warning(f"[ChatEngine] 构建工具集失败: {e}", exc_info=True)
             else:
                 logger.info("[ChatEngine] Tool Calls 已禁用")
+
+            # ---------- Token 安全截断 ----------
+            context_messages = self._trim_context_to_fit(
+                context_messages, provider
+            )
 
             # ---------- 调用 LLM (含 Tool Call 循环) ----------
             logger.info(
@@ -506,6 +512,51 @@ class ChatEnginePlugin(Star):
                 {"error": f"工具执行失败: {type(e).__name__}: {str(e)}"},
                 ensure_ascii=False,
             )
+
+    def _trim_context_to_fit(
+        self, messages: list[dict], provider
+    ) -> list[dict]:
+        """Token 安全截断：确保上下文不超过模型阈值。
+
+        从最旧的消息开始移除，直到总量低于阈值。
+        被动记录的大量消息通常在最前面，会优先被裁剪。
+        """
+        # 获取模型最大 token 数
+        max_tokens = 0
+        try:
+            max_tokens = provider.provider_config.get("max_context_tokens", 0)
+        except Exception:
+            pass
+        if max_tokens <= 0:
+            max_tokens = int(
+                self.config.get("fallback_max_context_tokens", 32000)
+            )
+
+        # 保留比例 (与 token 压缩模式共用同一个配置)
+        ratio = float(self.config.get("token_threshold_ratio", 0.8))
+        threshold = int(max_tokens * ratio)
+
+        counter = TokenEstimator()
+        total = counter.count_messages_tokens(messages)
+
+        if total <= threshold:
+            return messages
+
+        # 累加最旧消息的 token 数，找到截断点
+        cut_idx = 0
+        for i, msg in enumerate(messages):
+            total -= counter.count_messages_tokens([msg])
+            cut_idx = i + 1
+            if total <= threshold:
+                break
+
+        if cut_idx > 0:
+            logger.info(
+                f"[ChatEngine] Token 安全截断: 移除前 {cut_idx} 条消息 "
+                f"({len(messages)} -> {len(messages) - cut_idx})"
+            )
+
+        return messages[cut_idx:]
 
     def _split_response(self, text: str) -> list[str]:
         """将 LLM 回复按配置的分段符号拆分。
