@@ -130,6 +130,39 @@ class ChatContextManager:
 
         return messages
 
+    async def record_passive_message(
+        self,
+        session_key: str,
+        user_msg: dict,
+        provider=None,
+    ) -> None:
+        """记录被动 (未触发回复) 的用户消息到上下文。
+
+        仅追加一条 user 消息，不产生 assistant 回复。
+        同样会触发压缩检查以控制上下文长度。
+        """
+        try:
+            messages = await self.repo.get_context(session_key)
+        except Exception:
+            messages = []
+
+        messages.append(user_msg)
+
+        # 压缩检查
+        try:
+            max_tokens = 0
+            if provider:
+                max_tokens = await self.get_max_context_tokens(provider)
+            messages = await self.compressor.compress(messages, max_tokens)
+        except Exception as e:
+            logger.error(f"[ChatEngine] 被动消息压缩失败: {e}")
+
+        # 保存
+        try:
+            await self.repo.save_context(session_key, messages)
+        except Exception as e:
+            logger.error(f"[ChatEngine] 被动消息保存失败 [{session_key}]: {e}")
+
     def reload_compressor(self):
         """重新加载压缩器 (配置变更后调用)"""
         self.compressor = ContextCompressorFactory.create(

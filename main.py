@@ -154,7 +154,27 @@ class ChatEnginePlugin(Star):
 
             # 判断是否应该响应 (群聊未@Bot时跳过)
             if not self.context_mgr.should_respond(event):
-                logger.info("[ChatEngine] 群聊未@Bot，跳过（允许 AstrBot 默认处理）")
+                # 被动记录: 群聊中未触发回复的消息也记录到上下文
+                if (
+                    self.config.get("enable_passive_record", False)
+                    and is_group
+                    and message_text
+                ):
+                    try:
+                        passive_key = self.context_mgr.build_session_key(event)
+                        passive_text = self.context_mgr.format_user_message(event)
+                        # 使用 "observed" role 而非 "user"，防止压缩器
+                        # 将每条被动消息都计为独立一轮
+                        passive_msg = {"role": "observed", "content": passive_text}
+                        await self.context_mgr.record_passive_message(
+                            passive_key, passive_msg
+                        )
+                        logger.debug(
+                            f"[ChatEngine] 被动记录消息到 {passive_key}"
+                        )
+                    except Exception as e:
+                        logger.debug(f"[ChatEngine] 被动记录失败: {e}")
+
                 event.should_call_llm(False)  # 恢复默认 LLM
                 return
 
@@ -174,7 +194,13 @@ class ChatEnginePlugin(Star):
             logger.info(f"[ChatEngine] 会话 Key: {session_key}")
 
             # ---------- 加载上下文 ----------
-            context_messages = await self.context_mgr.load_context(session_key)
+            context_messages_raw = await self.context_mgr.load_context(session_key)
+            # 将 observed (被动记录) 消息转为 user role，供 LLM API 使用
+            # 拷贝一份避免修改数据库原始数据
+            context_messages = [
+                {**msg, "role": "user"} if msg.get("role") == "observed" else msg
+                for msg in context_messages_raw
+            ]
             logger.info(f"[ChatEngine] 已加载 {len(context_messages)} 条上下文消息")
 
             # ---------- 格式化用户消息 ----------

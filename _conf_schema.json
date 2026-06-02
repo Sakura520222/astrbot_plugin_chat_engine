@@ -81,6 +81,12 @@
         "default": "",
         "hint": "格式: mysql+aiomysql://user:password@host:port/dbname"
     },
+    "enable_passive_record": {
+        "description": "启用被动记录群聊消息",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，群聊中未触发回复的消息也会记录到上下文中，丰富 LLM 对群聊的感知。仅对群聊生效。"
+    },
     "enable_split_send": {
         "description": "启用分段发送",
         "type": "bool",

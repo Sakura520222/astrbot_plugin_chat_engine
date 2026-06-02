@@ -26,12 +26,15 @@ class BaseCompressor(ABC):
     @staticmethod
     def split_into_turns(messages: list[dict]) -> list[list[dict]]:
         """将消息列表拆分为逻辑轮次。
-        每个轮次以 user 消息开始，包含后续所有 tool 调用/结果，直到下一条 user 消息。
+
+        每个轮次以 user 消息开始，包含后续所有 tool 调用/结果/observed，
+        直到下一条 user 消息。observed (被动记录) 消息不会独立开轮。
         """
         turns: list[list[dict]] = []
         current_turn: list[dict] = []
         for msg in messages:
-            if msg.get("role") == "user" and current_turn:
+            role = msg.get("role")
+            if role == "user" and current_turn:
                 turns.append(current_turn)
                 current_turn = []
             current_turn.append(msg)
