@@ -235,6 +235,10 @@ class ChatWebServer:
             "max_tool_rounds",
             "db_type",
             "mysql_url",
+            "enable_split_send",
+            "split_pattern",
+            "max_segments",
+            "split_delay_ms",
         ]
         config_data = {}
         for key in config_keys:
@@ -253,6 +257,10 @@ class ChatWebServer:
             "require_at_in_group",
             "enable_tool_calls",
             "max_tool_rounds",
+            "enable_split_send",
+            "split_pattern",
+            "max_segments",
+            "split_delay_ms",
         ]
         for key in allowed_keys:
             if key in data:

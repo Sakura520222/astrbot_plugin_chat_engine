@@ -9,7 +9,10 @@
 - WebUI 管理面板 (独立 aiohttp 服务)
 """
 
+import asyncio
+import inspect
 import json
+import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -255,7 +258,20 @@ class ChatEnginePlugin(Star):
             logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
 
             if response_text:
-                yield event.plain_result(response_text)
+                segments = self._split_response(response_text)
+                if len(segments) <= 1:
+                    yield event.plain_result(response_text)
+                else:
+                    logger.info(
+                        f"[ChatEngine] 分段发送: {len(segments)} 段"
+                    )
+                    for seg_idx, segment in enumerate(segments):
+                        yield event.plain_result(segment)
+                        if seg_idx < len(segments) - 1:
+                            delay_ms = int(
+                                self.config.get("split_delay_ms", 800)
+                            )
+                            await asyncio.sleep(delay_ms / 1000)
 
             if hasattr(final_response, "result_chain") and final_response.result_chain:
                 for comp in final_response.result_chain.chain:
@@ -402,11 +418,27 @@ class ChatEnginePlugin(Star):
             if hasattr(tool, "handler") and tool.handler:
                 # 插件注册的工具 (通过 @filter.llm_tool)
                 # 这些 handler 通常接收 event 作为第一个参数
+                # 部分插件 handler 是 async generator (使用 yield)，不能直接 await
+                result = None
+
+                # 尝试传入 event + tool_args
                 try:
-                    result = await tool.handler(event, **tool_args)
+                    ret = tool.handler(event, **tool_args)
                 except TypeError:
-                    # 如果 handler 不接受 event 参数
-                    result = await tool.handler(**tool_args)
+                    # handler 不接受 event 参数
+                    ret = tool.handler(**tool_args)
+
+                if inspect.isasyncgen(ret):
+                    # async generator — 用 async for 收集所有 yield 的值
+                    parts = []
+                    async for item in ret:
+                        if item is not None:
+                            parts.append(item)
+                    result = parts[-1] if parts else None
+                elif inspect.isawaitable(ret):
+                    result = await ret
+                else:
+                    result = ret
             elif hasattr(tool, "call"):
                 # 内置工具 (FunctionTool 子类) — 需要完整的 ContextWrapper
                 from astrbot.core.agent.run_context import ContextWrapper
@@ -448,6 +480,53 @@ class ChatEnginePlugin(Star):
                 {"error": f"工具执行失败: {type(e).__name__}: {str(e)}"},
                 ensure_ascii=False,
             )
+
+    def _split_response(self, text: str) -> list[str]:
+        """将 LLM 回复按配置的分段符号拆分。
+
+        使用 re.split + 捕获组保留分隔符，将文本拆为多段。
+        超过 max_segments 时，从尾部合并多余段落。
+        未启用分段或只有一段时直接返回原文。
+        """
+        if not text:
+            return []
+
+        if not self.config.get("enable_split_send", False):
+            return [text]
+
+        pattern = self.config.get("split_pattern", r"[。！？\n]")
+        max_segments = int(self.config.get("max_segments", 5))
+
+        try:
+            # re.split 捕获组会保留分隔符: [text, delim, text, delim, ...]
+            parts = re.split(f"({pattern})", text)
+        except re.error:
+            logger.warning(f"[ChatEngine] 分段正则无效: {pattern}，跳过分段")
+            return [text]
+
+        # 将 text+delim 配对合并
+        segments = []
+        i = 0
+        while i < len(parts):
+            segment = parts[i]
+            if i + 1 < len(parts):
+                segment += parts[i + 1]  # 追加分隔符
+                i += 2
+            else:
+                i += 1
+            if segment.strip():
+                segments.append(segment.strip())
+
+        if len(segments) <= 1:
+            return [text]
+
+        # 超过最大分段数时，合并尾部段落
+        if len(segments) > max_segments:
+            merged = segments[: max_segments - 1]
+            merged.append("".join(segments[max_segments - 1 :]))
+            segments = merged
+
+        return segments
 
     def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
         """从消息事件中提取图片 URL 列表"""

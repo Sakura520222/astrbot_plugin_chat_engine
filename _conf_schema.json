@@ -80,5 +80,29 @@
         "type": "string",
         "default": "",
         "hint": "格式: mysql+aiomysql://user:password@host:port/dbname"
+    },
+    "enable_split_send": {
+        "description": "启用分段发送",
+        "type": "bool",
+        "default": false,
+        "hint": "将 LLM 回复按标点符号拆分为多条消息分段发送，模拟真人打字节奏。"
+    },
+    "split_pattern": {
+        "description": "分段匹配符号 (正则)",
+        "type": "string",
+        "default": "[。！？\\n]",
+        "hint": "用于拆分 LLM 回复的正则表达式。匹配到的符号作为分段点。"
+    },
+    "max_segments": {
+        "description": "最大分段数",
+        "type": "int",
+        "default": 5,
+        "hint": "单次回复最多拆分成多少段发送。超过则合并后面的段落。"
+    },
+    "split_delay_ms": {
+        "description": "分段发送间隔 (毫秒)",
+        "type": "int",
+        "default": 800,
+        "hint": "每段消息之间的发送延迟，模拟打字节奏。"
     }
 }
