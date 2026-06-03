@@ -191,7 +191,7 @@ class ChatEnginePlugin(Star):
                                     f"[ChatEngine] 纯图片被动记录到 {passive_key}"
                                 )
                         except Exception as e:
-                            logger.debug(f"[ChatEngine] 纯图片被动记录失败: {e}")
+                            logger.warning(f"[ChatEngine] 纯图片被动记录失败: {e}")
                 else:
                     logger.info("[ChatEngine] 空消息，跳过")
                 event.should_call_llm(False)
@@ -416,7 +416,7 @@ class ChatEnginePlugin(Star):
                 )
                 logger.info("[ChatEngine] 上下文已保存")
             finally:
-                session_lock.release()
+                self.context_mgr.release_session_lock(session_key)
 
         except Exception as e:
             logger.error(f"[ChatEngine] 顶层异常: {e}", exc_info=True)
@@ -726,6 +726,8 @@ class ChatEnginePlugin(Star):
                                 fmt = "gif"
                             elif b64.startswith("UklG"):
                                 fmt = "webp"
+                            elif b64.startswith("Qk"):
+                                fmt = "bmp"
                             else:
                                 fmt = "jpeg"
                             urls.append(f"data:image/{fmt};base64,{b64}")

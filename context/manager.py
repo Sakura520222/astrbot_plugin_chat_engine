@@ -16,8 +16,6 @@ from .token_counter import TokenEstimator
 class ChatContextManager:
     """上下文管理器 — 管理会话、用户标识、上下文存取与压缩"""
 
-    _session_locks: dict[str, asyncio.Lock]
-
     def __init__(
         self,
         session_repo: SessionRepository,
@@ -34,13 +32,26 @@ class ChatContextManager:
         )
         self.token_counter = TokenEstimator()
         self._cached_modalities: list[str] | None = None
+        self._cached_max_context_tokens: int | None = None
         self._session_locks: dict[str, asyncio.Lock] = {}
 
     def get_session_lock(self, session_key: str) -> asyncio.Lock:
-        """获取会话级别的异步锁，确保同一会话的消息串行处理。"""
+        """获取会话级别的异步锁，确保同一会话的消息串行处理。
+
+        锁释放后若无等待者则自动从字典中移除，避免长期运行内存增长。
+        """
         if session_key not in self._session_locks:
             self._session_locks[session_key] = asyncio.Lock()
         return self._session_locks[session_key]
+
+    def release_session_lock(self, session_key: str) -> None:
+        """释放会话锁并清理无等待者的条目。"""
+        lock = self._session_locks.get(session_key)
+        if lock and lock.locked():
+            lock.release()
+        if lock and not lock.locked() and not asyncio.get_event_loop().is_closed():
+            # 无等待者时移除，避免字典无限增长
+            self._session_locks.pop(session_key, None)
 
     def build_session_key(self, event) -> str:
         """根据消息事件构建会话 key。
@@ -101,24 +112,20 @@ class ChatContextManager:
     async def get_max_context_tokens(self, provider) -> int:
         """获取模型最大上下文 Token 数。
 
-        优先从 provider 配置获取，成功时自动回填到插件配置，
+        优先从 provider 配置获取，成功时缓存到实例变量，
         确保 provider 不可用时也有合理的备选值。
         """
-        max_tokens = 0
         try:
             max_tokens = provider.provider_config.get("max_context_tokens", 0)
         except Exception:
-            pass
+            max_tokens = 0
         if max_tokens > 0:
-            # 自动回填到插件配置，确保 provider 不可用时也有合理的备选值
-            self.config["fallback_max_context_tokens"] = max_tokens
+            self._cached_max_context_tokens = max_tokens
             return max_tokens
-        # provider 未报告，使用配置中的备选值（可能由之前自动回填）
-        try:
-            max_tokens = int(self.config.get("fallback_max_context_tokens", 128000))
-        except (ValueError, TypeError):
-            max_tokens = 128000
-        return max_tokens
+        # provider 未报告，使用缓存的备选值
+        if self._cached_max_context_tokens is not None:
+            return self._cached_max_context_tokens
+        return 128000
 
     async def get_modalities(self, provider) -> list[str]:
         """获取模型支持的模态能力列表。
