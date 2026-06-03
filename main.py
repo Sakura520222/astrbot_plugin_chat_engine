@@ -237,7 +237,20 @@ class ChatEnginePlugin(Star):
                         passive_text = self.context_mgr.format_user_message(event)
                         # 使用 "observed" role 而非 "user"，防止压缩器
                         # 将每条被动消息都计为独立一轮
-                        passive_msg = {"role": "observed", "content": passive_text}
+                        passive_images = await self._extract_image_urls(event)
+                        if passive_images:
+                            passive_msg = {
+                                "role": "observed",
+                                "content": [
+                                    {"type": "text", "text": passive_text},
+                                ]
+                                + [
+                                    {"type": "image_url", "image_url": {"url": url}}
+                                    for url in passive_images
+                                ],
+                            }
+                        else:
+                            passive_msg = {"role": "observed", "content": passive_text}
                         await self.context_mgr.record_passive_message(
                             passive_key, passive_msg
                         )
@@ -264,10 +277,8 @@ class ChatEnginePlugin(Star):
             logger.info(f"[ChatEngine] 会话 Key: {session_key}")
 
             # 获取会话锁，确保同一会话的消息串行处理（防止竞态条件）
-            session_lock = self.context_mgr.get_session_lock(session_key)
-            await session_lock.acquire()
+            async with self.context_mgr.get_session_lock(session_key):
 
-            try:
                 #  加载上下文
                 context_messages_raw = await self.context_mgr.load_context(session_key)
                 # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
@@ -415,8 +426,6 @@ class ChatEnginePlugin(Star):
                     session_key, user_msg, assistant_msg, provider=provider
                 )
                 logger.info("[ChatEngine] 上下文已保存")
-            finally:
-                self.context_mgr.release_session_lock(session_key)
 
         except Exception as e:
             logger.error(f"[ChatEngine] 顶层异常: {e}", exc_info=True)
@@ -726,7 +735,7 @@ class ChatEnginePlugin(Star):
                                 fmt = "gif"
                             elif b64.startswith("UklG"):
                                 fmt = "webp"
-                            elif b64.startswith("Qk"):
+                            elif b64.startswith("Qk0"):
                                 fmt = "bmp"
                             else:
                                 fmt = "jpeg"

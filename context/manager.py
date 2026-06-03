@@ -16,6 +16,8 @@ from .token_counter import TokenEstimator
 class ChatContextManager:
     """上下文管理器 — 管理会话、用户标识、上下文存取与压缩"""
 
+    _session_locks: dict[str, asyncio.Lock]
+
     def __init__(
         self,
         session_repo: SessionRepository,
@@ -38,20 +40,11 @@ class ChatContextManager:
     def get_session_lock(self, session_key: str) -> asyncio.Lock:
         """获取会话级别的异步锁，确保同一会话的消息串行处理。
 
-        锁释放后若无等待者则自动从字典中移除，避免长期运行内存增长。
+        锁条目随会话数增长（用户/群聊数量级），不会无限膨胀。
         """
         if session_key not in self._session_locks:
             self._session_locks[session_key] = asyncio.Lock()
         return self._session_locks[session_key]
-
-    def release_session_lock(self, session_key: str) -> None:
-        """释放会话锁并清理无等待者的条目。"""
-        lock = self._session_locks.get(session_key)
-        if lock and lock.locked():
-            lock.release()
-        if lock and not lock.locked() and not asyncio.get_event_loop().is_closed():
-            # 无等待者时移除，避免字典无限增长
-            self._session_locks.pop(session_key, None)
 
     def build_session_key(self, event) -> str:
         """根据消息事件构建会话 key。
