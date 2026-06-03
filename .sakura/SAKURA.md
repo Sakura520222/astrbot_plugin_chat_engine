@@ -1,44 +1,40 @@
 # 项目概述：astrbot_plugin_chat_engine
 
 ## 1. 项目简介
-
-这是一个为 AstrBot 框架开发的聊天增强插件，旨在完全替代其内置的聊天功能，提供独立、可配置的对话上下文管理、多用户识别、人格系统及工具调用能力。
+AstrBot 聊天增强插件，完全替代内置聊天功能，提供独立的上下文管理、多用户识别、人格系统、Tool Calls、上下文压缩和 WebUI 管理面板。
 
 ## 2. 技术栈
-
-*   **核心语言**：Python（主逻辑）、JavaScript/HTML/CSS（WebUI前端）
-*   **框架与库**：
-    *   **数据库**：SQLAlchemy (ORM)、aiosqlite / aiosqlite (异步SQLite)、MySQL
-    *   **Web服务**：aiohttp (用于提供独立的管理界面REST API)
-    *   **异步架构**：基于 asyncio 的异步I/O设计
-*   **集成目标**：AstrBot v4.25+，支持 QQ OneBot (aiocqhttp) 和 Telegram 等平台。
+- **核心**：Python（主逻辑）、JavaScript/HTML/CSS（WebUI 前端）
+- **数据库**：SQLAlchemy ORM、aiosqlite（异步SQLite）、MySQL
+- **Web服务**：aiohttp REST API
+- **异步架构**：基于 asyncio 的异步 I/O 设计
+- **集成目标**：AstrBot v4.25+，支持 QQ OneBot / Telegram
 
 ## 3. 项目结构
+- `main.py`：插件入口，消息拦截 + LLM 调用编排 + 配置读取
+- `db/`：独立数据层（models、engine、session_repo、persona_repo、tool_config_repo）
+- `context/`：上下文管理核心（manager、compressor、token_counter）
+- `persona/`：独立人格管理（CRUD + 活跃人格切换）
+- `tools/`：工具扫描（scanner）与启用/禁用管理（manager）
+- `web/`：aiohttp REST API 服务端 + 静态前端
 
-核心模块与目录职责如下：
+## 4. 已识别的架构模式与规范
+- **配置安全规范**：所有配置读取必须通过 `_cfg_int`/`_cfg_float`/`_cfg_bool` 辅助方法，禁止裸类型转换；需定义配置值的类型与语义契约
+- **防御性编程**：try/except 中使用变量须在块外预初始化；异常路径本身须比主流程更健壮
+- **管道连接点审查**：消息处理流程（记录→压缩→保存→截断→分段发送）的串联点是高风险区，需确保步骤间输出完整传递
+- **异步资源管理**：优先使用 `async with` 管理锁；禁止在同步方法中 `release()` 后立即清理锁；`_session_locks` 字典须有生命周期清理策略
+- **DRY（意图级）**：重复检测不止于代码文本，更应从"逻辑意图"层面识别（如持久化意图被多处表达）
+- **前端安全**：动态生成的 HTML 属性值须统一使用 `escapeHtml`
+- **配置与缓存分离**：持久化配置（`_conf_schema.json`）与运行时缓存应使用独立变量，禁止向 config 写入非声明键
 
-*   `main.py`：插件入口。负责消息拦截、LLM调用编排以及协调各功能模块。
-*   `db/`：独立的数据持久化层。
-    *   `models.py`：定义人格、会话、工具配置等数据模型。
-    *   `engine.py`：管理数据库引擎与会话。
-    *   `session_repo.py`, `persona_repo.py`, `tool_config_repo.py`：提供各数据模型的CRUD操作。
-*   `context/`：核心的上下文管理模块。
-    *   `manager.py`：管理会话键（群聊/私聊隔离）、用户标识格式化以及触发上下文压缩。
-    *   `compressor.py`：实现“轮数限制”和“Token阈值”两种上下文压缩策略。
-    *   `token_counter.py`：估算文本的Token数量，为压缩策略提供依据。
-*   `persona/`：独立的人格（System Prompt）管理模块。
-    *   `manager.py`：处理人格的增删改查及当前活跃人格的切换。
-*   `tools/`：工具调用集成模块。
-    *   `scanner.py`：扫描并获取AstrBot已注册的所有可用工具（内置、插件、MCP）。
-    *   `manager.py`：管理工具的启用/禁用状态。
-*   `web/`：独立的Web管理面板。
-    *   `server.py`：基于aiohttp的REST API服务端。
-    *   `static/`：存放前端HTML、CSS和JavaScript文件。
+## 5. 关键经验教训
+- 增量审查须保持"全局嗅觉"，主动扫描同模式代码，从"点状修复"推向"模式级消除"
+- 异步编程中 `release()` 仅唤醒等待者而非调度，基于 `locked()` 的状态判断不可靠
+- 对用户配置须进行"恶意/意外输入"压力测试：空值、负值、极大值、特殊字符
+- 评估新功能需同步考虑其维护成本与数据生命周期
 
-## 4. 开发约定（推断）
+## 6. 兼容性
+- AstrBot v4.25+，平台 QQ OneBot / Telegram，数据库 SQLite / MySQL，Python 3.10+
 
-*   **模块化与独立性**：插件作为一个独立单元开发，拥有自己独立的数据库MetaData，避免与AstrBot宿主框架的全局模型产生冲突。
-*   **异步优先**：核心组件（Web服务、数据库操作）广泛采用异步（`async/await`）设计，以适应AstrBot的事件驱动和并发消息处理场景。
-*   **配置驱动**：通过`_conf_schema.json`和`metadata.yaml`定义大量可配置项（如压缩模式、WebUI端口、用户标识格式），行为高度可定制。
-*   **分层架构**：清晰地分为数据层（`db`）、业务逻辑层（`context`, `persona`, `tools`）、接口层（`main.py`消息处理, `web/` REST API）。
-*   **事件钩子集成**：通过AstrBot提供的`@filter`装饰器和事件接口（如`event.should_call_llm(True)`）来拦截消息流并注入自定义逻辑，实现与宿主框架的深度集成。
+---
+累计反思 10 次
