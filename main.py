@@ -412,6 +412,9 @@ class ChatEnginePlugin(Star):
                 response_text = final_response.completion_text or ""
                 logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
 
+                # 文本清洗 (在分段发送之前)
+                response_text = self._clean_response(response_text)
+
                 if response_text:
                     segments = self._split_response(response_text)
                     if len(segments) <= 1:
@@ -726,6 +729,87 @@ class ChatEnginePlugin(Star):
             segments = merged
 
         return segments
+
+    # Emoji 正则: 包含 Unicode Emoji 属性的字符
+    _EMOJI_RE = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # Emoticons
+        "\U0001F300-\U0001F5FF"  # Symbols & Pictographs
+        "\U0001F680-\U0001F6FF"  # Transport & Map
+        "\U0001F1E0-\U0001F1FF"  # Flags
+        "\U00002702-\U000027B0"  # Dingbats
+        "\U0000FE00-\U0000FE0F"  # Variation Selectors
+        "\U0001F900-\U0001F9FF"  # Supplemental Symbols
+        "\U0001FA00-\U0001FA6F"  # Chess Symbols
+        "\U0001FA70-\U0001FAFF"  # Symbols Extended-A
+        "\U00002600-\U000026FF"  # Misc Symbols
+        "\U0000200D"             # Zero Width Joiner
+        "\U0000FE0F"             # Variation Selector-16
+        "\U00002B50"             # Star
+        "\U00002B55"             # Circle
+        "\U0000231A-\U0000231B"  # Watch/Hourglass
+        "\U000023E9-\U000023F3"  # Various symbols
+        "\U000023F8-\U000023FA"  # Various symbols
+        "\U000025AA-\U000025AB"  # Squares
+        "\U000025B6"             # Play button
+        "\U000025C0"             # Reverse button
+        "\U000025FB-\U000025FE"  # Squares
+        "\U00002934-\U00002935"  # Arrows
+        "\U00002B05-\U00002B07"  # Arrows
+        "\U00002B1B-\U00002B1C"  # Squares
+        "\U00003030"             # Wavy Dash
+        "\U0000303D"             # Part Alternation Mark
+        "\U00003297"             # Circled Ideograph Congratulation
+        "\U00003299"             # Circled Ideograph Secret
+        "]+",
+        flags=re.UNICODE,
+    )
+
+    # 括号及其内容: 中英文括号
+    _BRACKET_RE = re.compile(
+        r"[\(（\[【][^\)）\]】]*?[\)）\]】]"
+    )
+
+    def _clean_response(self, text: str) -> str:
+        """对 LLM 回复进行文本清洗。
+
+        根据配置可选清洗以下内容:
+        - Emoji 表情符号
+        - 括号块及内容: ()（）[]【】
+        - 句尾多余字符 (波浪号、多余标点等)
+        """
+        if not text:
+            return text
+
+        if not self._cfg_bool("enable_text_clean", False):
+            return text
+
+        cleaned = text
+
+        # 1. 去除 Emoji
+        if self._cfg_bool("clean_emoji", True):
+            cleaned = self._EMOJI_RE.sub("", cleaned)
+
+        # 2. 去除括号及内容
+        if self._cfg_bool("clean_brackets", True):
+            cleaned = self._BRACKET_RE.sub("", cleaned)
+
+        # 3. 清理句尾字符
+        if self._cfg_bool("clean_trailing_chars", True):
+            pattern = self.config.get(
+                "trailing_chars_pattern", r"[~～\.\。!！?？…·•\-—_\s]+$"
+            )
+            try:
+                cleaned = re.sub(pattern, "", cleaned, flags=re.MULTILINE)
+            except re.error:
+                pass  # 正则无效时跳过
+
+        # 4. 清理多余空白: 多空格合并、行首行尾空格
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)  # 多空格→单空格
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)  # 多空行→双空行
+        cleaned = cleaned.strip()
+
+        return cleaned
 
     async def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
         """从消息事件中提取图片并转换为 base64 data URL 列表。
