@@ -149,7 +149,8 @@ class ChatContextManager:
             if self.config.get("fallback_max_context_tokens") != max_tokens:
                 self.config["fallback_max_context_tokens"] = max_tokens
                 try:
-                    self.config.save_config()
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, self.config.save_config)
                 except Exception:
                     pass
             return max_tokens

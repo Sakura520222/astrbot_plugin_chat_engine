@@ -1,5 +1,8 @@
 """Independent aiohttp Web server for the Chat Engine plugin management UI."""
 
+import json
+import traceback
+from copy import deepcopy
 from pathlib import Path
 
 from aiohttp import web
@@ -222,9 +225,6 @@ class ChatWebServer:
         展示加载后经过所有处理（observed→user、图片解析、模态过滤等）
         的最终上下文，以及 system prompt、工具列表和 token 估算。
         """
-        import json as _json
-        import traceback
-
         try:
             from astrbot.core.provider.modalities import (
                 sanitize_contexts_by_modalities,
@@ -255,8 +255,6 @@ class ChatWebServer:
             filtered_contexts = contexts
             stats = None
             if modalities:
-                from copy import deepcopy
-
                 filtered_contexts, stats = sanitize_contexts_by_modalities(
                     deepcopy(contexts), modalities
                 )
@@ -296,7 +294,9 @@ class ChatWebServer:
             result = {
                 "session_key": session_key,
                 "provider": (
-                    provider.meta().id if provider and hasattr(provider, "meta") else None
+                    provider.meta().id
+                    if provider and hasattr(provider, "meta")
+                    else None
                 ),
                 "modalities": modalities,
                 "system_prompt": system_prompt,
@@ -308,14 +308,12 @@ class ChatWebServer:
                 "estimated_tokens": estimated_tokens,
                 "filter_summary": filter_summary,
             }
-            body = _json.dumps(result, ensure_ascii=False, default=str)
+            body = json.dumps(result, ensure_ascii=False, default=str)
             return web.Response(body=body, content_type="application/json")
         except Exception as e:
             logger.error(f"LLM 预览异常: {e}\n{traceback.format_exc()}")
             return web.Response(
-                body=_json.dumps(
-                    {"error": str(e)}, ensure_ascii=False, default=str
-                ),
+                body=json.dumps({"error": str(e)}, ensure_ascii=False, default=str),
                 content_type="application/json",
                 status=500,
             )
