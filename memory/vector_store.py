@@ -2,10 +2,12 @@
 
 import asyncio
 import hashlib
+import json
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from astrbot.api import logger
 
@@ -29,15 +31,7 @@ class LongTermMemoryStore:
         self._rerank_getter = rerank_getter
         self._instances: dict[str, "FaissVecDB"] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-
-        ep = self._get_embedding_provider()
-        if not ep:
-            logger.warning("[Memory] 未找到 EmbeddingProvider，长期记忆功能不可用")
-        else:
-            logger.info(
-                f"[Memory] EmbeddingProvider: {type(ep).__name__}, "
-                f"model={getattr(ep, 'model_name', 'unknown')}"
-            )
+        logger.info("[Memory] 长期记忆存储已创建（EmbeddingProvider 延迟检测）")
 
     def _get_embedding_provider(self):
         """动态获取 EmbeddingProvider，每次调用取最新实例。"""
@@ -233,9 +227,11 @@ class LongTermMemoryStore:
             docs = await doc_store.get_documents(metadata_filters={})
             result = []
             for doc in docs:
-                meta = doc.get("metadata", {})
+                # metadata 在 DocumentStorage 中是 JSON 字符串，需要解析
+                raw_meta = doc.get("metadata", "{}")
+                meta = json.loads(raw_meta) if isinstance(raw_meta, str) else (raw_meta or {})
                 result.append({
-                    "id": meta.get("id", str(doc.get("id", ""))),
+                    "id": meta.get("id", str(doc.get("doc_id", ""))),
                     "content": doc.get("text", ""),
                     "source": meta.get("source", ""),
                     "created_at": meta.get("created_at", ""),

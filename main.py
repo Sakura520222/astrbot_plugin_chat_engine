@@ -135,8 +135,11 @@ class ChatEnginePlugin(Star):
                 self.memory_mgr = MemoryManager(
                     config=self.config,
                     data_dir=data_dir,
-                    embedding_providers=self.context.get_all_embedding_providers(),
-                    rerank_providers=getattr(self.context.provider_manager, "rerank_provider_insts", []),
+                    # 传入 getter 函数，运行时动态获取 provider（插件加载先于 provider 初始化）
+                    embedding_getter=lambda: self.context.get_all_embedding_providers(),
+                    rerank_getter=lambda: getattr(
+                        self.context.provider_manager, "rerank_provider_insts", []
+                    ),
                     provider_getter=_get_provider,
                 )
                 await self.memory_mgr.initialize()
@@ -383,6 +386,10 @@ class ChatEnginePlugin(Star):
                         tool_desc = await self.tool_mgr.build_tool_description_text()
                         if tool_desc:
                             system_prompt += f"\n\n## 可用工具\n\n{tool_desc}"
+
+                        # 记忆工具使用指引
+                        if self.memory_mgr:
+                            system_prompt += self._build_memory_tool_guidance()
                     except Exception as e:
                         logger.warning(
                             f"[ChatEngine] 构建工具集失败: {e}", exc_info=True
@@ -972,6 +979,23 @@ class ChatEnginePlugin(Star):
         return None
 
     # 记忆工具 — LLM Tool Call
+
+    @staticmethod
+    def _build_memory_tool_guidance() -> str:
+        """构建记忆工具的使用指引，注入到 system prompt 中。"""
+        return """
+
+## Memory Tool Usage Guide
+
+You have access to memory tools (save_memory, search_memory, update_memory, delete_memory). Use them proactively:
+
+- **save_memory**: When the user shares personal preferences, habits, important facts, or explicitly says things like "记住了", "记住", "别忘了", "记住这个". Choose type="long_term" for persistent facts (preferences, identity) or type="short_term" for temporary context (current topic, recent plans).
+- **search_memory**: Before answering questions about the user's preferences or past discussions, search your long-term memory for relevant context.
+- **update_memory**: When the user corrects or updates previously remembered information.
+- **delete_memory**: When the user explicitly asks to forget something.
+
+Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these memory tools to the user — just use them naturally when appropriate.
+"""
 
     @filter.llm_tool(name="save_memory")
     async def tool_save_memory(self, event: AstrMessageEvent, content: str, type: str):

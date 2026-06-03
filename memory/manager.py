@@ -18,17 +18,18 @@ class MemoryManager:
         self,
         config: dict,
         data_dir: str,
-        embedding_providers: list,
-        rerank_providers: list,
+        embedding_getter=None,
+        rerank_getter=None,
         provider_getter=None,
     ):
         self.config = config
         self.data_dir = data_dir
 
-        # 使用 getter 模式：不缓存 provider 实例，每次动态获取
-        # 避免引用已关闭的 httpx 客户端
-        self._embedding_providers_list = embedding_providers
-        self._rerank_providers_list = rerank_providers
+        # 使用 getter 函数动态获取 provider
+        # AstrBot 的插件加载先于 Provider 初始化，所以初始化时 provider 列表可能为空
+        # 每次实际使用时通过 getter 获取最新的 provider 实例
+        self._embedding_getter = embedding_getter
+        self._rerank_getter = rerank_getter
         self._provider_getter = provider_getter
 
         self.short_term: ShortTermMemoryStore = None
@@ -40,16 +41,15 @@ class MemoryManager:
         self.short_term = ShortTermMemoryStore(self.data_dir)
         self.long_term = LongTermMemoryStore(
             self.data_dir,
-            embedding_getter=lambda: self._embedding_providers_list,
-            rerank_getter=lambda: self._rerank_providers_list,
+            embedding_getter=self._embedding_getter,
+            rerank_getter=self._rerank_getter,
         )
         self.summarizer = MemorySummarizer(self.config)
 
-        if self._embedding_providers_list:
-            logger.info("[Memory] 长期记忆: 已启用")
-        else:
-            logger.warning("[Memory] 长期记忆: 未找到 EmbeddingProvider，长期记忆不可用")
+        # 注意：此时 AstrBot 的 Provider 可能尚未初始化
+        # 长期记忆的实际可用性在第一次使用时动态检测
         logger.info("[Memory] 短期记忆: 已启用")
+        logger.info("[Memory] 长期记忆: 延迟检测（首次使用时确认 EmbeddingProvider）")
 
     # 配置读取辅助 (与 main.py 相同模式)
 
