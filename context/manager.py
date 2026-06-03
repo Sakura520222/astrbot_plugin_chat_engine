@@ -87,17 +87,25 @@ class ChatContextManager:
             return []
 
     async def get_max_context_tokens(self, provider) -> int:
-        """获取模型最大上下文 Token 数"""
+        """获取模型最大上下文 Token 数。
+
+        优先从 provider 配置获取，成功时自动回填到插件配置，
+        确保 provider 不可用时也有合理的备选值。
+        """
         max_tokens = 0
         try:
             max_tokens = provider.provider_config.get("max_context_tokens", 0)
         except Exception:
             pass
-        if max_tokens <= 0:
-            try:
-                max_tokens = int(self.config.get("fallback_max_context_tokens", 128000))
-            except (ValueError, TypeError):
-                max_tokens = 128000
+        if max_tokens > 0:
+            # 自动回填到插件配置，确保 provider 不可用时也有合理的备选值
+            self.config["fallback_max_context_tokens"] = max_tokens
+            return max_tokens
+        # provider 未报告，使用配置中的备选值（可能由之前自动回填）
+        try:
+            max_tokens = int(self.config.get("fallback_max_context_tokens", 128000))
+        except (ValueError, TypeError):
+            max_tokens = 128000
         return max_tokens
 
     async def _load_compress_save(

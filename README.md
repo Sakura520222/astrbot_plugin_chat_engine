@@ -62,7 +62,7 @@
 | `max_turns` | `50` | 最大保留轮数 (轮数模式) |
 | `token_threshold_ratio` | `0.8` | Token 触发阈值比例 |
 | `keep_recent_turns` | `5` | 压缩后保留轮数 |
-| `fallback_max_context_tokens` | `128000` | 模型未报告时的 Token 备选值 |
+| `fallback_max_context_tokens` | `128000` | 模型最大上下文 Token，自动从 Provider 获取，通常无需手动修改 |
 | `user_id_format` | `{{user}{NAME}({ID})}说：` | 用户标识格式 |
 | `require_at_in_group` | `true` | 群聊是否需要 @Bot |
 | `enable_tool_calls` | `true` | 启用原生 Function Calling |

@@ -252,7 +252,7 @@ class ChatEnginePlugin(Star):
                 logger.info("[ChatEngine] Tool Calls 已禁用")
 
             # ---------- Token 安全截断 ----------
-            context_messages = self._trim_context_to_fit(
+            context_messages = await self._trim_context_to_fit(
                 context_messages, provider
             )
 
@@ -520,7 +520,7 @@ class ChatEnginePlugin(Star):
                 ensure_ascii=False,
             )
 
-    def _trim_context_to_fit(
+    async def _trim_context_to_fit(
         self, messages: list[dict], provider
     ) -> list[dict]:
         """Token 安全截断：确保上下文不超过模型阈值。
@@ -528,19 +528,8 @@ class ChatEnginePlugin(Star):
         从最旧的消息开始移除，直到总量低于阈值。
         被动记录的大量消息通常在最前面，会优先被裁剪。
         """
-        # 获取模型最大 token 数
-        max_tokens = 0
-        try:
-            max_tokens = provider.provider_config.get("max_context_tokens", 0)
-        except Exception:
-            pass
-        if max_tokens <= 0:
-            try:
-                max_tokens = int(
-                    self.config.get("fallback_max_context_tokens", 128000)
-                )
-            except (ValueError, TypeError):
-                max_tokens = 128000
+        # 获取模型最大 token 数（自动从 provider 获取并回填到配置）
+        max_tokens = await self.context_mgr.get_max_context_tokens(provider)
 
         # 保留比例 (与 token 压缩模式共用同一个配置)
         ratio = float(self.config.get("token_threshold_ratio", 0.8))

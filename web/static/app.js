@@ -371,7 +371,7 @@ const CONFIG_FIELDS = [
     { key: 'max_turns', label: '最大保留轮数', type: 'number', hint: '轮数模式下最大保留的对话轮次。' },
     { key: 'token_threshold_ratio', label: 'Token 阈值比例', type: 'number', step: '0.05', hint: 'Token 模式下触发压缩的阈值比例 (0.5-0.95)。' },
     { key: 'keep_recent_turns', label: '压缩后保留轮数', type: 'number', hint: 'Token 模式下压缩后保留最近多少轮。' },
-    { key: 'fallback_max_context_tokens', label: 'Fallback 最大 Token', type: 'number', hint: '模型未报告上下文 Token 时的备选值。' },
+    { key: 'fallback_max_context_tokens', label: '最大上下文 Token (自动检测)', type: 'number', hint: '自动从 Provider 获取，通常无需手动修改。' },
     { key: 'user_id_format', label: '用户标识格式', type: 'text', hint: '群聊中用户消息前缀。{NAME}=昵称, {ID}=用户ID。' },
     { key: 'require_at_in_group', label: '群聊需要 @Bot', type: 'checkbox', hint: '开启后群聊只有 @Bot 才触发回复。' },
     { key: 'enable_tool_calls', label: '启用 Tool Calls', type: 'checkbox', hint: '是否启用原生 Function Calling。' },
