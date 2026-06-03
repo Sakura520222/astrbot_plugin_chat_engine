@@ -720,6 +720,8 @@ class ChatEnginePlugin(Star):
             elif split_mode == "smart":
                 # 智能分段: 先按换行拆行，保护对话文本不被劈断
                 # 对含引号的行保留整行，对纯叙述行再按标点细分
+                # 仅包含对话引号，不含（）【】等括号
+                # 括号常用于动作描写(微笑)或标注【重点】，不属于对话边界
                 quote_chars = """“”‘’「」『』"""
                 # 标点后跟非引号字符 (即行内标点不作为分割点)
                 punct_then_nonquote = (
@@ -760,9 +762,10 @@ class ChatEnginePlugin(Star):
                 ):
                     segments.append(m.group())
                     last_end = m.end()
-                    tail = text[last_end:]
-                    if tail.strip():
-                        segments.append(tail)
+                # 循环结束后处理尾部文本
+                tail = text[last_end:]
+                if tail.strip():
+                    segments.append(tail)
                 segments = [s.strip() for s in segments if s.strip()]
         except re.error:
             logger.warning(f"[ChatEngine] 分段正则无效: {pattern}，跳过分段")
