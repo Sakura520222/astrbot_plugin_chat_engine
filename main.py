@@ -63,12 +63,20 @@ class ChatEnginePlugin(Star):
             return default
 
     def _cfg_bool(self, key: str, default: bool) -> bool:
-        """安全读取 bool 配置项，支持字符串 "true"/"false" 转换"""
+        """安全读取 bool 配置项，支持字符串和数值类型转换"""
         val = self.config.get(key, default)
         if isinstance(val, bool):
             return val
         if isinstance(val, str):
-            return val.lower() in ("true", "1", "yes")
+            lower = val.lower()
+            if lower in ("true", "1", "yes"):
+                return True
+            if lower in ("false", "0", "no"):
+                return False
+            logger.warning(f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}")
+            return default
+        if isinstance(val, (int, float)):
+            return bool(val)
         return default
 
     async def initialize(self):

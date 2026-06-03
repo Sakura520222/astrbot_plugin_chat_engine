@@ -139,9 +139,10 @@ class ChatContextManager:
                 max_tokens = await self.get_max_context_tokens(_provider)
             messages = await self.compressor.compress(messages, max_tokens)
         except Exception as e:
+            _provider_name = type(_provider).__name__ if _provider is not None else "None"
             logger.error(
                 f"[ChatEngine] 上下文压缩失败 [session={session_key}, "
-                f"provider={type(_provider).__name__}, messages={len(messages)}]: "
+                f"provider={_provider_name}, messages={len(messages)}]: "
                 f"{e}，将保存未压缩的上下文",
                 exc_info=True,
             )
