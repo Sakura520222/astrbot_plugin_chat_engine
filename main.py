@@ -244,8 +244,9 @@ class ChatEnginePlugin(Star):
             # ---------- 格式化用户消息 ----------
             user_text = self.context_mgr.format_user_message(event)
 
-            image_urls = self._extract_image_urls(event)
+            image_urls = await self._extract_image_urls(event)
             if image_urls:
+                logger.info(f"[ChatEngine] 提取到 {len(image_urls)} 张图片")
                 user_msg = {
                     "role": "user",
                     "content": [
@@ -655,12 +656,32 @@ class ChatEnginePlugin(Star):
 
         return segments
 
-    def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
-        """从消息事件中提取图片 URL 列表"""
+    async def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
+        """从消息事件中提取图片并转换为 base64 data URL 列表。
+
+        转换为 data URL 确保所有 Provider（OpenAI / Anthropic 等）都能正确处理。
+        转换失败时回退到原始 URL。
+        """
         urls = []
         try:
             for comp in event.get_messages():
                 if isinstance(comp, Image):
+                    try:
+                        b64 = await comp.convert_to_base64()
+                        if b64:
+                            # 通过 base64 前缀检测图片格式
+                            fmt = "jpeg"
+                            if b64.startswith("iVBOR"):
+                                fmt = "png"
+                            elif b64.startswith("R0lG"):
+                                fmt = "gif"
+                            elif b64.startswith("UklG"):
+                                fmt = "webp"
+                            urls.append(f"data:image/{fmt};base64,{b64}")
+                            continue
+                    except Exception as e:
+                        logger.warning(f"[ChatEngine] 图片转 base64 失败: {e}")
+                    # 回退到原始 URL
                     if hasattr(comp, "url") and comp.url:
                         urls.append(comp.url)
                     elif hasattr(comp, "file") and comp.file:
