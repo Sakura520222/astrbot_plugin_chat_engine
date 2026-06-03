@@ -686,9 +686,12 @@ class ChatEnginePlugin(Star):
     def _split_response(self, text: str) -> list[str]:
         """将 LLM 回复按配置的分段符号拆分。
 
+        支持三种模式:
+        - sentence: 按标点符号分段 (经典模式，使用 split_pattern)
+        - newline:  仅按换行符分段 (保持每行完整)
+        - smart:    智能分段，只在句末标点+引号/换行处断开，保护对话文本
+
         使用 re.findall 匹配「文本 + 分隔符」整体，天然保留分隔符且不产生空段。
-        超过 max_segments 时，从尾部合并多余段落。
-        未启用分段或只有一段时直接返回原文。
         """
         if not text:
             return []
@@ -698,28 +701,65 @@ class ChatEnginePlugin(Star):
 
         pattern = self.config.get("split_pattern", r"[。！？\n]")
         max_segments = self._cfg_int("max_segments", 5)
+        split_mode = self.config.get("split_mode", "sentence")
 
         try:
-            # 剥掉外层 [...] 避免嵌套字符类导致 Unicode 匹配异常
-            char_class = pattern
-            if char_class.startswith("[") and char_class.endswith("]"):
-                char_class = char_class[1:-1]
-            # findall 无捕获组，返回完整匹配文本（含分隔符）
-            segments = re.findall(f"[^{char_class}]*[{char_class}]", text)
-            # 尾部不含分隔符的剩余文本 (如 "你好？\n2. 我很好" 中的 "2. 我很好")
-            if segments:
-                last_end = 0
-                for m in re.finditer(f"[^{char_class}]*[{char_class}]", text):
-                    last_end = m.end()
-                tail = text[last_end:]
-                if tail.strip():
-                    segments.append(tail)
+            if split_mode == "newline":
+                # 仅按换行符分段，保持每行完整
+                raw_segments = text.split("\n")
+                segments = [s.strip() for s in raw_segments if s.strip()]
+            elif split_mode == "smart":
+                # 智能分段: 先按换行拆行，保护对话文本不被劈断
+                # 对含引号的行保留整行，对纯叙述行再按标点细分
+                char_class = pattern
+                if char_class.startswith("[") and char_class.endswith("]"):
+                    char_class = char_class[1:-1]
+                quote_chars = "“”『』（）【】"
+                # 标点后跟非引号字符 (即行内标点不作为分割点)
+                punct_then_nonquote = (
+                    f"[^{char_class}{quote_chars}]*"
+                    f"[{char_class}](?=[^{quote_chars}]|$)"
+                )
+                segments = []
+                for line in text.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # 含引号的行视为对话，保持完整
+                    if any(q in line for q in quote_chars):
+                        segments.append(line)
+                        continue
+                    # 纯叙述行: 按标点细分
+                    parts = re.findall(punct_then_nonquote, line)
+                    if not parts:
+                        segments.append(line)
+                    else:
+                        last_end = 0
+                        for m in re.finditer(punct_then_nonquote, line):
+                            last_end = m.end()
+                        tail = line[last_end:]
+                        if tail.strip():
+                            parts.append(tail)
+                        segments.extend(
+                            [p.strip() for p in parts if p.strip()]
+                        )
+            else:
+                # sentence 模式: 按标点符号分段 (经典模式)
+                char_class = pattern
+                if char_class.startswith("[") and char_class.endswith("]"):
+                    char_class = char_class[1:-1]
+                segments = re.findall(f"[^{char_class}]*[{char_class}]", text)
+                if segments:
+                    last_end = 0
+                    for m in re.finditer(f"[^{char_class}]*[{char_class}]", text):
+                        last_end = m.end()
+                    tail = text[last_end:]
+                    if tail.strip():
+                        segments.append(tail)
+                segments = [s.strip() for s in segments if s.strip()]
         except re.error:
             logger.warning(f"[ChatEngine] 分段正则无效: {pattern}，跳过分段")
             return [text]
-
-        # 去除空白段
-        segments = [s.strip() for s in segments if s.strip()]
 
         if len(segments) <= 1:
             return [text]

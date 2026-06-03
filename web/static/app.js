@@ -474,6 +474,7 @@ const CONFIG_FIELDS = [
     { key: 'max_tool_rounds', label: '最大工具调用轮数', type: 'number', hint: '单次对话中工具调用最大循环次数。' },
     { key: 'enable_passive_record', label: '被动记录群聊消息', type: 'checkbox', hint: '开启后，群聊中未触发回复的消息也会记录到上下文，丰富 LLM 对群聊的感知。仅对群聊生效。' },
     { key: 'enable_split_send', label: '启用分段发送', type: 'checkbox', hint: '将 LLM 回复按标点符号拆分为多条消息分段发送，模拟真人打字节奏。' },
+    { key: 'split_mode', label: '分段模式', type: 'select', options: ['sentence', 'newline', 'smart'], hint: 'sentence: 按标点分段。newline: 仅按换行分段 (保持每行完整)。smart: 智能分段，保护对话文本不被劈断。' },
     { key: 'split_pattern', label: '分段匹配符号 (正则)', type: 'text', hint: '用于拆分 LLM 回复的正则表达式，匹配到的符号作为分段点。默认: [。！？\\n]' },
     { key: 'max_segments', label: '最大分段数', type: 'number', hint: '单次回复最多拆分成多少段。超过则合并后面的段落。' },
     { key: 'split_delay_ms', label: '分段发送间隔 (毫秒)', type: 'number', hint: '每段消息之间的发送延迟。' },
