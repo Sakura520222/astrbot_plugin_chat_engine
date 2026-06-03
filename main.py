@@ -32,7 +32,7 @@ from .web.server import ChatWebServer
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
     "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩和 WebUI 管理面板。",
-    "1.0.0",
+    "1.1.0",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -45,6 +45,41 @@ class ChatEnginePlugin(Star):
         self.persona_mgr: ChatPersonaManager = None
         self.tool_mgr: ChatToolManager = None
         self.web_server: ChatWebServer = None
+
+    # 配置读取辅助
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        """安全读取 int 配置项，类型异常时回退到默认值"""
+        try:
+            return int(self.config.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        """安全读取 float 配置项，类型异常时回退到默认值"""
+        try:
+            return float(self.config.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        """安全读取 bool 配置项，支持字符串和数值类型转换"""
+        val = self.config.get(key, default)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            lower = val.lower()
+            if lower in ("true", "1", "yes"):
+                return True
+            if lower in ("false", "0", "no"):
+                return False
+            logger.warning(f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}")
+            return default
+        if isinstance(val, (int, float)):
+            if isinstance(val, float) and val not in (0.0, 1.0):
+                logger.warning(f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换")
+            return bool(val)
+        return default
 
     async def initialize(self):
         """插件激活时调用 — 初始化数据库、管理器和 Web 服务"""
@@ -84,7 +119,7 @@ class ChatEnginePlugin(Star):
         logger.info(f"[ChatEngine] 扫描到 {len(tools)} 个工具")
 
         # 启动 WebUI
-        web_port = int(self.config.get("web_port", 8765))
+        web_port = self._cfg_int("web_port", 8765)
         self.web_server = ChatWebServer(self, port=web_port)
         await self.web_server.start()
 
@@ -157,7 +192,7 @@ class ChatEnginePlugin(Star):
             if not self.context_mgr.should_respond(event):
                 # 被动记录: 群聊中未触发回复的消息也记录到上下文
                 if (
-                    self.config.get("enable_passive_record", False)
+                    self._cfg_bool("enable_passive_record", False)
                     and is_group
                     and message_text
                 ):
@@ -196,8 +231,9 @@ class ChatEnginePlugin(Star):
 
             # ---------- 加载上下文 ----------
             context_messages_raw = await self.context_mgr.load_context(session_key)
-            # 将 observed (被动记录) 消息转为 user role，供 LLM API 使用
-            # 拷贝一份避免修改数据库原始数据
+            # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
+            # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
+            # 此处将其转换为 "user" role 供 LLM API 使用，同时拷贝一份避免修改原始数据。
             context_messages = [
                 {**msg, "role": "user"} if msg.get("role") == "observed" else msg
                 for msg in context_messages_raw
@@ -227,7 +263,7 @@ class ChatEnginePlugin(Star):
             logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
             # ---------- 构建工具集和工具描述 ----------
-            enable_tools = self.config.get("enable_tool_calls", True)
+            enable_tools = self._cfg_bool("enable_tool_calls", True)
             tool_set = None
             tool_count = 0
             if enable_tools:
@@ -251,7 +287,7 @@ class ChatEnginePlugin(Star):
                 logger.info("[ChatEngine] Tool Calls 已禁用")
 
             # ---------- Token 安全截断 ----------
-            context_messages = self._trim_context_to_fit(
+            context_messages = await self._trim_context_to_fit(
                 context_messages, provider
             )
 
@@ -300,9 +336,7 @@ class ChatEnginePlugin(Star):
                     for seg_idx, segment in enumerate(segments):
                         yield event.plain_result(segment)
                         if seg_idx < len(segments) - 1:
-                            delay_ms = int(
-                                self.config.get("split_delay_ms", 800)
-                            )
+                            delay_ms = max(0, min(self._cfg_int("split_delay_ms", 800), 5000))
                             await asyncio.sleep(delay_ms / 1000)
 
             if hasattr(final_response, "result_chain") and final_response.result_chain:
@@ -344,7 +378,7 @@ class ChatEnginePlugin(Star):
         循环直到 LLM 返回纯文本响应或达到最大轮数。
         """
         if max_tool_rounds is None:
-            max_tool_rounds = int(self.config.get("max_tool_rounds", 10))
+            max_tool_rounds = self._cfg_int("max_tool_rounds", 10)
 
         # 构建完整上下文
         current_contexts = list(contexts) + [user_msg]
@@ -430,7 +464,13 @@ class ChatEnginePlugin(Star):
         tool_set=None,
         event: AstrMessageEvent = None,
     ) -> str:
-        """执行单个工具调用，返回结果字符串。"""
+        """执行单个工具调用，返回结果字符串。
+
+        支持三种 handler 返回类型:
+        1. coroutine — 标准 async 函数，直接 await 获取结果
+        2. async generator — 部分插件 handler 使用 yield，通过 async for 收集后取最后一个值
+        3. 同步返回值 — 非 awaitable 非 generator 的普通返回值
+        """
         try:
             tool_manager = self.context.get_llm_tool_manager()
 
@@ -513,7 +553,7 @@ class ChatEnginePlugin(Star):
                 ensure_ascii=False,
             )
 
-    def _trim_context_to_fit(
+    async def _trim_context_to_fit(
         self, messages: list[dict], provider
     ) -> list[dict]:
         """Token 安全截断：确保上下文不超过模型阈值。
@@ -521,19 +561,11 @@ class ChatEnginePlugin(Star):
         从最旧的消息开始移除，直到总量低于阈值。
         被动记录的大量消息通常在最前面，会优先被裁剪。
         """
-        # 获取模型最大 token 数
-        max_tokens = 0
-        try:
-            max_tokens = provider.provider_config.get("max_context_tokens", 0)
-        except Exception:
-            pass
-        if max_tokens <= 0:
-            max_tokens = int(
-                self.config.get("fallback_max_context_tokens", 32000)
-            )
+        # 获取模型最大 token 数（自动从 provider 获取并回填到配置）
+        max_tokens = await self.context_mgr.get_max_context_tokens(provider)
 
         # 保留比例 (与 token 压缩模式共用同一个配置)
-        ratio = float(self.config.get("token_threshold_ratio", 0.8))
+        ratio = self._cfg_float("token_threshold_ratio", 0.8)
         threshold = int(max_tokens * ratio)
 
         counter = TokenEstimator()
@@ -549,6 +581,10 @@ class ChatEnginePlugin(Star):
             cut_idx = i + 1
             if total <= threshold:
                 break
+
+        # 确保至少保留最后1条消息（防止所有消息 token 都超过阈值时返回空列表）
+        if cut_idx >= len(messages):
+            cut_idx = len(messages) - 1
 
         if cut_idx > 0:
             logger.info(
@@ -568,11 +604,11 @@ class ChatEnginePlugin(Star):
         if not text:
             return []
 
-        if not self.config.get("enable_split_send", False):
+        if not self._cfg_bool("enable_split_send", False):
             return [text]
 
         pattern = self.config.get("split_pattern", r"[。！？\n]")
-        max_segments = int(self.config.get("max_segments", 5))
+        max_segments = self._cfg_int("max_segments", 5)
 
         try:
             # re.split 捕获组会保留分隔符: [text, delim, text, delim, ...]

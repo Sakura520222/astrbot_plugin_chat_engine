@@ -29,10 +29,10 @@
         "hint": "LLM 总结压缩后，保留最近多少轮原始对话。"
     },
     "fallback_max_context_tokens": {
-        "description": "模型最大上下文 Token (Fallback)",
+        "description": "模型最大上下文 Token (自动检测)",
         "type": "int",
-        "default": 32000,
-        "hint": "当模型未报告 max_context_tokens 时使用此值。"
+        "default": 128000,
+        "hint": "自动从 LLM Provider 获取并填入，通常无需手动修改。"
     },
     "user_id_format": {
         "description": "用户标识格式 (群聊)",

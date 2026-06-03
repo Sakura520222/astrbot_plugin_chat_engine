@@ -87,15 +87,73 @@ class ChatContextManager:
             return []
 
     async def get_max_context_tokens(self, provider) -> int:
-        """获取模型最大上下文 Token 数"""
+        """获取模型最大上下文 Token 数。
+
+        优先从 provider 配置获取，成功时自动回填到插件配置，
+        确保 provider 不可用时也有合理的备选值。
+        """
         max_tokens = 0
         try:
             max_tokens = provider.provider_config.get("max_context_tokens", 0)
         except Exception:
             pass
-        if max_tokens <= 0:
-            max_tokens = self.config.get("fallback_max_context_tokens", 32000)
+        if max_tokens > 0:
+            # 自动回填到插件配置，确保 provider 不可用时也有合理的备选值
+            self.config["fallback_max_context_tokens"] = max_tokens
+            return max_tokens
+        # provider 未报告，使用配置中的备选值（可能由之前自动回填）
+        try:
+            max_tokens = int(self.config.get("fallback_max_context_tokens", 128000))
+        except (ValueError, TypeError):
+            max_tokens = 128000
         return max_tokens
+
+    async def _load_compress_save(
+        self,
+        session_key: str,
+        new_messages: list[dict],
+        provider=None,
+    ) -> list[dict]:
+        """加载上下文、追加消息、压缩检查、保存。
+
+        被 append_and_save 和 record_passive_message 共用的内部方法。
+        未传入 provider 时会尝试通过 provider_getter 自行获取，以确保压缩逻辑正常工作。
+        """
+        try:
+            existing = await self.repo.get_context(session_key)
+        except Exception:
+            existing = []
+
+        messages = existing + new_messages
+
+        # 压缩检查：未传入 provider 时尝试自行获取
+        _provider = None
+        try:
+            _provider = provider
+            if _provider is None and self.provider_getter:
+                try:
+                    _provider = self.provider_getter()
+                except Exception:
+                    pass
+            max_tokens = 0
+            if _provider:
+                max_tokens = await self.get_max_context_tokens(_provider)
+            messages = await self.compressor.compress(messages, max_tokens)
+        except Exception as e:
+            _provider_name = type(_provider).__name__ if _provider is not None else "None"
+            logger.error(
+                f"[ChatEngine] 上下文压缩失败 [session={session_key}, "
+                f"provider={_provider_name}, messages={len(messages)}]: "
+                f"{e}，将保存未压缩的上下文",
+                exc_info=True,
+            )
+
+        try:
+            await self.repo.save_context(session_key, messages)
+        except Exception as e:
+            logger.error(f"[ChatEngine] 保存上下文失败 [{session_key}]: {e}")
+
+        return messages
 
     async def append_and_save(
         self,
@@ -105,30 +163,25 @@ class ChatContextManager:
         provider=None,
     ) -> list[dict]:
         """追加用户+助手消息，运行压缩检查，保存到数据库。"""
-        try:
-            messages = await self.repo.get_context(session_key)
-        except Exception:
-            messages = []
+        return await self._load_compress_save(
+            session_key, [user_msg, assistant_msg], provider=provider
+        )
 
-        messages.append(user_msg)
-        messages.append(assistant_msg)
+    async def record_passive_message(
+        self,
+        session_key: str,
+        user_msg: dict,
+        provider=None,
+    ) -> None:
+        """记录被动 (未触发回复) 的用户消息到上下文。
 
-        # 压缩检查
-        try:
-            max_tokens = 0
-            if provider:
-                max_tokens = await self.get_max_context_tokens(provider)
-            messages = await self.compressor.compress(messages, max_tokens)
-        except Exception as e:
-            logger.error(f"[ChatEngine] 上下文压缩失败: {e}")
-
-        # 保存
-        try:
-            await self.repo.save_context(session_key, messages)
-        except Exception as e:
-            logger.error(f"[ChatEngine] 保存上下文失败 [{session_key}]: {e}")
-
-        return messages
+        仅追加一条 user 消息，不产生 assistant 回复。
+        同样会触发压缩检查以控制上下文长度。
+        未传入 provider 时会自动通过 provider_getter 获取，确保压缩正常工作。
+        """
+        await self._load_compress_save(
+            session_key, [user_msg], provider=provider
+        )
 
     async def record_passive_message(
         self,
