@@ -108,6 +108,33 @@ class ChatContextManager:
             max_tokens = 128000
         return max_tokens
 
+    async def get_modalities(self, provider) -> list[str]:
+        """获取模型支持的模态能力列表。
+
+        优先从 provider 配置获取，成功时自动回填到插件配置，
+        确保 provider 不可用时也有合理的备选值。
+
+        返回值示例: ["text", "tool_use", "image"]
+        默认值（保守策略）: ["text", "tool_use"] — 不含 image，避免发送不支持的内容。
+        """
+        default_modalities = ["text", "tool_use"]
+        try:
+            modalities = provider.provider_config.get("modalities", None)
+        except Exception:
+            modalities = None
+        if modalities and isinstance(modalities, list) and len(modalities) > 0:
+            # 自动回填到插件配置，确保 provider 不可用时也有合理的备选值
+            self.config["fallback_modalities"] = modalities
+            return modalities
+        # provider 未报告，使用配置中的备选值（可能由之前自动回填）
+        try:
+            cached = self.config.get("fallback_modalities", None)
+            if cached and isinstance(cached, list) and len(cached) > 0:
+                return cached
+        except Exception:
+            pass
+        return default_modalities
+
     async def _load_compress_save(
         self,
         session_key: str,

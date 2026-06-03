@@ -18,6 +18,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
 
 from .context.manager import ChatContextManager
 from .context.token_counter import TokenEstimator
@@ -285,6 +286,19 @@ class ChatEnginePlugin(Star):
                     logger.warning(f"[ChatEngine] 构建工具集失败: {e}", exc_info=True)
             else:
                 logger.info("[ChatEngine] Tool Calls 已禁用")
+
+            # ---------- 模态过滤 ----------
+            # 根据模型能力过滤上下文和当前消息中不支持的模态内容（如图片）
+            modalities = await self.context_mgr.get_modalities(provider)
+            all_messages = list(context_messages) + [user_msg]
+            sanitized, stats = sanitize_contexts_by_modalities(all_messages, modalities)
+            if stats.changed:
+                logger.info(
+                    f"[ChatEngine] 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
+                    f"{stats.fixed_audio_blocks} 个音频块"
+                )
+                context_messages = sanitized[:-1]
+                user_msg = sanitized[-1]
 
             # ---------- Token 安全截断 ----------
             context_messages = await self._trim_context_to_fit(
