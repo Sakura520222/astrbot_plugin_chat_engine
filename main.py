@@ -687,11 +687,9 @@ class ChatEnginePlugin(Star):
         """将 LLM 回复按配置的分段符号拆分。
 
         支持三种模式:
-        - sentence: 按标点符号分段 (经典模式，使用 split_pattern)
-        - newline:  仅按换行符分段 (保持每行完整)
-        - smart:    智能分段，只在句末标点+引号/换行处断开，保护对话文本
-
-        使用 re.findall 匹配「文本 + 分隔符」整体，天然保留分隔符且不产生空段。
+        - sentence: 按标点符号分段 (经典模式，re.finditer 匹配「文本+分隔符」)
+        - newline:  仅按换行符分段，保持每行完整
+        - smart:    先按换行拆行，含对话引号的行保留完整，纯叙述行按标点细分
         """
         if not text:
             return []
@@ -703,6 +701,17 @@ class ChatEnginePlugin(Star):
         max_segments = self._cfg_int("max_segments", 5)
         split_mode = self.config.get("split_mode", "sentence")
 
+        if split_mode not in ("sentence", "newline", "smart"):
+            logger.warning(
+                f"[ChatEngine] 未知 split_mode: {split_mode}，回退到 sentence 模式"
+            )
+            split_mode = "sentence"
+
+        # 统一提取字符类内容，避免各分支重复剥括号
+        char_class = pattern
+        if char_class.startswith("[") and char_class.endswith("]"):
+            char_class = char_class[1:-1]
+
         try:
             if split_mode == "newline":
                 # 仅按换行符分段，保持每行完整
@@ -711,10 +720,7 @@ class ChatEnginePlugin(Star):
             elif split_mode == "smart":
                 # 智能分段: 先按换行拆行，保护对话文本不被劈断
                 # 对含引号的行保留整行，对纯叙述行再按标点细分
-                char_class = pattern
-                if char_class.startswith("[") and char_class.endswith("]"):
-                    char_class = char_class[1:-1]
-                quote_chars = "“”『』（）【】"
+                quote_chars = """“”‘’「」『』"""
                 # 标点后跟非引号字符 (即行内标点不作为分割点)
                 punct_then_nonquote = (
                     f"[^{char_class}{quote_chars}]*"
@@ -729,14 +735,15 @@ class ChatEnginePlugin(Star):
                     if any(q in line for q in quote_chars):
                         segments.append(line)
                         continue
-                    # 纯叙述行: 按标点细分
-                    parts = re.findall(punct_then_nonquote, line)
+                    # 纯叙述行: 单次 finditer 收集片段 + 追踪尾部
+                    parts = []
+                    last_end = 0
+                    for m in re.finditer(punct_then_nonquote, line):
+                        parts.append(m.group())
+                        last_end = m.end()
                     if not parts:
                         segments.append(line)
                     else:
-                        last_end = 0
-                        for m in re.finditer(punct_then_nonquote, line):
-                            last_end = m.end()
                         tail = line[last_end:]
                         if tail.strip():
                             parts.append(tail)
@@ -745,14 +752,14 @@ class ChatEnginePlugin(Star):
                         )
             else:
                 # sentence 模式: 按标点符号分段 (经典模式)
-                char_class = pattern
-                if char_class.startswith("[") and char_class.endswith("]"):
-                    char_class = char_class[1:-1]
-                segments = re.findall(f"[^{char_class}]*[{char_class}]", text)
-                if segments:
-                    last_end = 0
-                    for m in re.finditer(f"[^{char_class}]*[{char_class}]", text):
-                        last_end = m.end()
+                # 单次 finditer 收集片段 + 追踪尾部位置
+                segments = []
+                last_end = 0
+                for m in re.finditer(
+                    f"[^{char_class}]*[{char_class}]", text
+                ):
+                    segments.append(m.group())
+                    last_end = m.end()
                     tail = text[last_end:]
                     if tail.strip():
                         segments.append(tail)
