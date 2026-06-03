@@ -84,7 +84,10 @@ class ChatEnginePlugin(Star):
         logger.info(f"[ChatEngine] 扫描到 {len(tools)} 个工具")
 
         # 启动 WebUI
-        web_port = int(self.config.get("web_port", 8765))
+        try:
+            web_port = int(self.config.get("web_port", 8765))
+        except (ValueError, TypeError):
+            web_port = 8765
         self.web_server = ChatWebServer(self, port=web_port)
         await self.web_server.start()
 
@@ -301,9 +304,12 @@ class ChatEnginePlugin(Star):
                     for seg_idx, segment in enumerate(segments):
                         yield event.plain_result(segment)
                         if seg_idx < len(segments) - 1:
-                            delay_ms = max(0, min(
-                                int(self.config.get("split_delay_ms", 800)), 5000
-                            ))
+                            try:
+                                delay_ms = max(0, min(
+                                    int(self.config.get("split_delay_ms", 800)), 5000
+                                ))
+                            except (ValueError, TypeError):
+                                delay_ms = 800
                             await asyncio.sleep(delay_ms / 1000)
 
             if hasattr(final_response, "result_chain") and final_response.result_chain:
@@ -532,7 +538,10 @@ class ChatEnginePlugin(Star):
         max_tokens = await self.context_mgr.get_max_context_tokens(provider)
 
         # 保留比例 (与 token 压缩模式共用同一个配置)
-        ratio = float(self.config.get("token_threshold_ratio", 0.8))
+        try:
+            ratio = float(self.config.get("token_threshold_ratio", 0.8))
+        except (ValueError, TypeError):
+            ratio = 0.8
         threshold = int(max_tokens * ratio)
 
         counter = TokenEstimator()

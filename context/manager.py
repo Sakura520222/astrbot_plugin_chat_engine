@@ -139,7 +139,7 @@ class ChatContextManager:
                 max_tokens = await self.get_max_context_tokens(_provider)
             messages = await self.compressor.compress(messages, max_tokens)
         except Exception as e:
-            logger.error(f"[ChatEngine] 上下文压缩失败 [{session_key}]: {e}")
+            logger.error(f"[ChatEngine] 上下文压缩失败 [{session_key}]: {e}，将保存未压缩的上下文")
 
         try:
             await self.repo.save_context(session_key, messages)
