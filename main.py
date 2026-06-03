@@ -160,8 +160,40 @@ class ChatEnginePlugin(Star):
                 f"at={is_at}, text={message_text[:50]}"
             )
 
+            # 预检查: 检测消息中是否有图片（用于纯图片消息的处理）
+            has_image = any(isinstance(comp, Image) for comp in event.get_messages())
+
             if not message_text:
-                logger.info("[ChatEngine] 空消息，跳过")
+                if has_image:
+                    # 纯图片消息: 作为被动消息存入上下文，不触发 LLM
+                    passive_key = self.context_mgr.build_session_key(event)
+                    async with self.context_mgr.get_session_lock(passive_key):
+                        try:
+                            image_urls = await self._extract_image_urls(event)
+                            if image_urls:
+                                passive_prefix = self.context_mgr.format_user_message(
+                                    event
+                                )
+                                passive_msg = {
+                                    "role": "observed",
+                                    "content": [
+                                        {"type": "text", "text": passive_prefix},
+                                    ]
+                                    + [
+                                        {"type": "image_url", "image_url": {"url": url}}
+                                        for url in image_urls
+                                    ],
+                                }
+                                await self.context_mgr.record_passive_message(
+                                    passive_key, passive_msg
+                                )
+                                logger.info(
+                                    f"[ChatEngine] 纯图片被动记录到 {passive_key}"
+                                )
+                        except Exception as e:
+                            logger.debug(f"[ChatEngine] 纯图片被动记录失败: {e}")
+                else:
+                    logger.info("[ChatEngine] 空消息，跳过")
                 event.should_call_llm(False)
                 return
 
@@ -231,142 +263,160 @@ class ChatEnginePlugin(Star):
             session_key = self.context_mgr.build_session_key(event)
             logger.info(f"[ChatEngine] 会话 Key: {session_key}")
 
-            #  加载上下文
-            context_messages_raw = await self.context_mgr.load_context(session_key)
-            # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
-            # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
-            # 此处将其转换为 "user" role 供 LLM API 使用，同时拷贝一份避免修改原始数据。
-            context_messages = [
-                {**msg, "role": "user"} if msg.get("role") == "observed" else msg
-                for msg in context_messages_raw
-            ]
-            logger.info(f"[ChatEngine] 已加载 {len(context_messages)} 条上下文消息")
+            # 获取会话锁，确保同一会话的消息串行处理（防止竞态条件）
+            session_lock = self.context_mgr.get_session_lock(session_key)
+            await session_lock.acquire()
 
-            #  格式化用户消息
-            user_text = self.context_mgr.format_user_message(event)
+            try:
+                #  加载上下文
+                context_messages_raw = await self.context_mgr.load_context(session_key)
+                # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
+                # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
+                # 此处将其转换为 "user" role 供 LLM API 使用，同时拷贝一份避免修改原始数据。
+                context_messages = [
+                    {**msg, "role": "user"} if msg.get("role") == "observed" else msg
+                    for msg in context_messages_raw
+                ]
+                logger.info(f"[ChatEngine] 已加载 {len(context_messages)} 条上下文消息")
 
-            image_urls = await self._extract_image_urls(event)
-            if image_urls:
-                logger.info(f"[ChatEngine] 提取到 {len(image_urls)} 张图片")
-                user_msg = {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_text},
-                    ]
-                    + [
-                        {"type": "image_url", "image_url": {"url": url}}
-                        for url in image_urls
-                    ],
-                }
-            else:
-                user_msg = {"role": "user", "content": user_text}
+                #  格式化用户消息
+                user_text = self.context_mgr.format_user_message(event)
 
-            #  获取人格 System Prompt
-            system_prompt = await self.persona_mgr.get_system_prompt()
-            logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
+                image_urls = await self._extract_image_urls(event)
+                if image_urls:
+                    logger.info(f"[ChatEngine] 提取到 {len(image_urls)} 张图片")
+                    user_msg = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_text},
+                        ]
+                        + [
+                            {"type": "image_url", "image_url": {"url": url}}
+                            for url in image_urls
+                        ],
+                    }
+                else:
+                    user_msg = {"role": "user", "content": user_text}
 
-            #  构建工具集和工具描述
-            enable_tools = self._cfg_bool("enable_tool_calls", True)
-            tool_set = None
-            tool_count = 0
-            if enable_tools:
-                try:
-                    # 诊断: 检查启用的工具数量
-                    enabled_names = await self.tool_mgr.get_enabled_names()
-                    logger.info(f"[ChatEngine] 已启用工具名称数: {len(enabled_names)}")
+                #  获取人格 System Prompt
+                system_prompt = await self.persona_mgr.get_system_prompt()
+                logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
-                    tool_set = await self.tool_mgr.build_active_tool_set()
-                    if tool_set:
-                        tool_count = (
-                            len(tool_set.names()) if not tool_set.empty() else 0
+                #  构建工具集和工具描述
+                enable_tools = self._cfg_bool("enable_tool_calls", True)
+                tool_set = None
+                tool_count = 0
+                if enable_tools:
+                    try:
+                        # 诊断: 检查启用的工具数量
+                        enabled_names = await self.tool_mgr.get_enabled_names()
+                        logger.info(
+                            f"[ChatEngine] 已启用工具名称数: {len(enabled_names)}"
                         )
 
-                    tool_desc = await self.tool_mgr.build_tool_description_text()
-                    if tool_desc:
-                        system_prompt += f"\n\n## 可用工具\n\n{tool_desc}"
-                except Exception as e:
-                    logger.warning(f"[ChatEngine] 构建工具集失败: {e}", exc_info=True)
-            else:
-                logger.info("[ChatEngine] Tool Calls 已禁用")
-
-            #  模态过滤
-            # 根据模型能力过滤上下文和当前消息中不支持的模态内容（如图片）
-            # 深拷贝确保原始消息不被修改，只影响传给 LLM 的副本，不影响保存到数据库
-            modalities = await self.context_mgr.get_modalities(provider)
-            llm_contexts = list(context_messages)
-            llm_user_msg = user_msg
-            all_messages = copy.deepcopy(list(context_messages) + [user_msg])
-            sanitized, stats = sanitize_contexts_by_modalities(all_messages, modalities)
-            if stats.changed:
-                logger.info(
-                    f"[ChatEngine] 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
-                    f"{stats.fixed_audio_blocks} 个音频块"
-                )
-                llm_contexts = sanitized[:-1]
-                llm_user_msg = sanitized[-1]
-
-            #  Token 安全截断
-            llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
-
-            #  调用 LLM (含 Tool Call 循环)
-            logger.info(
-                f"[ChatEngine] 开始调用 LLM, 上下文: {len(llm_contexts) + 1} 条, "
-                f"工具: {tool_count} 个, 传递原生FC: {tool_set is not None and not tool_set.empty()}"
-            )
-            try:
-                final_response = await self._llm_call_with_tools(
-                    provider=provider,
-                    system_prompt=system_prompt,
-                    contexts=llm_contexts,
-                    user_msg=llm_user_msg,
-                    tool_set=tool_set,
-                    event=event,
-                )
-            except Exception as e:
-                logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
-                yield event.plain_result(f"❌ LLM 调用失败: {type(e).__name__}: {e}")
-                return
-
-            if final_response is None:
-                logger.warning("[ChatEngine] LLM 返回 None")
-                yield event.plain_result("❌ LLM 未返回有效响应。")
-                return
-
-            if hasattr(final_response, "role") and final_response.role == "err":
-                err_text = getattr(final_response, "completion_text", "未知错误")
-                logger.error(f"[ChatEngine] LLM 返回错误: {err_text}")
-                yield event.plain_result(f"❌ LLM 错误: {err_text}")
-                return
-
-            #  返回结果
-            response_text = final_response.completion_text or ""
-            logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
-
-            if response_text:
-                segments = self._split_response(response_text)
-                if len(segments) <= 1:
-                    yield event.plain_result(response_text)
-                else:
-                    logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
-                    for seg_idx, segment in enumerate(segments):
-                        yield event.plain_result(segment)
-                        if seg_idx < len(segments) - 1:
-                            delay_ms = max(
-                                0, min(self._cfg_int("split_delay_ms", 800), 5000)
+                        tool_set = await self.tool_mgr.build_active_tool_set()
+                        if tool_set:
+                            tool_count = (
+                                len(tool_set.names()) if not tool_set.empty() else 0
                             )
-                            await asyncio.sleep(delay_ms / 1000)
 
-            if hasattr(final_response, "result_chain") and final_response.result_chain:
-                for comp in final_response.result_chain.chain:
-                    if isinstance(comp, Image):
-                        yield event.chain_result([comp])
+                        tool_desc = await self.tool_mgr.build_tool_description_text()
+                        if tool_desc:
+                            system_prompt += f"\n\n## 可用工具\n\n{tool_desc}"
+                    except Exception as e:
+                        logger.warning(
+                            f"[ChatEngine] 构建工具集失败: {e}", exc_info=True
+                        )
+                else:
+                    logger.info("[ChatEngine] Tool Calls 已禁用")
 
-            #  保存上下文
-            assistant_msg = {"role": "assistant", "content": response_text}
-            await self.context_mgr.append_and_save(
-                session_key, user_msg, assistant_msg, provider=provider
-            )
-            logger.info("[ChatEngine] 上下文已保存")
+                #  模态过滤
+                # 根据模型能力过滤上下文和当前消息中不支持的模态内容（如图片）
+                # 深拷贝确保原始消息不被修改，只影响传给 LLM 的副本，不影响保存到数据库
+                modalities = await self.context_mgr.get_modalities(provider)
+                llm_contexts = list(context_messages)
+                llm_user_msg = user_msg
+                all_messages = copy.deepcopy(list(context_messages) + [user_msg])
+                sanitized, stats = sanitize_contexts_by_modalities(
+                    all_messages, modalities
+                )
+                if stats.changed:
+                    logger.info(
+                        f"[ChatEngine] 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
+                        f"{stats.fixed_audio_blocks} 个音频块"
+                    )
+                    llm_contexts = sanitized[:-1]
+                    llm_user_msg = sanitized[-1]
+
+                #  Token 安全截断
+                llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
+
+                #  调用 LLM (含 Tool Call 循环)
+                logger.info(
+                    f"[ChatEngine] 开始调用 LLM, 上下文: {len(llm_contexts) + 1} 条, "
+                    f"工具: {tool_count} 个, 传递原生FC: {tool_set is not None and not tool_set.empty()}"
+                )
+                try:
+                    final_response = await self._llm_call_with_tools(
+                        provider=provider,
+                        system_prompt=system_prompt,
+                        contexts=llm_contexts,
+                        user_msg=llm_user_msg,
+                        tool_set=tool_set,
+                        event=event,
+                    )
+                except Exception as e:
+                    logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
+                    yield event.plain_result(
+                        f"❌ LLM 调用失败: {type(e).__name__}: {e}"
+                    )
+                    return
+
+                if final_response is None:
+                    logger.warning("[ChatEngine] LLM 返回 None")
+                    yield event.plain_result("❌ LLM 未返回有效响应。")
+                    return
+
+                if hasattr(final_response, "role") and final_response.role == "err":
+                    err_text = getattr(final_response, "completion_text", "未知错误")
+                    logger.error(f"[ChatEngine] LLM 返回错误: {err_text}")
+                    yield event.plain_result(f"❌ LLM 错误: {err_text}")
+                    return
+
+                #  返回结果
+                response_text = final_response.completion_text or ""
+                logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
+
+                if response_text:
+                    segments = self._split_response(response_text)
+                    if len(segments) <= 1:
+                        yield event.plain_result(response_text)
+                    else:
+                        logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
+                        for seg_idx, segment in enumerate(segments):
+                            yield event.plain_result(segment)
+                            if seg_idx < len(segments) - 1:
+                                delay_ms = max(
+                                    0, min(self._cfg_int("split_delay_ms", 800), 5000)
+                                )
+                                await asyncio.sleep(delay_ms / 1000)
+
+                if (
+                    hasattr(final_response, "result_chain")
+                    and final_response.result_chain
+                ):
+                    for comp in final_response.result_chain.chain:
+                        if isinstance(comp, Image):
+                            yield event.chain_result([comp])
+
+                #  保存上下文
+                assistant_msg = {"role": "assistant", "content": response_text}
+                await self.context_mgr.append_and_save(
+                    session_key, user_msg, assistant_msg, provider=provider
+                )
+                logger.info("[ChatEngine] 上下文已保存")
+            finally:
+                session_lock.release()
 
         except Exception as e:
             logger.error(f"[ChatEngine] 顶层异常: {e}", exc_info=True)

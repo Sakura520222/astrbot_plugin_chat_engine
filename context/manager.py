@@ -2,6 +2,8 @@
 user message formatting, and compression triggering.
 """
 
+import asyncio
+
 from astrbot.api import logger
 from astrbot.api.platform import MessageType
 
@@ -13,6 +15,8 @@ from .token_counter import TokenEstimator
 
 class ChatContextManager:
     """上下文管理器 — 管理会话、用户标识、上下文存取与压缩"""
+
+    _session_locks: dict[str, asyncio.Lock]
 
     def __init__(
         self,
@@ -30,6 +34,13 @@ class ChatContextManager:
         )
         self.token_counter = TokenEstimator()
         self._cached_modalities: list[str] | None = None
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def get_session_lock(self, session_key: str) -> asyncio.Lock:
+        """获取会话级别的异步锁，确保同一会话的消息串行处理。"""
+        if session_key not in self._session_locks:
+            self._session_locks[session_key] = asyncio.Lock()
+        return self._session_locks[session_key]
 
     def build_session_key(self, event) -> str:
         """根据消息事件构建会话 key。
