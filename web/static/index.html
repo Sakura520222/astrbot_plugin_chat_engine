@@ -95,10 +95,24 @@
     <div id="session-modal" class="modal hidden">
         <div class="modal-content modal-wide">
             <div class="modal-header">
-                <h3>会话上下文</h3>
-                <button class="btn-close" onclick="hideSessionModal()">&times;</button>
+                <h3 id="session-modal-title">会话上下文</h3>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary btn-small" id="btn-llm-preview" onclick="showLlmPreview()">LLM 预览</button>
+                    <button class="btn-close" onclick="hideSessionModal()">&times;</button>
+                </div>
             </div>
             <div id="session-detail" class="session-detail"></div>
+        </div>
+    </div>
+
+    <!-- LLM 预览模态框 -->
+    <div id="llm-preview-modal" class="modal hidden">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3>LLM 上下文预览</h3>
+                <button class="btn-close" onclick="hideLlmPreview()">&times;</button>
+            </div>
+            <div id="llm-preview-content" class="llm-preview"></div>
         </div>
     </div>
 

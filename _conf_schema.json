@@ -93,6 +93,17 @@
         "default": false,
         "hint": "将 LLM 回复按标点符号拆分为多条消息分段发送，模拟真人打字节奏。"
     },
+    "split_mode": {
+        "description": "分段模式",
+        "type": "string",
+        "_special": {
+            "select": {
+                "options": ["sentence", "newline", "smart"]
+            }
+        },
+        "default": "sentence",
+        "hint": "sentence: 按标点符号分段 (经典模式)。newline: 仅按换行符分段 (保持每行完整)。smart: 智能分段，只在句末标点+引号/换行处断开，保护对话文本不被劈断。"
+    },
     "split_pattern": {
         "description": "分段匹配符号 (正则)",
         "type": "string",
@@ -110,5 +121,35 @@
         "type": "int",
         "default": 800,
         "hint": "每段消息之间的发送延迟，模拟打字节奏。"
+    },
+    "enable_text_clean": {
+        "description": "启用文本清洗",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，对 LLM 回复进行文本清洗，去除 Emoji、括号内容、句尾多余字符等。"
+    },
+    "clean_emoji": {
+        "description": "去除 Emoji",
+        "type": "bool",
+        "default": true,
+        "hint": "移除 LLM 回复中的所有 Emoji 表情符号。"
+    },
+    "clean_brackets": {
+        "description": "去除括号内容",
+        "type": "bool",
+        "default": true,
+        "hint": "移除 LLM 回复中括号及其内容（如动作描写、心理活动等）。支持 ()（）[]【】。"
+    },
+    "clean_trailing_chars": {
+        "description": "清理句尾字符",
+        "type": "bool",
+        "default": true,
+        "hint": "清理每句话末尾多余的标点或符号。"
+    },
+    "trailing_chars_pattern": {
+        "description": "句尾清理字符 (正则)",
+        "type": "string",
+        "default": "[~～\\.。!！?？…·•\\-—_\\s]+$",
+        "hint": "匹配句尾需要清理的字符的正则表达式。默认清理波浪号、句号、感叹号、问号、省略号、破折号、空格等。"
     }
 }

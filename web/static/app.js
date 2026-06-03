@@ -1,10 +1,10 @@
-// ============================================================
+
 // Chat Engine WebUI — Frontend Application
-// ============================================================
+
 
 const API_BASE = '';  // 同源，无需前缀
 
-// ---- 工具函数 ----
+//  工具函数 
 
 async function api(method, path, body = null) {
     const opts = {
@@ -32,7 +32,16 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
-// ---- Tab 切换 ----
+function formatReplyContent(text) {
+    if (!text) return text;
+    // 将 [回复 xxx] 替换为 blockquote 样式
+    return text.replace(
+        /\[回复 ([^\]]+)\]/g,
+        '<blockquote class="reply-quote">$1</blockquote>'
+    );
+}
+
+//  Tab 切换 
 
 document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', () => {
@@ -50,9 +59,9 @@ document.querySelectorAll('.nav-item').forEach(item => {
     });
 });
 
-// ============================================================
+
 // 人格管理
-// ============================================================
+
 
 let personas = [];
 
@@ -168,9 +177,9 @@ async function setDefaultPersona(id) {
     }
 }
 
-// ============================================================
+
 // 会话管理
-// ============================================================
+
 
 let sessionPage = 1;
 const sessionPageSize = 20;
@@ -233,6 +242,7 @@ function goSessionPage(page) {
 }
 
 async function viewSession(key) {
+    currentSessionKey = key;
     try {
         const data = await api('GET', `/api/sessions/${encodeURIComponent(key)}`);
         const modal = document.getElementById('session-modal');
@@ -242,14 +252,19 @@ async function viewSession(key) {
             const role = msg.role || 'unknown';
             let content = '';
             if (typeof msg.content === 'string') {
-                content = escapeHtml(msg.content);
+                content = formatReplyContent(escapeHtml(msg.content));
             } else if (Array.isArray(msg.content)) {
-                content = msg.content
-                    .filter(p => p.type === 'text')
-                    .map(p => escapeHtml(p.text || ''))
-                    .join('\n');
+                content = msg.content.map(p => {
+                    if (p.type === 'text') {
+                        return formatReplyContent(escapeHtml(p.text || ''));
+                    }
+                    if (p.type === 'image_url' && p.image_url && p.image_url.url) {
+                        return `<img src="${escapeHtml(p.image_url.url)}" style="max-width:200px;max-height:200px;border-radius:6px;margin:4px 0;display:block;" />`;
+                    }
+                    return '';
+                }).filter(Boolean).join('\n');
             }
-            const roleLabel = { user: 'USER', assistant: 'ASSISTANT', system: 'SYSTEM', tool: 'TOOL' }[role] || role.toUpperCase();
+            const roleLabel = { user: 'USER', assistant: 'ASSISTANT', system: 'SYSTEM', tool: 'TOOL', observed: 'OBSERVED' }[role] || role.toUpperCase();
             return `
                 <div class="msg-bubble msg-${role}">
                     <div class="msg-role">${roleLabel}</div>
@@ -272,6 +287,87 @@ function hideSessionModal() {
     document.getElementById('session-modal').classList.add('hidden');
 }
 
+// LLM 预览
+let currentSessionKey = null;
+
+async function showLlmPreview() {
+    if (!currentSessionKey) return;
+    try {
+        const data = await api('GET', `/api/sessions/${encodeURIComponent(currentSessionKey)}/llm-preview`);
+        const container = document.getElementById('llm-preview-content');
+
+        const roleColors = {
+            system: 'var(--warning)',
+            user: 'var(--primary)',
+            assistant: 'var(--success)',
+            tool: 'var(--text-dim)',
+        };
+
+        let html = '';
+
+        // 概览信息
+        html += `<div class="preview-stats">
+            <div class="stat-item"><span class="stat-label">Provider</span><span class="stat-value">${data.provider || '-'}</span></div>
+            <div class="stat-item"><span class="stat-label">Modalities</span><span class="stat-value">${(data.modalities || []).join(', ') || '-'}</span></div>
+            <div class="stat-item"><span class="stat-label">上下文条数</span><span class="stat-value">${data.context_count}</span></div>
+            <div class="stat-item"><span class="stat-label">工具数</span><span class="stat-value">${data.tool_count}</span></div>
+            <div class="stat-item"><span class="stat-label">估算 Token</span><span class="stat-value">${data.estimated_tokens}</span></div>
+            ${data.filter_summary ? `<div class="stat-item"><span class="stat-label">模态过滤</span><span class="stat-value">图片=${data.filter_summary.fixed_image_blocks}, 音频=${data.filter_summary.fixed_audio_blocks}</span></div>` : ''}
+        </div>`;
+
+        // System Prompt
+        if (data.system_prompt) {
+            html += `<div class="preview-section">
+                <div class="preview-section-title" onclick="this.nextElementSibling.classList.toggle('collapsed')">System Prompt (${data.system_prompt_length} 字)</div>
+                <pre class="preview-code collapsed">${escapeHtml(data.system_prompt)}</pre>
+            </div>`;
+        }
+
+        // 上下文消息
+        html += `<div class="preview-section">
+            <div class="preview-section-title">上下文消息 (${data.context_count} 条)</div>`;
+
+        for (const msg of data.contexts || []) {
+            const role = msg.role || 'unknown';
+            const color = roleColors[role] || 'var(--text-dim)';
+            let content = '';
+            const c = msg.content;
+            if (typeof c === 'string') {
+                content = escapeHtml(c);
+            } else if (Array.isArray(c)) {
+                content = c.map(p => {
+                    if (p.type === 'text') return escapeHtml(p.text || '');
+                    if (p.type === 'image_url') return `<span class="img-tag">[image]</span>`;
+                    if (p.type === 'image_ref') return `<span class="img-tag">[image_ref:${p.image_id}]</span>`;
+                    return `<span class="img-tag">[${p.type}]</span>`;
+                }).filter(Boolean).join('\n');
+            }
+            html += `<div class="preview-msg">
+                <span class="preview-role" style="color:${color}">${role.toUpperCase()}</span>
+                <div class="preview-content">${content || '<em>(空)</em>'}</div>
+            </div>`;
+        }
+        html += '</div>';
+
+        // 工具列表
+        if (data.tools && data.tools.length > 0) {
+            html += `<div class="preview-section">
+                <div class="preview-section-title" onclick="this.nextElementSibling.classList.toggle('collapsed')">工具列表 (${data.tool_count})</div>
+                <div class="preview-tools collapsed">${(data.tools || []).map(t => `<span class="tool-tag">${escapeHtml(t)}</span>`).join('')}</div>
+            </div>`;
+        }
+
+        container.innerHTML = html;
+        document.getElementById('llm-preview-modal').classList.remove('hidden');
+    } catch (e) {
+        toast('LLM 预览失败: ' + e.message, 'error');
+    }
+}
+
+function hideLlmPreview() {
+    document.getElementById('llm-preview-modal').classList.add('hidden');
+}
+
 async function deleteSession(key) {
     if (!confirm(`确定要删除会话「${key}」吗？`)) return;
     try {
@@ -283,9 +379,9 @@ async function deleteSession(key) {
     }
 }
 
-// ============================================================
+
 // 工具管理
-// ============================================================
+
 
 async function loadTools() {
     try {
@@ -362,9 +458,9 @@ async function refreshTools() {
     }
 }
 
-// ============================================================
+
 // 配置管理
-// ============================================================
+
 
 const CONFIG_FIELDS = [
     { key: 'compression_mode', label: '上下文压缩模式', type: 'select', options: ['turn_limit', 'token'], hint: 'turn_limit: 超过轮数限制丢弃旧消息。token: 达到 Token 阈值时 LLM 总结旧消息。' },
@@ -378,9 +474,15 @@ const CONFIG_FIELDS = [
     { key: 'max_tool_rounds', label: '最大工具调用轮数', type: 'number', hint: '单次对话中工具调用最大循环次数。' },
     { key: 'enable_passive_record', label: '被动记录群聊消息', type: 'checkbox', hint: '开启后，群聊中未触发回复的消息也会记录到上下文，丰富 LLM 对群聊的感知。仅对群聊生效。' },
     { key: 'enable_split_send', label: '启用分段发送', type: 'checkbox', hint: '将 LLM 回复按标点符号拆分为多条消息分段发送，模拟真人打字节奏。' },
+    { key: 'split_mode', label: '分段模式', type: 'select', options: ['sentence', 'newline', 'smart'], hint: 'sentence: 按标点分段。newline: 仅按换行分段 (保持每行完整)。smart: 智能分段，保护对话文本不被劈断。' },
     { key: 'split_pattern', label: '分段匹配符号 (正则)', type: 'text', hint: '用于拆分 LLM 回复的正则表达式，匹配到的符号作为分段点。默认: [。！？\\n]' },
     { key: 'max_segments', label: '最大分段数', type: 'number', hint: '单次回复最多拆分成多少段。超过则合并后面的段落。' },
     { key: 'split_delay_ms', label: '分段发送间隔 (毫秒)', type: 'number', hint: '每段消息之间的发送延迟。' },
+    { key: 'enable_text_clean', label: '启用文本清洗', type: 'checkbox', hint: '开启后，对 LLM 回复进行文本清洗，去除 Emoji、括号内容、句尾多余字符等。' },
+    { key: 'clean_emoji', label: '去除 Emoji', type: 'checkbox', hint: '移除 LLM 回复中的所有 Emoji 表情符号。' },
+    { key: 'clean_brackets', label: '去除括号内容', type: 'checkbox', hint: '移除 LLM 回复中括号及其内容（如动作描写、心理活动等）。支持 ()（）[]【】。' },
+    { key: 'clean_trailing_chars', label: '清理句尾字符', type: 'checkbox', hint: '清理每句话末尾多余的标点或符号。' },
+    { key: 'trailing_chars_pattern', label: '句尾清理字符 (正则)', type: 'text', hint: '匹配句尾需要清理的字符的正则表达式。默认: [~～\\.。!！?？…·•\\-—_\\s]+$' },
 ];
 
 let currentConfig = {};
@@ -460,9 +562,9 @@ async function saveConfig() {
     }
 }
 
-// ============================================================
+
 // 初始化
-// ============================================================
+
 
 document.addEventListener('DOMContentLoaded', () => {
     loadPersonas();

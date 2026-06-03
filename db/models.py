@@ -6,7 +6,7 @@ global SQLModel metadata. This prevents the CancelledError crash.
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, MetaData, String
+from sqlalchemy import Boolean, DateTime, Integer, MetaData, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # 独立的 MetaData 实例 — 与 AstrBot 的 SQLModel.metadata 完全隔离
@@ -26,8 +26,21 @@ class ChatSession(ChatEngineBase):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_key: Mapped[str] = mapped_column(String(512), unique=True, index=True)
-    messages_json: Mapped[str] = mapped_column(String, default="[]")
+    messages_json: Mapped[str] = mapped_column(Text, default="[]")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CEImage(ChatEngineBase):
+    """图片存储 — 按 sha256 去重，同一张图片只存一份"""
+
+    __tablename__ = "ce_images"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    mime_type: Mapped[str] = mapped_column(String(32))
+    file_path: Mapped[str] = mapped_column(String(512))
+    file_size: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -38,7 +51,7 @@ class CEPersona(ChatEngineBase):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(256), unique=True)
-    system_prompt: Mapped[str] = mapped_column(String, default="")
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

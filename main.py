@@ -10,14 +10,16 @@
 """
 
 import asyncio
+import copy
 import inspect
 import json
 import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import Image, Reply
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
 
 from .context.manager import ChatContextManager
 from .context.token_counter import TokenEstimator
@@ -32,7 +34,7 @@ from .web.server import ChatWebServer
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
     "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩和 WebUI 管理面板。",
-    "1.1.0",
+    "1.1.1",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -73,11 +75,15 @@ class ChatEnginePlugin(Star):
                 return True
             if lower in ("false", "0", "no"):
                 return False
-            logger.warning(f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}")
+            logger.warning(
+                f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}"
+            )
             return default
         if isinstance(val, (int, float)):
             if isinstance(val, float) and val not in (0.0, 1.0):
-                logger.warning(f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换")
+                logger.warning(
+                    f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换"
+                )
             return bool(val)
         return default
 
@@ -96,6 +102,7 @@ class ChatEnginePlugin(Star):
         # 初始化数据库
         self.db = ChatEngineDB(db_url)
         await self.db.initialize()
+        self.db.init_image_store(data_dir)
         logger.info(f"[ChatEngine] 数据库已初始化 ({db_type})")
 
         # Provider getter (延迟获取)
@@ -109,6 +116,7 @@ class ChatEnginePlugin(Star):
             persona_repo=self.db.persona_repo,
             config=self.config,
             provider_getter=_get_provider,
+            image_store=self.db.image_store,
         )
 
         # 工具管理器
@@ -134,18 +142,16 @@ class ChatEnginePlugin(Star):
             await self.db.close()
         logger.info("[ChatEngine] 已关闭")
 
-    # ========================================================================
     # 消息拦截 — 核心处理流程
-    # ========================================================================
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
     async def handle_all_messages(self, event: AstrMessageEvent):
         """拦截所有消息，完全接管 AstrBot 的聊天流程。"""
-        # ---------- 第一步: 无条件抑制 AstrBot 默认 LLM ----------
+        #  第一步: 无条件抑制 AstrBot 默认 LLM
         event.should_call_llm(True)
 
         try:
-            # ---------- 预检查 ----------
+            #  预检查
             message_text = (event.message_str or "").strip()
             sender = event.get_sender_name() or event.get_sender_id() or "unknown"
             is_group = self.context_mgr.is_group_message(event)
@@ -156,12 +162,47 @@ class ChatEnginePlugin(Star):
                 f"at={is_at}, text={message_text[:50]}"
             )
 
+            # 预检查: 检测消息中是否有图片（用于纯图片消息的处理）
+            has_image = any(isinstance(comp, Image) for comp in event.get_messages())
+
             if not message_text:
-                logger.info("[ChatEngine] 空消息，跳过")
+                if has_image:
+                    # 纯图片消息: 作为被动消息存入上下文，不触发 LLM
+                    passive_key = self.context_mgr.build_session_key(event)
+                    async with self.context_mgr.get_session_lock(passive_key):
+                        try:
+                            image_urls = await self._extract_image_urls(event)
+                            if image_urls:
+                                passive_prefix = self.context_mgr.format_user_message(
+                                    event
+                                )
+                                passive_msg = {
+                                    "role": "observed",
+                                    "message_id": getattr(
+                                        event.message_obj, "message_id", ""
+                                    ),
+                                    "content": [
+                                        {"type": "text", "text": passive_prefix},
+                                    ]
+                                    + [
+                                        {"type": "image_url", "image_url": {"url": url}}
+                                        for url in image_urls
+                                    ],
+                                }
+                                await self.context_mgr.record_passive_message(
+                                    passive_key, passive_msg
+                                )
+                                logger.info(
+                                    f"[ChatEngine] 纯图片被动记录到 {passive_key}"
+                                )
+                        except Exception as e:
+                            logger.warning(f"[ChatEngine] 纯图片被动记录失败: {e}")
+                else:
+                    logger.info("[ChatEngine] 空消息，跳过")
                 event.should_call_llm(False)
                 return
 
-            # ---------- 命令检测: 如果有其他插件的命令处理器匹配了此消息，交给它们处理 ----------
+            #  命令检测: 如果有其他插件的命令处理器匹配了此消息，交给它们处理
             # 只检查 CommandFilter 类型的处理器，忽略 event_message_type(ALL) 广播处理器
             activated_handlers = event.get_extra("activated_handlers") or []
             has_command_handler = False
@@ -196,25 +237,41 @@ class ChatEnginePlugin(Star):
                     and is_group
                     and message_text
                 ):
-                    try:
-                        passive_key = self.context_mgr.build_session_key(event)
-                        passive_text = self.context_mgr.format_user_message(event)
-                        # 使用 "observed" role 而非 "user"，防止压缩器
-                        # 将每条被动消息都计为独立一轮
-                        passive_msg = {"role": "observed", "content": passive_text}
-                        await self.context_mgr.record_passive_message(
-                            passive_key, passive_msg
-                        )
-                        logger.debug(
-                            f"[ChatEngine] 被动记录消息到 {passive_key}"
-                        )
-                    except Exception as e:
-                        logger.debug(f"[ChatEngine] 被动记录失败: {e}")
+                    passive_key = self.context_mgr.build_session_key(event)
+                    async with self.context_mgr.get_session_lock(passive_key):
+                        try:
+                            passive_text = self.context_mgr.format_user_message(event)
+                            passive_images = await self._extract_image_urls(event)
+                            _msg_id = getattr(event.message_obj, "message_id", "")
+                            if passive_images:
+                                passive_msg = {
+                                    "role": "observed",
+                                    "message_id": _msg_id,
+                                    "content": [
+                                        {"type": "text", "text": passive_text},
+                                    ]
+                                    + [
+                                        {"type": "image_url", "image_url": {"url": url}}
+                                        for url in passive_images
+                                    ],
+                                }
+                            else:
+                                passive_msg = {
+                                    "role": "observed",
+                                    "message_id": _msg_id,
+                                    "content": passive_text,
+                                }
+                            await self.context_mgr.record_passive_message(
+                                passive_key, passive_msg
+                            )
+                            logger.debug(f"[ChatEngine] 被动记录消息到 {passive_key}")
+                        except Exception as e:
+                            logger.debug(f"[ChatEngine] 被动记录失败: {e}")
 
                 event.should_call_llm(False)  # 恢复默认 LLM
                 return
 
-            # ---------- 获取 Provider ----------
+            #  获取 Provider
             provider = self.context.get_using_provider(event.unified_msg_origin)
             if not provider:
                 logger.warning("[ChatEngine] 未找到 LLM Provider")
@@ -225,131 +282,167 @@ class ChatEnginePlugin(Star):
 
             logger.info(f"[ChatEngine] 使用 Provider: {provider.meta().id}")
 
-            # ---------- 构建会话 Key ----------
+            #  构建会话 Key
             session_key = self.context_mgr.build_session_key(event)
             logger.info(f"[ChatEngine] 会话 Key: {session_key}")
 
-            # ---------- 加载上下文 ----------
-            context_messages_raw = await self.context_mgr.load_context(session_key)
-            # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
-            # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
-            # 此处将其转换为 "user" role 供 LLM API 使用，同时拷贝一份避免修改原始数据。
-            context_messages = [
-                {**msg, "role": "user"} if msg.get("role") == "observed" else msg
-                for msg in context_messages_raw
-            ]
-            logger.info(f"[ChatEngine] 已加载 {len(context_messages)} 条上下文消息")
+            # 获取会话锁，确保同一会话的消息串行处理（防止竞态条件）
+            async with self.context_mgr.get_session_lock(session_key):
+                #  加载上下文
+                context_messages_raw = await self.context_mgr.load_context(session_key)
+                # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
+                # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
+                # 此处将其转换为 "user" role 供 LLM API 使用，同时拷贝一份避免修改原始数据。
+                context_messages = [
+                    {**msg, "role": "user"} if msg.get("role") == "observed" else msg
+                    for msg in context_messages_raw
+                ]
+                logger.info(f"[ChatEngine] 已加载 {len(context_messages)} 条上下文消息")
 
-            # ---------- 格式化用户消息 ----------
-            user_text = self.context_mgr.format_user_message(event)
+                #  格式化用户消息
+                user_text = self.context_mgr.format_user_message(event)
 
-            image_urls = self._extract_image_urls(event)
-            if image_urls:
-                user_msg = {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_text},
-                    ]
-                    + [
-                        {"type": "image_url", "image_url": {"url": url}}
-                        for url in image_urls
-                    ],
-                }
-            else:
-                user_msg = {"role": "user", "content": user_text}
+                image_urls = await self._extract_image_urls(event)
+                if image_urls:
+                    logger.info(f"[ChatEngine] 提取到 {len(image_urls)} 张图片")
+                    user_msg = {
+                        "role": "user",
+                        "message_id": getattr(event.message_obj, "message_id", ""),
+                        "content": [
+                            {"type": "text", "text": user_text},
+                        ]
+                        + [
+                            {"type": "image_url", "image_url": {"url": url}}
+                            for url in image_urls
+                        ],
+                    }
+                else:
+                    user_msg = {
+                        "role": "user",
+                        "message_id": getattr(event.message_obj, "message_id", ""),
+                        "content": user_text,
+                    }
 
-            # ---------- 获取人格 System Prompt ----------
-            system_prompt = await self.persona_mgr.get_system_prompt()
-            logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
+                #  获取人格 System Prompt
+                system_prompt = await self.persona_mgr.get_system_prompt()
+                logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
-            # ---------- 构建工具集和工具描述 ----------
-            enable_tools = self._cfg_bool("enable_tool_calls", True)
-            tool_set = None
-            tool_count = 0
-            if enable_tools:
-                try:
-                    # 诊断: 检查启用的工具数量
-                    enabled_names = await self.tool_mgr.get_enabled_names()
-                    logger.info(f"[ChatEngine] 已启用工具名称数: {len(enabled_names)}")
-
-                    tool_set = await self.tool_mgr.build_active_tool_set()
-                    if tool_set:
-                        tool_count = (
-                            len(tool_set.names()) if not tool_set.empty() else 0
+                #  构建工具集和工具描述
+                enable_tools = self._cfg_bool("enable_tool_calls", True)
+                tool_set = None
+                tool_count = 0
+                if enable_tools:
+                    try:
+                        # 诊断: 检查启用的工具数量
+                        enabled_names = await self.tool_mgr.get_enabled_names()
+                        logger.info(
+                            f"[ChatEngine] 已启用工具名称数: {len(enabled_names)}"
                         )
 
-                    tool_desc = await self.tool_mgr.build_tool_description_text()
-                    if tool_desc:
-                        system_prompt += f"\n\n## 可用工具\n\n{tool_desc}"
-                except Exception as e:
-                    logger.warning(f"[ChatEngine] 构建工具集失败: {e}", exc_info=True)
-            else:
-                logger.info("[ChatEngine] Tool Calls 已禁用")
+                        tool_set = await self.tool_mgr.build_active_tool_set()
+                        if tool_set:
+                            tool_count = (
+                                len(tool_set.names()) if not tool_set.empty() else 0
+                            )
 
-            # ---------- Token 安全截断 ----------
-            context_messages = await self._trim_context_to_fit(
-                context_messages, provider
-            )
-
-            # ---------- 调用 LLM (含 Tool Call 循环) ----------
-            logger.info(
-                f"[ChatEngine] 开始调用 LLM, 上下文: {len(context_messages) + 1} 条, "
-                f"工具: {tool_count} 个, 传递原生FC: {tool_set is not None and not tool_set.empty()}"
-            )
-            try:
-                final_response = await self._llm_call_with_tools(
-                    provider=provider,
-                    system_prompt=system_prompt,
-                    contexts=context_messages,
-                    user_msg=user_msg,
-                    tool_set=tool_set,
-                    event=event,
-                )
-            except Exception as e:
-                logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
-                yield event.plain_result(f"❌ LLM 调用失败: {type(e).__name__}: {e}")
-                return
-
-            if final_response is None:
-                logger.warning("[ChatEngine] LLM 返回 None")
-                yield event.plain_result("❌ LLM 未返回有效响应。")
-                return
-
-            if hasattr(final_response, "role") and final_response.role == "err":
-                err_text = getattr(final_response, "completion_text", "未知错误")
-                logger.error(f"[ChatEngine] LLM 返回错误: {err_text}")
-                yield event.plain_result(f"❌ LLM 错误: {err_text}")
-                return
-
-            # ---------- 返回结果 ----------
-            response_text = final_response.completion_text or ""
-            logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
-
-            if response_text:
-                segments = self._split_response(response_text)
-                if len(segments) <= 1:
-                    yield event.plain_result(response_text)
+                        tool_desc = await self.tool_mgr.build_tool_description_text()
+                        if tool_desc:
+                            system_prompt += f"\n\n## 可用工具\n\n{tool_desc}"
+                    except Exception as e:
+                        logger.warning(
+                            f"[ChatEngine] 构建工具集失败: {e}", exc_info=True
+                        )
                 else:
+                    logger.info("[ChatEngine] Tool Calls 已禁用")
+
+                #  模态过滤
+                # 根据模型能力过滤上下文和当前消息中不支持的模态内容（如图片）
+                # 深拷贝确保原始消息不被修改，只影响传给 LLM 的副本，不影响保存到数据库
+                modalities = await self.context_mgr.get_modalities(provider)
+                llm_contexts = list(context_messages)
+                llm_user_msg = user_msg
+                all_messages = copy.deepcopy(list(context_messages) + [user_msg])
+                sanitized, stats = sanitize_contexts_by_modalities(
+                    all_messages, modalities
+                )
+                if stats.changed:
                     logger.info(
-                        f"[ChatEngine] 分段发送: {len(segments)} 段"
+                        f"[ChatEngine] 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
+                        f"{stats.fixed_audio_blocks} 个音频块"
                     )
-                    for seg_idx, segment in enumerate(segments):
-                        yield event.plain_result(segment)
-                        if seg_idx < len(segments) - 1:
-                            delay_ms = max(0, min(self._cfg_int("split_delay_ms", 800), 5000))
-                            await asyncio.sleep(delay_ms / 1000)
+                    llm_contexts = sanitized[:-1]
+                    llm_user_msg = sanitized[-1]
 
-            if hasattr(final_response, "result_chain") and final_response.result_chain:
-                for comp in final_response.result_chain.chain:
-                    if isinstance(comp, Image):
-                        yield event.chain_result([comp])
+                #  Token 安全截断
+                llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
 
-            # ---------- 保存上下文 ----------
-            assistant_msg = {"role": "assistant", "content": response_text}
-            await self.context_mgr.append_and_save(
-                session_key, user_msg, assistant_msg, provider=provider
-            )
-            logger.info("[ChatEngine] 上下文已保存")
+                #  调用 LLM (含 Tool Call 循环)
+                logger.info(
+                    f"[ChatEngine] 开始调用 LLM, 上下文: {len(llm_contexts) + 1} 条, "
+                    f"工具: {tool_count} 个, 传递原生FC: {tool_set is not None and not tool_set.empty()}"
+                )
+                try:
+                    final_response = await self._llm_call_with_tools(
+                        provider=provider,
+                        system_prompt=system_prompt,
+                        contexts=llm_contexts,
+                        user_msg=llm_user_msg,
+                        tool_set=tool_set,
+                        event=event,
+                    )
+                except Exception as e:
+                    logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
+                    yield event.plain_result(
+                        f"❌ LLM 调用失败: {type(e).__name__}: {e}"
+                    )
+                    return
+
+                if final_response is None:
+                    logger.warning("[ChatEngine] LLM 返回 None")
+                    yield event.plain_result("❌ LLM 未返回有效响应。")
+                    return
+
+                if hasattr(final_response, "role") and final_response.role == "err":
+                    err_text = getattr(final_response, "completion_text", "未知错误")
+                    logger.error(f"[ChatEngine] LLM 返回错误: {err_text}")
+                    yield event.plain_result(f"❌ LLM 错误: {err_text}")
+                    return
+
+                #  返回结果
+                response_text = final_response.completion_text or ""
+                logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
+
+                # 文本清洗 (在分段发送之前)
+                response_text = self._clean_response(response_text)
+
+                if response_text:
+                    segments = self._split_response(response_text)
+                    if len(segments) <= 1:
+                        yield event.plain_result(response_text)
+                    else:
+                        logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
+                        for seg_idx, segment in enumerate(segments):
+                            yield event.plain_result(segment)
+                            if seg_idx < len(segments) - 1:
+                                delay_ms = max(
+                                    0, min(self._cfg_int("split_delay_ms", 800), 5000)
+                                )
+                                await asyncio.sleep(delay_ms / 1000)
+
+                if (
+                    hasattr(final_response, "result_chain")
+                    and final_response.result_chain
+                ):
+                    for comp in final_response.result_chain.chain:
+                        if isinstance(comp, Image):
+                            yield event.chain_result([comp])
+
+                #  保存上下文
+                assistant_msg = {"role": "assistant", "content": response_text}
+                await self.context_mgr.append_and_save(
+                    session_key, user_msg, assistant_msg, provider=provider
+                )
+                logger.info("[ChatEngine] 上下文已保存")
 
         except Exception as e:
             logger.error(f"[ChatEngine] 顶层异常: {e}", exc_info=True)
@@ -358,9 +451,7 @@ class ChatEnginePlugin(Star):
             except Exception:
                 pass
 
-    # ========================================================================
     # LLM 调用 + Tool Call 循环
-    # ========================================================================
 
     async def _llm_call_with_tools(
         self,
@@ -553,9 +644,7 @@ class ChatEnginePlugin(Star):
                 ensure_ascii=False,
             )
 
-    async def _trim_context_to_fit(
-        self, messages: list[dict], provider
-    ) -> list[dict]:
+    async def _trim_context_to_fit(self, messages: list[dict], provider) -> list[dict]:
         """Token 安全截断：确保上下文不超过模型阈值。
 
         从最旧的消息开始移除，直到总量低于阈值。
@@ -597,9 +686,10 @@ class ChatEnginePlugin(Star):
     def _split_response(self, text: str) -> list[str]:
         """将 LLM 回复按配置的分段符号拆分。
 
-        使用 re.split + 捕获组保留分隔符，将文本拆为多段。
-        超过 max_segments 时，从尾部合并多余段落。
-        未启用分段或只有一段时直接返回原文。
+        支持三种模式:
+        - sentence: 按标点符号分段 (经典模式，re.finditer 匹配「文本+分隔符」)
+        - newline:  仅按换行符分段，保持每行完整
+        - smart:    先按换行拆行，含对话引号的行保留完整，纯叙述行按标点细分
         """
         if not text:
             return []
@@ -609,26 +699,77 @@ class ChatEnginePlugin(Star):
 
         pattern = self.config.get("split_pattern", r"[。！？\n]")
         max_segments = self._cfg_int("max_segments", 5)
+        split_mode = self.config.get("split_mode", "sentence")
+
+        if split_mode not in ("sentence", "newline", "smart"):
+            logger.warning(
+                f"[ChatEngine] 未知 split_mode: {split_mode}，回退到 sentence 模式"
+            )
+            split_mode = "sentence"
+
+        # 统一提取字符类内容，避免各分支重复剥括号
+        char_class = pattern
+        if char_class.startswith("[") and char_class.endswith("]"):
+            char_class = char_class[1:-1]
 
         try:
-            # re.split 捕获组会保留分隔符: [text, delim, text, delim, ...]
-            parts = re.split(f"({pattern})", text)
+            if split_mode == "newline":
+                # 仅按换行符分段，保持每行完整
+                raw_segments = text.split("\n")
+                segments = [s.strip() for s in raw_segments if s.strip()]
+            elif split_mode == "smart":
+                # 智能分段: 先按换行拆行，保护对话文本不被劈断
+                # 对含引号的行保留整行，对纯叙述行再按标点细分
+                # 仅包含对话引号，不含（）【】等括号
+                # 括号常用于动作描写(微笑)或标注【重点】，不属于对话边界
+                quote_chars = """“”‘’「」『』"""
+                # 标点后跟非引号字符 (即行内标点不作为分割点)
+                punct_then_nonquote = (
+                    f"[^{char_class}{quote_chars}]*"
+                    f"[{char_class}](?=[^{quote_chars}]|$)"
+                )
+                segments = []
+                for line in text.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # 含引号的行视为对话，保持完整
+                    if any(q in line for q in quote_chars):
+                        segments.append(line)
+                        continue
+                    # 纯叙述行: 单次 finditer 收集片段 + 追踪尾部
+                    parts = []
+                    last_end = 0
+                    for m in re.finditer(punct_then_nonquote, line):
+                        parts.append(m.group())
+                        last_end = m.end()
+                    if not parts:
+                        segments.append(line)
+                    else:
+                        tail = line[last_end:]
+                        if tail.strip():
+                            parts.append(tail)
+                        segments.extend(
+                            [p.strip() for p in parts if p.strip()]
+                        )
+            else:
+                # sentence 模式: 按标点符号分段 (经典模式)
+                # 单次 finditer 收集片段 + 追踪尾部位置
+                segments = []
+                last_end = 0
+                for m in re.finditer(
+                    f"[^{char_class}]*[{char_class}]", text
+                ):
+                    segments.append(m.group())
+                    last_end = m.end()
+                # 循环结束后处理尾部文本
+                tail = text[last_end:]
+                if tail.strip():
+                    segments.append(tail)
+                segments = [s.strip() for s in segments if s.strip()]
         except re.error:
             logger.warning(f"[ChatEngine] 分段正则无效: {pattern}，跳过分段")
             return [text]
-
-        # 将 text+delim 配对合并
-        segments = []
-        i = 0
-        while i < len(parts):
-            segment = parts[i]
-            if i + 1 < len(parts):
-                segment += parts[i + 1]  # 追加分隔符
-                i += 2
-            else:
-                i += 1
-            if segment.strip():
-                segments.append(segment.strip())
 
         if len(segments) <= 1:
             return [text]
@@ -641,16 +782,136 @@ class ChatEnginePlugin(Star):
 
         return segments
 
-    def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
-        """从消息事件中提取图片 URL 列表"""
+    # Emoji 正则: 包含 Unicode Emoji 属性的字符
+    _EMOJI_RE = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # Emoticons
+        "\U0001F300-\U0001F5FF"  # Symbols & Pictographs
+        "\U0001F680-\U0001F6FF"  # Transport & Map
+        "\U0001F1E0-\U0001F1FF"  # Flags
+        "\U00002702-\U000027B0"  # Dingbats
+        "\U0000FE00-\U0000FE0F"  # Variation Selectors
+        "\U0001F900-\U0001F9FF"  # Supplemental Symbols
+        "\U0001FA00-\U0001FA6F"  # Chess Symbols
+        "\U0001FA70-\U0001FAFF"  # Symbols Extended-A
+        "\U00002600-\U000026FF"  # Misc Symbols
+        "\U0000200D"             # Zero Width Joiner
+        "\U0000FE0F"             # Variation Selector-16
+        "\U00002B50"             # Star
+        "\U00002B55"             # Circle
+        "\U0000231A-\U0000231B"  # Watch/Hourglass
+        "\U000023E9-\U000023F3"  # Various symbols
+        "\U000023F8-\U000023FA"  # Various symbols
+        "\U000025AA-\U000025AB"  # Squares
+        "\U000025B6"             # Play button
+        "\U000025C0"             # Reverse button
+        "\U000025FB-\U000025FE"  # Squares
+        "\U00002934-\U00002935"  # Arrows
+        "\U00002B05-\U00002B07"  # Arrows
+        "\U00002B1B-\U00002B1C"  # Squares
+        "\U00003030"             # Wavy Dash
+        "\U0000303D"             # Part Alternation Mark
+        "\U00003297"             # Circled Ideograph Congratulation
+        "\U00003299"             # Circled Ideograph Secret
+        "]+",
+        flags=re.UNICODE,
+    )
+
+    # 括号及其内容: 中英文括号
+    _BRACKET_RE = re.compile(
+        r"[\(（\[【][^\)）\]】]*?[\)）\]】]"
+    )
+
+    def _clean_response(self, text: str) -> str:
+        """对 LLM 回复进行文本清洗。
+
+        根据配置可选清洗以下内容:
+        - Emoji 表情符号
+        - 括号块及内容: ()（）[]【】
+        - 句尾多余字符 (波浪号、多余标点等)
+        """
+        if not text:
+            return text
+
+        if not self._cfg_bool("enable_text_clean", False):
+            return text
+
+        cleaned = text
+
+        # 1. 去除 Emoji
+        if self._cfg_bool("clean_emoji", True):
+            cleaned = self._EMOJI_RE.sub("", cleaned)
+
+        # 2. 去除括号及内容
+        if self._cfg_bool("clean_brackets", True):
+            cleaned = self._BRACKET_RE.sub("", cleaned)
+
+        # 3. 清理句尾字符
+        if self._cfg_bool("clean_trailing_chars", True):
+            pattern = self.config.get(
+                "trailing_chars_pattern", r"[~～\.\。!！?？…·•\-—_\s]+$"
+            )
+            try:
+                cleaned = re.sub(pattern, "", cleaned, flags=re.MULTILINE)
+            except re.error:
+                pass  # 正则无效时跳过
+
+        # 4. 清理多余空白: 多空格合并、行首行尾空格
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)  # 多空格→单空格
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)  # 多空行→双空行
+        cleaned = cleaned.strip()
+
+        return cleaned
+
+    async def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
+        """从消息事件中提取图片并转换为 base64 data URL 列表。
+
+        同时提取当前消息中的图片和引用消息（Reply）中的图片。
+        转换为 data URL 确保所有 Provider（OpenAI / Anthropic 等）都能正确处理。
+        转换失败时回退到原始 URL。
+        """
         urls = []
         try:
             for comp in event.get_messages():
                 if isinstance(comp, Image):
-                    if hasattr(comp, "url") and comp.url:
-                        urls.append(comp.url)
-                    elif hasattr(comp, "file") and comp.file:
-                        urls.append(comp.file)
+                    data_url = await self._image_to_data_url(comp)
+                    if data_url:
+                        urls.append(data_url)
+                elif isinstance(comp, Reply) and comp.chain:
+                    # 提取引用消息中的图片
+                    for chain_comp in comp.chain:
+                        if isinstance(chain_comp, Image):
+                            data_url = await self._image_to_data_url(chain_comp)
+                            if data_url:
+                                urls.append(data_url)
         except Exception:
             pass
         return urls
+
+    async def _image_to_data_url(self, comp: Image) -> str | None:
+        """将 Image 组件转换为 base64 data URL，失败时回退到原始 URL。"""
+        try:
+            b64 = await comp.convert_to_base64()
+            if b64:
+                # 通过 base64 前缀检测图片格式
+                if b64.startswith("/9j/"):
+                    fmt = "jpeg"
+                elif b64.startswith("iVBOR"):
+                    fmt = "png"
+                elif b64.startswith("R0lG"):
+                    fmt = "gif"
+                elif b64.startswith("UklG"):
+                    fmt = "webp"
+                elif b64.startswith("Qk0"):
+                    fmt = "bmp"
+                else:
+                    fmt = "jpeg"
+                return f"data:image/{fmt};base64,{b64}"
+        except Exception as e:
+            logger.warning(f"[ChatEngine] 图片转 base64 失败: {e}")
+        # 回退到原始 URL
+        if hasattr(comp, "url") and comp.url:
+            return comp.url
+        if hasattr(comp, "file") and comp.file:
+            return comp.file
+        return None

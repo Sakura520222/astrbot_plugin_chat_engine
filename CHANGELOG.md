@@ -1,5 +1,49 @@
 # 变更日志
 
+## [1.1.1] - 2026-06-03
+
+### 新增
+- **图片处理增强**:
+  - 纯图片消息自动被动记录到上下文（无需文字触发）
+  - 图片统一转换为 base64 data URL，兼容所有 Provider（OpenAI / Anthropic 等）
+  - 支持提取引用消息（Reply）中的图片一并发送给 LLM
+  - 新增图片文件存储服务（ImageStore），按 sha256 去重，避免重复存储
+  - 数据库新增 `CEImage` 模型和 `ImageRepository`，实现图片持久化管理
+- **分段模式增强**: 新增 `split_mode` 配置项，支持三种分段模式
+  - `sentence`: 按标点符号分段（经典模式）
+  - `newline`: 仅按换行符分段，保持每行完整
+  - `smart`: 智能分段，保护对话引号文本不被劈断，纯叙述行按标点细分
+- **文本清洗功能**:
+  - 新增 `enable_text_clean` 配置项，对 LLM 回复进行后处理清洗
+  - 支持去除 Emoji、括号及内容（动作描写/心理活动）、句尾多余字符
+  - 支持自定义句尾清理正则表达式
+- **引用回复上下文**: 用户消息自动附加引用消息的发送者和内容摘要，帮助 LLM 理解对话上下文
+- **会话级异步锁**: 同一会话的消息串行处理，避免并发写入导致数据不一致
+- **模态能力检测**: 自动从 Provider 获取模型支持的模态列表（text/image/tool_use），发送前过滤不支持的内容类型
+- **WebUI LLM 预览**: 新增会话 LLM 预览 API，展示发送给 LLM 的完整上下文、System Prompt、工具列表和 Token 估算
+
+### 改进
+- 分段发送逻辑重构为三模式架构，使用 `re.finditer` 替代 `re.split`，提升匹配准确性
+- Token 上下文限制自动回填优化，仅在值变化时持久化配置，避免每条消息都写磁盘
+- 被动消息处理统一纳入 `_load_compress_save` 流程，去除重复的压缩/保存逻辑
+- 被动记录消息新增 `message_id` 字段，支持消息溯源
+- Web 服务器 JSON 序列化使用 `default=str`，避免特殊对象序列化异常
+- WebUI 前端样式优化
+
+### 修复
+- 修复事件循环获取方式：`asyncio.get_event_loop()` → `asyncio.get_running_loop()`，避免在异步上下文中获取错误的事件循环
+- 修复配置保存的异步问题
+
+### 配置项新增
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `split_mode` | `sentence` | 分段模式: `sentence` / `newline` / `smart` |
+| `enable_text_clean` | `false` | 启用文本清洗 |
+| `clean_emoji` | `true` | 去除 Emoji |
+| `clean_brackets` | `true` | 去除括号内容 |
+| `clean_trailing_chars` | `true` | 清理句尾字符 |
+| `trailing_chars_pattern` | `[~～\\.。!！?？…·•\\-—_\\s]+$` | 句尾清理字符 (正则) |
+
 ## [1.1.0] - 2026-06-03
 
 ### 新增

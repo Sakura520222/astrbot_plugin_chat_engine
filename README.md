@@ -13,6 +13,9 @@
 - **群聊共享**: 同一群内所有人共享上下文
 - **私聊隔离**: 每个用户拥有独立上下文
 - **被动消息记录**: 群聊中未触发回复的消息也可记录到上下文，丰富 LLM 对群聊的感知
+- **图片处理**: 纯图片消息自动被动记录，图片转为 base64 data URL 兼容所有 Provider，支持提取引用消息中的图片
+- **引用回复上下文**: 用户消息自动附加引用消息摘要，帮助 LLM 理解对话上下文
+- **会话级锁保护**: 同一会话消息串行处理，避免并发写入冲突
 - **Token 安全截断**: 调用 LLM 前自动检测 Token 总量，超出阈值时从最旧消息开始裁剪
 - **上下文压缩**: 双模式支持
   - 轮数限制: 超过限制直接丢弃最早的消息
@@ -34,12 +37,20 @@
 ### 分段发送
 - 将 LLM 回复按标点符号拆分为多条消息分段发送
 - 模拟真人打字节奏
+- 支持三种分段模式: `sentence`（按标点）、`newline`（按换行）、`smart`（智能分段，保护对话引号）
 - 支持自定义分段正则、最大分段数、发送间隔
+
+### 文本清洗
+- 对 LLM 回复进行后处理清洗，去除不需要的内容
+- 支持去除 Emoji 表情符号
+- 支持去除括号及内容（动作描写、心理活动等）
+- 支持清理句尾多余字符，可自定义正则
 
 ### WebUI 管理面板
 - 独立 aiohttp 服务，可配置端口
 - 人格管理 (CRUD)
 - 会话管理 (查看、删除)
+- LLM 预览（查看发送给 LLM 的完整上下文、System Prompt、工具列表和 Token 估算）
 - 压缩配置
 - 用户标识格式配置
 - 工具管理
@@ -69,9 +80,15 @@
 | `max_tool_rounds` | `10` | 最大工具调用轮数 |
 | `enable_passive_record` | `false` | 启用被动记录群聊消息 |
 | `enable_split_send` | `false` | 启用分段发送 |
+| `split_mode` | `sentence` | 分段模式: `sentence` / `newline` / `smart` |
 | `split_pattern` | `[。！？\n]` | 分段匹配符号 (正则) |
 | `max_segments` | `5` | 最大分段数 |
 | `split_delay_ms` | `800` | 分段发送间隔 (毫秒) |
+| `enable_text_clean` | `false` | 启用文本清洗 |
+| `clean_emoji` | `true` | 去除 Emoji |
+| `clean_brackets` | `true` | 去除括号内容 |
+| `clean_trailing_chars` | `true` | 清理句尾字符 |
+| `trailing_chars_pattern` | `[~～\\.。!！?？…·•\\-—_\\s]+$` | 句尾清理字符 (正则) |
 | `web_port` | `8765` | WebUI 端口 |
 | `db_type` | `sqlite` | 数据库类型: `sqlite` / `mysql` |
 | `mysql_url` | `""` | MySQL 连接 URL |
@@ -80,15 +97,17 @@
 
 ```
 astrbot_plugin_chat_engine/
-├── main.py                    # 消息拦截 + LLM 调用编排
+├── main.py                    # 消息拦截 + LLM 调用编排 + 文本清洗
 ├── db/                        # 独立数据库层 (SQLAlchemy)
 │   ├── models.py              # 数据模型 (独立 MetaData)
 │   ├── engine.py              # 数据库引擎
 │   ├── session_repo.py        # 会话 CRUD
 │   ├── persona_repo.py        # 人格 CRUD
-│   └── tool_config_repo.py    # 工具配置
+│   ├── tool_config_repo.py    # 工具配置
+│   ├── image_repo.py          # 图片 CRUD (sha256 去重)
+│   └── image_store.py         # 图片文件存储服务
 ├── context/                   # 上下文管理
-│   ├── manager.py             # 会话 Key / 用户标识 / 压缩触发 / 被动记录
+│   ├── manager.py             # 会话 Key / 用户标识 / 压缩触发 / 被动记录 / 会话锁 / 图片解析
 │   ├── compressor.py          # 双模式压缩器
 │   └── token_counter.py       # Token 估算
 ├── persona/                   # 人格管理
@@ -97,7 +116,7 @@ astrbot_plugin_chat_engine/
 │   ├── scanner.py             # 扫描所有已注册工具
 │   └── manager.py             # 启用/禁用状态
 └── web/                       # WebUI
-    ├── server.py              # aiohttp REST API
+    ├── server.py              # aiohttp REST API (含 LLM 预览)
     └── static/                # 前端 HTML/CSS/JS
 ```
 
@@ -109,6 +128,9 @@ astrbot_plugin_chat_engine/
 - **独立数据库**: 使用独立 SQLAlchemy MetaData，避免与 AstrBot 全局元数据冲突
 - **Provider 复用**: 复用 AstrBot 已配置的 LLM Provider，也支持自定义配置
 - **被动记录**: 未触发回复的群聊消息以 `observed` 角色存储，压缩时归入当前轮次
+- **图片存储**: 图片转为 base64 data URL 发送给 LLM，文件按 sha256 去重存储，上下文中以 `image_ref` 引用节省空间
+- **引用回复**: 提取 Reply 组件中的发送者和内容，自动拼接到用户消息前缀
+- **会话锁**: `asyncio.Lock` 按 session_key 索引，确保同一会话的消息串行处理
 - **安全截断**: 调用 LLM 前通过 `TokenEstimator` 检测总量，超出阈值自动裁剪最旧消息
 
 ## 兼容性
