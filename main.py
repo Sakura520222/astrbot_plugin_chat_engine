@@ -6,6 +6,7 @@
 - 人格管理 (独立于 AstrBot)
 - Tool Calls (扫描所有工具，原生 function calling)
 - 上下文压缩 (轮数限制 / Token 阈值 LLM 总结)
+- 记忆系统 (短期记忆 / 长期记忆 / LLM 工具主动记忆 / 自动总结)
 - WebUI 管理面板 (独立 aiohttp 服务)
 """
 
@@ -25,6 +26,7 @@ from .context.manager import ChatContextManager
 from .context.token_counter import TokenEstimator
 from .db.engine import ChatEngineDB
 from .persona.manager import ChatPersonaManager
+from .memory.manager import MemoryManager
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
 from .web.server import ChatWebServer
@@ -33,8 +35,8 @@ from .web.server import ChatWebServer
 @register(
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
-    "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩和 WebUI 管理面板。",
-    "1.1.1",
+    "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
+    "1.2.0",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -46,6 +48,7 @@ class ChatEnginePlugin(Star):
         self.context_mgr: ChatContextManager = None
         self.persona_mgr: ChatPersonaManager = None
         self.tool_mgr: ChatToolManager = None
+        self.memory_mgr: MemoryManager = None
         self.web_server: ChatWebServer = None
 
     # 配置读取辅助
@@ -126,6 +129,24 @@ class ChatEnginePlugin(Star):
         tools = await self.tool_mgr.refresh_tools()
         logger.info(f"[ChatEngine] 扫描到 {len(tools)} 个工具")
 
+        # 记忆管理器
+        if self._cfg_bool("enable_memory", True):
+            try:
+                self.memory_mgr = MemoryManager(
+                    config=self.config,
+                    data_dir=data_dir,
+                    embedding_providers=self.context.get_all_embedding_providers(),
+                    rerank_providers=getattr(self.context.provider_manager, "rerank_provider_insts", []),
+                    provider_getter=_get_provider,
+                )
+                await self.memory_mgr.initialize()
+                logger.info("[ChatEngine] 记忆系统已初始化")
+            except Exception as e:
+                logger.warning(f"[ChatEngine] 记忆系统初始化失败，记忆功能将被禁用: {e}")
+                self.memory_mgr = None
+        else:
+            logger.info("[ChatEngine] 记忆功能已禁用")
+
         # 启动 WebUI
         web_port = self._cfg_int("web_port", 8765)
         self.web_server = ChatWebServer(self, port=web_port)
@@ -138,6 +159,8 @@ class ChatEnginePlugin(Star):
         logger.info("[ChatEngine] 正在关闭...")
         if self.web_server:
             await self.web_server.stop()
+        if self.memory_mgr:
+            await self.memory_mgr.close()
         if self.db:
             await self.db.close()
         logger.info("[ChatEngine] 已关闭")
@@ -327,6 +350,18 @@ class ChatEnginePlugin(Star):
                 system_prompt = await self.persona_mgr.get_system_prompt()
                 logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
+                #  注入记忆到 System Prompt
+                if self.memory_mgr:
+                    try:
+                        memory_text = await self.memory_mgr.get_memory_prompt(
+                            session_key, query=user_text
+                        )
+                        if memory_text:
+                            system_prompt += f"\n\n{memory_text}"
+                            logger.info("[ChatEngine] 注入记忆到 System Prompt")
+                    except Exception as e:
+                        logger.warning(f"[ChatEngine] 注入记忆失败: {e}")
+
                 #  构建工具集和工具描述
                 enable_tools = self._cfg_bool("enable_tool_calls", True)
                 tool_set = None
@@ -439,10 +474,30 @@ class ChatEnginePlugin(Star):
 
                 #  保存上下文
                 assistant_msg = {"role": "assistant", "content": response_text}
-                await self.context_mgr.append_and_save(
+                # 记录保存前的消息数，用于检测压缩是否发生
+                pre_save_count = len(context_messages_raw)
+                saved = await self.context_mgr.append_and_save(
                     session_key, user_msg, assistant_msg, provider=provider
                 )
                 logger.info("[ChatEngine] 上下文已保存")
+
+                #  记忆系统: 轮数追踪 + 自动总结
+                if self.memory_mgr:
+                    try:
+                        # 检测压缩是否发生
+                        post_save_count = len(saved) if saved else pre_save_count
+                        compressed = post_save_count < pre_save_count + 2
+
+                        if compressed:
+                            await self.memory_mgr.on_context_compressed(
+                                session_key, provider, self.persona_mgr, self.context_mgr
+                            )
+
+                        await self.memory_mgr.on_turn_complete(
+                            session_key, provider, self.persona_mgr, self.context_mgr
+                        )
+                    except Exception as e:
+                        logger.warning(f"[ChatEngine] 记忆轮数追踪失败: {e}")
 
         except Exception as e:
             logger.error(f"[ChatEngine] 顶层异常: {e}", exc_info=True)
@@ -915,3 +970,90 @@ class ChatEnginePlugin(Star):
         if hasattr(comp, "file") and comp.file:
             return comp.file
         return None
+
+    # 记忆工具 — LLM Tool Call
+
+    @filter.llm_tool(name="save_memory")
+    async def tool_save_memory(self, event: AstrMessageEvent, content: str, type: str):
+        '''Save a memory. Choose type based on persistence value:
+        - short_term: temporary context (current topic, recent plans, dialogue state)
+        - long_term: persistent facts (user preferences, identity, key decisions, recurring patterns)
+
+        Args:
+            content(string): Memory content. One fact per memory, concise, under 200 chars.
+            type(string): Memory type. Must be "short_term" or "long_term".
+        '''
+        if not self.memory_mgr:
+            return "Memory system is not available."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            from .memory.tools import save_memory_tool
+            return await save_memory_tool(
+                self.memory_mgr, session_key, content, type, source="tool"
+            )
+        except Exception as e:
+            logger.error(f"[ChatEngine] save_memory 工具失败: {e}")
+            return f"Failed to save memory: {type(e).__name__}"
+
+    @filter.llm_tool(name="search_memory")
+    async def tool_search_memory(self, event: AstrMessageEvent, query: str, top_k="5"):
+        '''Semantic search in long-term memory.
+        Short-term memory is always visible in the system prompt and does not need searching.
+
+        Args:
+            query(string): Search query text.
+            top_k(string): Number of results to return. Default 5.
+        '''
+        if not self.memory_mgr:
+            return "Memory system is not available."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            from .memory.tools import search_memory_tool
+            k = int(top_k) if isinstance(top_k, str) else (top_k or 5)
+            return await search_memory_tool(
+                self.memory_mgr, session_key, query, k
+            )
+        except Exception as e:
+            logger.error(f"[ChatEngine] search_memory 工具失败: {e}")
+            return f"Search failed: {type(e).__name__}"
+
+    @filter.llm_tool(name="update_memory")
+    async def tool_update_memory(self, event: AstrMessageEvent, id: str, content: str):
+        '''Update an existing memory. Automatically searches both short-term and long-term
+        storage by ID (short-term first, then long-term).
+
+        Args:
+            id(string): Memory ID (shown in brackets in the system prompt memories section).
+            content(string): New memory content. One fact, under 200 chars.
+        '''
+        if not self.memory_mgr:
+            return "Memory system is not available."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            from .memory.tools import update_memory_tool
+            return await update_memory_tool(
+                self.memory_mgr, session_key, id, content
+            )
+        except Exception as e:
+            logger.error(f"[ChatEngine] update_memory 工具失败: {e}")
+            return f"Update failed: {type(e).__name__}"
+
+    @filter.llm_tool(name="delete_memory")
+    async def tool_delete_memory(self, event: AstrMessageEvent, id: str, type: str):
+        '''Delete a specific memory by ID.
+
+        Args:
+            id(string): Memory ID to delete.
+            type(string): Memory type. Must be "short_term" or "long_term".
+        '''
+        if not self.memory_mgr:
+            return "Memory system is not available."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            from .memory.tools import delete_memory_tool
+            return await delete_memory_tool(
+                self.memory_mgr, session_key, id, type
+            )
+        except Exception as e:
+            logger.error(f"[ChatEngine] delete_memory 工具失败: {e}")
+            return f"Delete failed: {type(e).__name__}"

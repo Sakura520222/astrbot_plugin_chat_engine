@@ -54,6 +54,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
         // 加载对应 Tab 数据
         if (tab === 'personas') loadPersonas();
         if (tab === 'sessions') loadSessions();
+        if (tab === 'memories') loadMemorySessionList();
         if (tab === 'tools') loadTools();
         if (tab === 'config') loadConfig();
     });
@@ -483,6 +484,17 @@ const CONFIG_FIELDS = [
     { key: 'clean_brackets', label: '去除括号内容', type: 'checkbox', hint: '移除 LLM 回复中括号及其内容（如动作描写、心理活动等）。支持 ()（）[]【】。' },
     { key: 'clean_trailing_chars', label: '清理句尾字符', type: 'checkbox', hint: '清理每句话末尾多余的标点或符号。' },
     { key: 'trailing_chars_pattern', label: '句尾清理字符 (正则)', type: 'text', hint: '匹配句尾需要清理的字符的正则表达式。默认: [~～\\.。!！?？…·•\\-—_\\s]+$' },
+    { key: 'enable_memory', label: '启用记忆功能', type: 'checkbox', hint: '开启后，LLM 可通过工具主动记忆，并支持自动总结对话。' },
+    { key: 'short_term_max_count', label: '短期记忆最大条数', type: 'number', hint: '短期记忆最多保留多少条。超出时自动总结优先清理旧条目。' },
+    { key: 'short_term_max_chars', label: '每条短期记忆最大字符数', type: 'number', hint: '每条短期记忆建议不超过此字符数。' },
+    { key: 'long_term_max_count', label: '长期记忆最大条数', type: 'number', hint: '长期记忆最多保留多少条。' },
+    { key: 'long_term_retrieval_top_k', label: '长期记忆检索返回条数', type: 'number', hint: '每次 LLM 调用前检索长期记忆返回条数。' },
+    { key: 'long_term_fetch_k', label: '长期记忆检索候选数', type: 'number', hint: '向量检索初始候选数。' },
+    { key: 'long_term_enable_rerank', label: '启用长期记忆重排', type: 'checkbox', hint: '使用重排模型提高检索精度。需配置 RerankProvider。' },
+    { key: 'long_term_similarity_threshold', label: '长期记忆相似度阈值', type: 'number', step: '0.05', hint: '相似度低于此值的检索结果直接丢弃 (0.0-1.0)。' },
+    { key: 'memory_summary_interval', label: '自动总结触发轮数', type: 'number', hint: '每隔多少轮对话触发一次短期记忆自动总结。' },
+    { key: 'memory_summary_recent_turns', label: '总结参考最近轮数', type: 'number', hint: '自动总结时参考最近几轮对话。' },
+    { key: 'enable_auto_summary', label: '启用自动总结', type: 'checkbox', hint: '开启后，按配置轮数和上下文压缩时自动总结短期记忆。' },
 ];
 
 let currentConfig = {};
@@ -559,6 +571,172 @@ async function saveConfig() {
         toast('配置已保存');
     } catch (e) {
         toast('保存失败: ' + e.message, 'error');
+    }
+}
+
+
+// 记忆管理
+
+
+let currentMemorySessionKey = null;
+let shortTermMemories = [];
+let longTermMemories = [];
+
+async function loadMemorySessionList() {
+    try {
+        const data = await api('GET', '/api/sessions?page=1&page_size=100');
+        const select = document.getElementById('memory-session-select');
+        const currentVal = select.value;
+        select.innerHTML = '<option value="">选择会话...</option>';
+        (data.sessions || []).forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s.session_key;
+            const icon = s.session_key.includes(':private:') ? '👤' : '👥';
+            opt.textContent = `${icon} ${s.session_key}`;
+            select.appendChild(opt);
+        });
+        if (currentVal) {
+            select.value = currentVal;
+        }
+    } catch (e) {
+        toast('加载会话列表失败: ' + e.message, 'error');
+    }
+}
+
+async function onMemorySessionChange() {
+    const select = document.getElementById('memory-session-select');
+    currentMemorySessionKey = select.value;
+    if (!currentMemorySessionKey) {
+        document.getElementById('memory-content').style.display = 'none';
+        document.getElementById('memory-empty').style.display = '';
+        return;
+    }
+    document.getElementById('memory-content').style.display = '';
+    document.getElementById('memory-empty').style.display = 'none';
+    await loadMemories();
+}
+
+async function loadMemories() {
+    if (!currentMemorySessionKey) return;
+    const key = encodeURIComponent(currentMemorySessionKey);
+    try {
+        const [shortData, longData] = await Promise.all([
+            api('GET', `/api/memories/${key}/short`),
+            api('GET', `/api/memories/${key}/long`),
+        ]);
+        shortTermMemories = shortData.memories || [];
+        longTermMemories = longData.memories || [];
+        renderMemories();
+    } catch (e) {
+        toast('加载记忆失败: ' + e.message, 'error');
+    }
+}
+
+function renderMemories() {
+    renderShortTermMemories();
+    renderLongTermMemories();
+}
+
+function renderShortTermMemories() {
+    const container = document.getElementById('short-term-list');
+    if (!shortTermMemories.length) {
+        container.innerHTML = '<div class="card"><div class="card-body" style="color:var(--text-dim)">暂无短期记忆。</div></div>';
+        return;
+    }
+    container.innerHTML = shortTermMemories.map(m => `
+        <div class="card" style="padding:8px 12px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:12px;color:var(--text-dim);">[${escapeHtml(m.id.substring(0, 8))}] ${m.source === 'auto' ? '🤖' : m.source === 'manual' ? '✋' : '🔧'} ${m.updated_at ? new Date(m.updated_at).toLocaleString() : ''}</div>
+                    <div style="margin-top:2px;">${escapeHtml(m.content)}</div>
+                </div>
+                <div style="display:flex;gap:4px;flex-shrink:0;">
+                    <button class="btn btn-small btn-secondary" onclick="editMemory('short_term','${escapeHtml(m.id)}')">编辑</button>
+                    <button class="btn btn-small btn-danger" onclick="deleteMemory('short_term','${escapeHtml(m.id)}')">删除</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderLongTermMemories() {
+    const container = document.getElementById('long-term-list');
+    if (!longTermMemories.length) {
+        container.innerHTML = '<div class="card"><div class="card-body" style="color:var(--text-dim)">暂无长期记忆。</div></div>';
+        return;
+    }
+    container.innerHTML = longTermMemories.map(m => `
+        <div class="card" style="padding:8px 12px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:12px;color:var(--text-dim);">[${escapeHtml(m.id.substring(0, 8))}] ${m.source === 'manual' ? '✋' : '🔧'} ${m.updated_at ? new Date(m.updated_at).toLocaleString() : ''}</div>
+                    <div style="margin-top:2px;">${escapeHtml(m.content)}</div>
+                </div>
+                <div style="display:flex;gap:4px;flex-shrink:0;">
+                    <button class="btn btn-small btn-secondary" onclick="editMemory('long_term','${escapeHtml(m.id)}')">编辑</button>
+                    <button class="btn btn-small btn-danger" onclick="deleteMemory('long_term','${escapeHtml(m.id)}')">删除</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showAddMemoryModal(type) {
+    document.getElementById('memory-modal-title').textContent = type === 'short_term' ? '添加短期记忆' : '添加长期记忆';
+    document.getElementById('memory-type').value = type;
+    document.getElementById('memory-edit-id').value = '';
+    document.getElementById('memory-content-input').value = '';
+    document.getElementById('memory-modal').classList.remove('hidden');
+}
+
+function editMemory(type, id) {
+    const list = type === 'short_term' ? shortTermMemories : longTermMemories;
+    const mem = list.find(m => m.id === id);
+    if (!mem) return;
+    document.getElementById('memory-modal-title').textContent = '编辑记忆';
+    document.getElementById('memory-type').value = type;
+    document.getElementById('memory-edit-id').value = id;
+    document.getElementById('memory-content-input').value = mem.content;
+    document.getElementById('memory-modal').classList.remove('hidden');
+}
+
+function hideMemoryModal() {
+    document.getElementById('memory-modal').classList.add('hidden');
+}
+
+async function saveMemory(e) {
+    e.preventDefault();
+    if (!currentMemorySessionKey) return;
+    const type = document.getElementById('memory-type').value;
+    const editId = document.getElementById('memory-edit-id').value;
+    const content = document.getElementById('memory-content-input').value.trim();
+    const key = encodeURIComponent(currentMemorySessionKey);
+
+    try {
+        if (editId) {
+            await api('PUT', `/api/memories/${key}/${type}/${editId}`, { content });
+            toast('记忆已更新');
+        } else {
+            await api('POST', `/api/memories/${key}/${type}`, { content });
+            toast('记忆已添加');
+        }
+        hideMemoryModal();
+        await loadMemories();
+    } catch (e) {
+        toast('保存失败: ' + e.message, 'error');
+    }
+}
+
+async function deleteMemory(type, id) {
+    if (!confirm('确定要删除这条记忆吗？')) return;
+    if (!currentMemorySessionKey) return;
+    const key = encodeURIComponent(currentMemorySessionKey);
+    try {
+        await api('DELETE', `/api/memories/${key}/${type}/${id}`);
+        toast('记忆已删除');
+        await loadMemories();
+    } catch (e) {
+        toast('删除失败: ' + e.message, 'error');
     }
 }
 

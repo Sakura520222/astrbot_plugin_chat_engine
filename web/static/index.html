@@ -16,6 +16,7 @@
             <ul class="nav-list">
                 <li class="nav-item active" data-tab="personas">🎭 人格管理</li>
                 <li class="nav-item" data-tab="sessions">💬 会话管理</li>
+                <li class="nav-item" data-tab="memories">🧠 记忆管理</li>
                 <li class="nav-item" data-tab="tools">🔧 工具管理</li>
                 <li class="nav-item" data-tab="config">📝 配置设置</li>
             </ul>
@@ -40,6 +41,40 @@
                 </div>
                 <div id="session-list" class="card-list"></div>
                 <div id="session-pagination" class="pagination"></div>
+            </section>
+
+            <!-- 记忆管理 -->
+            <section id="tab-memories" class="tab-panel">
+                <div class="panel-header">
+                    <h3>记忆管理</h3>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <select id="memory-session-select" onchange="onMemorySessionChange()" style="max-width:400px;">
+                            <option value="">选择会话...</option>
+                        </select>
+                        <button class="btn btn-secondary" onclick="loadMemorySessionList()">🔄 刷新会话</button>
+                    </div>
+                </div>
+                <div id="memory-content" style="display:none;">
+                    <div class="memory-panels">
+                        <div class="memory-panel">
+                            <div class="memory-panel-header">
+                                <h4>📝 短期记忆</h4>
+                                <button class="btn btn-small btn-primary" onclick="showAddMemoryModal('short_term')">+ 添加</button>
+                            </div>
+                            <div id="short-term-list" class="card-list"></div>
+                        </div>
+                        <div class="memory-panel">
+                            <div class="memory-panel-header">
+                                <h4>💾 长期记忆</h4>
+                                <button class="btn btn-small btn-primary" onclick="showAddMemoryModal('long_term')">+ 添加</button>
+                            </div>
+                            <div id="long-term-list" class="card-list"></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="memory-empty" class="card">
+                    <div class="card-body">请先选择一个会话以查看记忆。</div>
+                </div>
             </section>
 
             <!-- 工具管理 -->
@@ -113,6 +148,28 @@
                 <button class="btn-close" onclick="hideLlmPreview()">&times;</button>
             </div>
             <div id="llm-preview-content" class="llm-preview"></div>
+        </div>
+    </div>
+
+    <!-- 记忆编辑模态框 -->
+    <div id="memory-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="memory-modal-title">添加记忆</h3>
+                <button class="btn-close" onclick="hideMemoryModal()">&times;</button>
+            </div>
+            <form id="memory-form" onsubmit="saveMemory(event)">
+                <input type="hidden" id="memory-type">
+                <input type="hidden" id="memory-edit-id">
+                <div class="form-group">
+                    <label for="memory-content-input">记忆内容</label>
+                    <textarea id="memory-content-input" rows="4" required placeholder="输入记忆内容..." maxlength="500"></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="hideMemoryModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
         </div>
     </div>
 

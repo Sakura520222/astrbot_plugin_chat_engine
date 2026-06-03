@@ -151,5 +151,71 @@
         "type": "string",
         "default": "[~～\\.。!！?？…·•\\-—_\\s]+$",
         "hint": "匹配句尾需要清理的字符的正则表达式。默认清理波浪号、句号、感叹号、问号、省略号、破折号、空格等。"
+    },
+    "enable_memory": {
+        "description": "启用记忆功能",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，LLM 可通过工具主动记忆，并支持自动总结对话。"
+    },
+    "short_term_max_count": {
+        "description": "短期记忆最大条数",
+        "type": "int",
+        "default": 30,
+        "hint": "短期记忆最多保留多少条。超出时自动总结会优先清理旧条目。"
+    },
+    "short_term_max_chars": {
+        "description": "每条短期记忆最大字符数",
+        "type": "int",
+        "default": 200,
+        "hint": "每条短期记忆建议不超过此字符数。LLM 工具保存时会受此约束。"
+    },
+    "long_term_max_count": {
+        "description": "长期记忆最大条数",
+        "type": "int",
+        "default": 200,
+        "hint": "长期记忆最多保留多少条。超出时通过自动总结清理。"
+    },
+    "long_term_retrieval_top_k": {
+        "description": "长期记忆检索返回条数",
+        "type": "int",
+        "default": 5,
+        "hint": "每次 LLM 调用前检索长期记忆返回的最相关条数。LLM 使用工具检索时可覆盖此值。"
+    },
+    "long_term_fetch_k": {
+        "description": "长期记忆检索候选数",
+        "type": "int",
+        "default": 20,
+        "hint": "向量检索初始候选数。先多取候选，再经重排和阈值过滤后返回 top_k 条。"
+    },
+    "long_term_enable_rerank": {
+        "description": "启用长期记忆重排",
+        "type": "bool",
+        "default": true,
+        "hint": "使用重排模型对检索结果重新排序，提高精度。需要配置 RerankProvider。"
+    },
+    "long_term_similarity_threshold": {
+        "description": "长期记忆相似度阈值",
+        "type": "float",
+        "default": 0.3,
+        "hint": "相似度低于此值的检索结果直接丢弃 (0.0-1.0)。"
+    },
+    "memory_summary_interval": {
+        "description": "自动总结触发轮数",
+        "type": "int",
+        "default": 5,
+        "hint": "每隔多少轮对话触发一次短期记忆自动总结。"
+    },
+    "memory_summary_recent_turns": {
+        "description": "总结参考最近轮数",
+        "type": "int",
+        "default": 5,
+        "hint": "自动总结时参考最近几轮对话内容。"
+    },
+    "enable_auto_summary": {
+        "description": "启用自动总结",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，按配置轮数和上下文压缩时自动总结短期记忆。"
     }
 }
