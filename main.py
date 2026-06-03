@@ -303,9 +303,6 @@ class ChatEnginePlugin(Star):
                 user_text = self.context_mgr.format_user_message(event)
 
                 image_urls = await self._extract_image_urls(event)
-                # 按需携图: 如果引用的图片已在上下文中，过滤掉重复的
-                if image_urls and self._reply_image_in_context(event, context_messages):
-                    image_urls = await self._filter_reply_dup_images(event, image_urls)
                 if image_urls:
                     logger.info(f"[ChatEngine] 提取到 {len(image_urls)} 张图片")
                     user_msg = {
@@ -783,57 +780,3 @@ class ChatEnginePlugin(Star):
             return comp.file
         return None
 
-    def _reply_image_in_context(self, event, context_messages: list[dict]) -> bool:
-        """检查 Reply 引用的消息中的图片是否已存在于加载的上下文中。
-
-        通过匹配 Reply.id 与上下文中消息的 message_id 来判断。
-        """
-        reply_msg_id = None
-        for comp in event.get_messages():
-            if isinstance(comp, Reply):
-                reply_msg_id = str(comp.id)
-                break
-        if not reply_msg_id:
-            return False
-
-        # 在上下文中查找是否有匹配 message_id 且包含图片的消息
-        for msg in context_messages:
-            if str(msg.get("message_id", "")) == reply_msg_id:
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") in (
-                            "image_url",
-                            "image_ref",
-                            "image",
-                        ):
-                            return True
-        return False
-
-    async def _filter_reply_dup_images(
-        self, event: AstrMessageEvent, _image_urls: list[str]
-    ) -> list[str]:
-        """当引用图片已在上下文中时，过滤掉来自 Reply chain 的重复图片。
-
-        保留当前消息直接附带的图片（如果有），只去掉 Reply chain 中的。
-        由于 image_urls 是混合列表（当前消息 + Reply chain），通过重新提取来区分。
-        """
-        # 只提取当前消息直接附带的图片（不含 Reply chain）
-        direct_urls = []
-        try:
-            for comp in event.get_messages():
-                if isinstance(comp, Image):
-                    data_url = await self._image_to_data_url(comp)
-                    if data_url:
-                        direct_urls.append(data_url)
-                # Reply chain 的图片不包含
-        except Exception:
-            pass
-        if direct_urls:
-            logger.info(
-                f"[ChatEngine] 引用图片已在上下文中，保留 {len(direct_urls)} 张直接图片"
-            )
-            return direct_urls
-        # 没有直接图片，返回空列表（引用图片已在上下文中，不需要重复携带）
-        logger.info("[ChatEngine] 引用图片已在上下文中，跳过重复携带")
-        return []
