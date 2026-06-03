@@ -196,8 +196,9 @@ class ChatEnginePlugin(Star):
 
             # ---------- 加载上下文 ----------
             context_messages_raw = await self.context_mgr.load_context(session_key)
-            # 将 observed (被动记录) 消息转为 user role，供 LLM API 使用
-            # 拷贝一份避免修改数据库原始数据
+            # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
+            # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
+            # 此处将其转换为 "user" role 供 LLM API 使用，同时拷贝一份避免修改原始数据。
             context_messages = [
                 {**msg, "role": "user"} if msg.get("role") == "observed" else msg
                 for msg in context_messages_raw
@@ -300,9 +301,9 @@ class ChatEnginePlugin(Star):
                     for seg_idx, segment in enumerate(segments):
                         yield event.plain_result(segment)
                         if seg_idx < len(segments) - 1:
-                            delay_ms = int(
-                                self.config.get("split_delay_ms", 800)
-                            )
+                            delay_ms = max(0, min(
+                                int(self.config.get("split_delay_ms", 800)), 5000
+                            ))
                             await asyncio.sleep(delay_ms / 1000)
 
             if hasattr(final_response, "result_chain") and final_response.result_chain:
@@ -430,7 +431,13 @@ class ChatEnginePlugin(Star):
         tool_set=None,
         event: AstrMessageEvent = None,
     ) -> str:
-        """执行单个工具调用，返回结果字符串。"""
+        """执行单个工具调用，返回结果字符串。
+
+        支持三种 handler 返回类型:
+        1. coroutine — 标准 async 函数，直接 await 获取结果
+        2. async generator — 部分插件 handler 使用 yield，通过 async for 收集后取最后一个值
+        3. 同步返回值 — 非 awaitable 非 generator 的普通返回值
+        """
         try:
             tool_manager = self.context.get_llm_tool_manager()
 
@@ -528,9 +535,12 @@ class ChatEnginePlugin(Star):
         except Exception:
             pass
         if max_tokens <= 0:
-            max_tokens = int(
-                self.config.get("fallback_max_context_tokens", 32000)
-            )
+            try:
+                max_tokens = int(
+                    self.config.get("fallback_max_context_tokens", 128000)
+                )
+            except (ValueError, TypeError):
+                max_tokens = 128000
 
         # 保留比例 (与 token 压缩模式共用同一个配置)
         ratio = float(self.config.get("token_threshold_ratio", 0.8))
@@ -549,6 +559,10 @@ class ChatEnginePlugin(Star):
             cut_idx = i + 1
             if total <= threshold:
                 break
+
+        # 确保至少保留最后1条消息（防止所有消息 token 都超过阈值时返回空列表）
+        if cut_idx >= len(messages):
+            cut_idx = len(messages) - 1
 
         if cut_idx > 0:
             logger.info(

@@ -31,7 +31,7 @@
     "fallback_max_context_tokens": {
         "description": "模型最大上下文 Token (Fallback)",
         "type": "int",
-        "default": 32000,
+        "default": 128000,
         "hint": "当模型未报告 max_context_tokens 时使用此值。"
     },
     "user_id_format": {
