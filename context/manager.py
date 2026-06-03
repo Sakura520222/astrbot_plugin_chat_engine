@@ -127,6 +127,7 @@ class ChatContextManager:
         messages = existing + new_messages
 
         # 压缩检查：未传入 provider 时尝试自行获取
+        _provider = None
         try:
             _provider = provider
             if _provider is None and self.provider_getter:

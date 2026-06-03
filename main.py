@@ -76,6 +76,8 @@ class ChatEnginePlugin(Star):
             logger.warning(f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}")
             return default
         if isinstance(val, (int, float)):
+            if isinstance(val, float) and val not in (0.0, 1.0):
+                logger.warning(f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换")
             return bool(val)
         return default
 
