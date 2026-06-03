@@ -339,6 +339,11 @@ class ChatWebServer:
             "split_pattern",
             "max_segments",
             "split_delay_ms",
+            "enable_text_clean",
+            "clean_emoji",
+            "clean_brackets",
+            "clean_trailing_chars",
+            "trailing_chars_pattern",
         ]
         config_data = {}
         for key in config_keys:
@@ -362,6 +367,11 @@ class ChatWebServer:
             "split_pattern",
             "max_segments",
             "split_delay_ms",
+            "enable_text_clean",
+            "clean_emoji",
+            "clean_brackets",
+            "clean_trailing_chars",
+            "trailing_chars_pattern",
         ]
         for key in allowed_keys:
             if key in data:

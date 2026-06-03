@@ -477,6 +477,11 @@ const CONFIG_FIELDS = [
     { key: 'split_pattern', label: '分段匹配符号 (正则)', type: 'text', hint: '用于拆分 LLM 回复的正则表达式，匹配到的符号作为分段点。默认: [。！？\\n]' },
     { key: 'max_segments', label: '最大分段数', type: 'number', hint: '单次回复最多拆分成多少段。超过则合并后面的段落。' },
     { key: 'split_delay_ms', label: '分段发送间隔 (毫秒)', type: 'number', hint: '每段消息之间的发送延迟。' },
+    { key: 'enable_text_clean', label: '启用文本清洗', type: 'checkbox', hint: '开启后，对 LLM 回复进行文本清洗，去除 Emoji、括号内容、句尾多余字符等。' },
+    { key: 'clean_emoji', label: '去除 Emoji', type: 'checkbox', hint: '移除 LLM 回复中的所有 Emoji 表情符号。' },
+    { key: 'clean_brackets', label: '去除括号内容', type: 'checkbox', hint: '移除 LLM 回复中括号及其内容（如动作描写、心理活动等）。支持 ()（）[]【】。' },
+    { key: 'clean_trailing_chars', label: '清理句尾字符', type: 'checkbox', hint: '清理每句话末尾多余的标点或符号。' },
+    { key: 'trailing_chars_pattern', label: '句尾清理字符 (正则)', type: 'text', hint: '匹配句尾需要清理的字符的正则表达式。默认: [~～\\.。!！?？…·•\\-—_\\s]+$' },
 ];
 
 let currentConfig = {};

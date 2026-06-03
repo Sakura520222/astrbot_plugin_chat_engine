@@ -686,7 +686,7 @@ class ChatEnginePlugin(Star):
     def _split_response(self, text: str) -> list[str]:
         """将 LLM 回复按配置的分段符号拆分。
 
-        使用 re.split + 捕获组保留分隔符，将文本拆为多段。
+        使用 re.findall 匹配「文本 + 分隔符」整体，天然保留分隔符且不产生空段。
         超过 max_segments 时，从尾部合并多余段落。
         未启用分段或只有一段时直接返回原文。
         """
@@ -700,24 +700,26 @@ class ChatEnginePlugin(Star):
         max_segments = self._cfg_int("max_segments", 5)
 
         try:
-            # re.split 捕获组会保留分隔符: [text, delim, text, delim, ...]
-            parts = re.split(f"({pattern})", text)
+            # 剥掉外层 [...] 避免嵌套字符类导致 Unicode 匹配异常
+            char_class = pattern
+            if char_class.startswith("[") and char_class.endswith("]"):
+                char_class = char_class[1:-1]
+            # findall 无捕获组，返回完整匹配文本（含分隔符）
+            segments = re.findall(f"[^{char_class}]*[{char_class}]", text)
+            # 尾部不含分隔符的剩余文本 (如 "你好？\n2. 我很好" 中的 "2. 我很好")
+            if segments:
+                last_end = 0
+                for m in re.finditer(f"[^{char_class}]*[{char_class}]", text):
+                    last_end = m.end()
+                tail = text[last_end:]
+                if tail.strip():
+                    segments.append(tail)
         except re.error:
             logger.warning(f"[ChatEngine] 分段正则无效: {pattern}，跳过分段")
             return [text]
 
-        # 将 text+delim 配对合并
-        segments = []
-        i = 0
-        while i < len(parts):
-            segment = parts[i]
-            if i + 1 < len(parts):
-                segment += parts[i + 1]  # 追加分隔符
-                i += 2
-            else:
-                i += 1
-            if segment.strip():
-                segments.append(segment.strip())
+        # 去除空白段
+        segments = [s.strip() for s in segments if s.strip()]
 
         if len(segments) <= 1:
             return [text]
