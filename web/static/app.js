@@ -1,10 +1,10 @@
-// ============================================================
+
 // Chat Engine WebUI — Frontend Application
-// ============================================================
+
 
 const API_BASE = '';  // 同源，无需前缀
 
-// ---- 工具函数 ----
+//  工具函数 
 
 async function api(method, path, body = null) {
     const opts = {
@@ -32,7 +32,16 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
-// ---- Tab 切换 ----
+function formatReplyContent(text) {
+    if (!text) return text;
+    // 将 [回复 xxx] 替换为 blockquote 样式
+    return text.replace(
+        /\[回复 ([^\]]+)\]/g,
+        '<blockquote class="reply-quote">$1</blockquote>'
+    );
+}
+
+//  Tab 切换 
 
 document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', () => {
@@ -50,9 +59,9 @@ document.querySelectorAll('.nav-item').forEach(item => {
     });
 });
 
-// ============================================================
+
 // 人格管理
-// ============================================================
+
 
 let personas = [];
 
@@ -168,9 +177,9 @@ async function setDefaultPersona(id) {
     }
 }
 
-// ============================================================
+
 // 会话管理
-// ============================================================
+
 
 let sessionPage = 1;
 const sessionPageSize = 20;
@@ -242,11 +251,11 @@ async function viewSession(key) {
             const role = msg.role || 'unknown';
             let content = '';
             if (typeof msg.content === 'string') {
-                content = escapeHtml(msg.content);
+                content = formatReplyContent(escapeHtml(msg.content));
             } else if (Array.isArray(msg.content)) {
                 content = msg.content.map(p => {
                     if (p.type === 'text') {
-                        return escapeHtml(p.text || '');
+                        return formatReplyContent(escapeHtml(p.text || ''));
                     }
                     if (p.type === 'image_url' && p.image_url && p.image_url.url) {
                         return `<img src="${escapeHtml(p.image_url.url)}" style="max-width:200px;max-height:200px;border-radius:6px;margin:4px 0;display:block;" />`;
@@ -254,7 +263,7 @@ async function viewSession(key) {
                     return '';
                 }).filter(Boolean).join('\n');
             }
-            const roleLabel = { user: 'USER', assistant: 'ASSISTANT', system: 'SYSTEM', tool: 'TOOL' }[role] || role.toUpperCase();
+            const roleLabel = { user: 'USER', assistant: 'ASSISTANT', system: 'SYSTEM', tool: 'TOOL', observed: 'OBSERVED' }[role] || role.toUpperCase();
             return `
                 <div class="msg-bubble msg-${role}">
                     <div class="msg-role">${roleLabel}</div>
@@ -288,9 +297,9 @@ async function deleteSession(key) {
     }
 }
 
-// ============================================================
+
 // 工具管理
-// ============================================================
+
 
 async function loadTools() {
     try {
@@ -367,9 +376,9 @@ async function refreshTools() {
     }
 }
 
-// ============================================================
+
 // 配置管理
-// ============================================================
+
 
 const CONFIG_FIELDS = [
     { key: 'compression_mode', label: '上下文压缩模式', type: 'select', options: ['turn_limit', 'token'], hint: 'turn_limit: 超过轮数限制丢弃旧消息。token: 达到 Token 阈值时 LLM 总结旧消息。' },
@@ -465,9 +474,9 @@ async function saveConfig() {
     }
 }
 
-// ============================================================
+
 // 初始化
-// ============================================================
+
 
 document.addEventListener('DOMContentLoaded', () => {
     loadPersonas();

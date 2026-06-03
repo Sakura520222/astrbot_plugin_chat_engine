@@ -43,7 +43,7 @@ class ChatWebServer:
 
     def _setup_routes(self):
         """注册所有 API 路由"""
-        # ---- 人格管理 ----
+        #  人格管理
         self.app.router.add_get("/api/personas", self._api_list_personas)
         self.app.router.add_post("/api/personas", self._api_create_persona)
         self.app.router.add_put("/api/personas/{id}", self._api_update_persona)
@@ -52,22 +52,22 @@ class ChatWebServer:
             "/api/personas/{id}/set_default", self._api_set_default_persona
         )
 
-        # ---- 会话管理 ----
+        #  会话管理
         self.app.router.add_get("/api/sessions", self._api_list_sessions)
         self.app.router.add_get("/api/sessions/{key:.*}", self._api_get_session)
         self.app.router.add_delete("/api/sessions/{key:.*}", self._api_delete_session)
 
-        # ---- 配置管理 ----
+        #  配置管理
         self.app.router.add_get("/api/config", self._api_get_config)
         self.app.router.add_put("/api/config", self._api_update_config)
 
-        # ---- 工具管理 ----
+        #  工具管理
         self.app.router.add_get("/api/tools", self._api_list_tools)
         self.app.router.add_post("/api/tools/refresh", self._api_refresh_tools)
         self.app.router.add_post("/api/tools/{name}/enable", self._api_enable_tool)
         self.app.router.add_post("/api/tools/{name}/disable", self._api_disable_tool)
 
-        # ---- 前端页面 ----
+        #  前端页面
         self.app.router.add_get("/", self._serve_index)
         self.app.router.add_get("/{filename}", self._serve_static)
 

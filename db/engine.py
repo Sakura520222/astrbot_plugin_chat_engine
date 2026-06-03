@@ -9,6 +9,7 @@ import os
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .models import (  # noqa: F401
+    CEImage,
     CEPersona,
     ChatSession,
     ToolConfig,
@@ -25,9 +26,11 @@ class ChatEngineDB:
         self.session_factory = async_sessionmaker(
             self.engine, class_=AsyncSession, expire_on_commit=False
         )
-        self.session_repo: SessionRepository = None
-        self.persona_repo: PersonaRepository = None
-        self.tool_config_repo: ToolConfigRepository = None
+        self.session_repo = None
+        self.persona_repo = None
+        self.tool_config_repo = None
+        self.image_repo = None
+        self.image_store = None
 
     async def initialize(self):
         """创建所有表并初始化 Repository"""
@@ -35,6 +38,7 @@ class ChatEngineDB:
         async with self.engine.begin() as conn:
             await conn.run_sync(chat_engine_metadata.create_all)
 
+        from .image_repo import ImageRepository
         from .persona_repo import PersonaRepository
         from .session_repo import SessionRepository
         from .tool_config_repo import ToolConfigRepository
@@ -42,6 +46,14 @@ class ChatEngineDB:
         self.session_repo = SessionRepository(self.session_factory)
         self.persona_repo = PersonaRepository(self.session_factory)
         self.tool_config_repo = ToolConfigRepository(self.session_factory)
+        self.image_repo = ImageRepository(self.session_factory)
+
+    def init_image_store(self, data_dir: str):
+        """初始化图片存储服务（需要在 initialize 之后调用）"""
+        from .image_store import ImageStore
+
+        image_dir = os.path.join(data_dir, "images")
+        self.image_store = ImageStore(image_dir, self.image_repo)
 
     async def close(self):
         """关闭数据库连接"""

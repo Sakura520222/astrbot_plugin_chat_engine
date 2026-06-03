@@ -17,7 +17,7 @@ import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import Image, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
 
@@ -102,6 +102,7 @@ class ChatEnginePlugin(Star):
         # 初始化数据库
         self.db = ChatEngineDB(db_url)
         await self.db.initialize()
+        self.db.init_image_store(data_dir)
         logger.info(f"[ChatEngine] 数据库已初始化 ({db_type})")
 
         # Provider getter (延迟获取)
@@ -115,6 +116,7 @@ class ChatEnginePlugin(Star):
             persona_repo=self.db.persona_repo,
             config=self.config,
             provider_getter=_get_provider,
+            image_store=self.db.image_store,
         )
 
         # 工具管理器
@@ -176,6 +178,9 @@ class ChatEnginePlugin(Star):
                                 )
                                 passive_msg = {
                                     "role": "observed",
+                                    "message_id": getattr(
+                                        event.message_obj, "message_id", ""
+                                    ),
                                     "content": [
                                         {"type": "text", "text": passive_prefix},
                                     ]
@@ -237,9 +242,11 @@ class ChatEnginePlugin(Star):
                         try:
                             passive_text = self.context_mgr.format_user_message(event)
                             passive_images = await self._extract_image_urls(event)
+                            _msg_id = getattr(event.message_obj, "message_id", "")
                             if passive_images:
                                 passive_msg = {
                                     "role": "observed",
+                                    "message_id": _msg_id,
                                     "content": [
                                         {"type": "text", "text": passive_text},
                                     ]
@@ -251,14 +258,13 @@ class ChatEnginePlugin(Star):
                             else:
                                 passive_msg = {
                                     "role": "observed",
+                                    "message_id": _msg_id,
                                     "content": passive_text,
                                 }
                             await self.context_mgr.record_passive_message(
                                 passive_key, passive_msg
                             )
-                            logger.debug(
-                                f"[ChatEngine] 被动记录消息到 {passive_key}"
-                            )
+                            logger.debug(f"[ChatEngine] 被动记录消息到 {passive_key}")
                         except Exception as e:
                             logger.debug(f"[ChatEngine] 被动记录失败: {e}")
 
@@ -282,7 +288,6 @@ class ChatEnginePlugin(Star):
 
             # 获取会话锁，确保同一会话的消息串行处理（防止竞态条件）
             async with self.context_mgr.get_session_lock(session_key):
-
                 #  加载上下文
                 context_messages_raw = await self.context_mgr.load_context(session_key)
                 # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
@@ -298,10 +303,14 @@ class ChatEnginePlugin(Star):
                 user_text = self.context_mgr.format_user_message(event)
 
                 image_urls = await self._extract_image_urls(event)
+                # 按需携图: 如果引用的图片已在上下文中，过滤掉重复的
+                if image_urls and self._reply_image_in_context(event, context_messages):
+                    image_urls = await self._filter_reply_dup_images(event, image_urls)
                 if image_urls:
                     logger.info(f"[ChatEngine] 提取到 {len(image_urls)} 张图片")
                     user_msg = {
                         "role": "user",
+                        "message_id": getattr(event.message_obj, "message_id", ""),
                         "content": [
                             {"type": "text", "text": user_text},
                         ]
@@ -311,7 +320,11 @@ class ChatEnginePlugin(Star):
                         ],
                     }
                 else:
-                    user_msg = {"role": "user", "content": user_text}
+                    user_msg = {
+                        "role": "user",
+                        "message_id": getattr(event.message_obj, "message_id", ""),
+                        "content": user_text,
+                    }
 
                 #  获取人格 System Prompt
                 system_prompt = await self.persona_mgr.get_system_prompt()
@@ -720,6 +733,7 @@ class ChatEnginePlugin(Star):
     async def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
         """从消息事件中提取图片并转换为 base64 data URL 列表。
 
+        同时提取当前消息中的图片和引用消息（Reply）中的图片。
         转换为 data URL 确保所有 Provider（OpenAI / Anthropic 等）都能正确处理。
         转换失败时回退到原始 URL。
         """
@@ -727,31 +741,99 @@ class ChatEnginePlugin(Star):
         try:
             for comp in event.get_messages():
                 if isinstance(comp, Image):
-                    try:
-                        b64 = await comp.convert_to_base64()
-                        if b64:
-                            # 通过 base64 前缀检测图片格式
-                            if b64.startswith("/9j/"):
-                                fmt = "jpeg"
-                            elif b64.startswith("iVBOR"):
-                                fmt = "png"
-                            elif b64.startswith("R0lG"):
-                                fmt = "gif"
-                            elif b64.startswith("UklG"):
-                                fmt = "webp"
-                            elif b64.startswith("Qk0"):
-                                fmt = "bmp"
-                            else:
-                                fmt = "jpeg"
-                            urls.append(f"data:image/{fmt};base64,{b64}")
-                            continue
-                    except Exception as e:
-                        logger.warning(f"[ChatEngine] 图片转 base64 失败: {e}")
-                    # 回退到原始 URL
-                    if hasattr(comp, "url") and comp.url:
-                        urls.append(comp.url)
-                    elif hasattr(comp, "file") and comp.file:
-                        urls.append(comp.file)
+                    data_url = await self._image_to_data_url(comp)
+                    if data_url:
+                        urls.append(data_url)
+                elif isinstance(comp, Reply) and comp.chain:
+                    # 提取引用消息中的图片
+                    for chain_comp in comp.chain:
+                        if isinstance(chain_comp, Image):
+                            data_url = await self._image_to_data_url(chain_comp)
+                            if data_url:
+                                urls.append(data_url)
         except Exception:
             pass
         return urls
+
+    async def _image_to_data_url(self, comp: Image) -> str | None:
+        """将 Image 组件转换为 base64 data URL，失败时回退到原始 URL。"""
+        try:
+            b64 = await comp.convert_to_base64()
+            if b64:
+                # 通过 base64 前缀检测图片格式
+                if b64.startswith("/9j/"):
+                    fmt = "jpeg"
+                elif b64.startswith("iVBOR"):
+                    fmt = "png"
+                elif b64.startswith("R0lG"):
+                    fmt = "gif"
+                elif b64.startswith("UklG"):
+                    fmt = "webp"
+                elif b64.startswith("Qk0"):
+                    fmt = "bmp"
+                else:
+                    fmt = "jpeg"
+                return f"data:image/{fmt};base64,{b64}"
+        except Exception as e:
+            logger.warning(f"[ChatEngine] 图片转 base64 失败: {e}")
+        # 回退到原始 URL
+        if hasattr(comp, "url") and comp.url:
+            return comp.url
+        if hasattr(comp, "file") and comp.file:
+            return comp.file
+        return None
+
+    def _reply_image_in_context(self, event, context_messages: list[dict]) -> bool:
+        """检查 Reply 引用的消息中的图片是否已存在于加载的上下文中。
+
+        通过匹配 Reply.id 与上下文中消息的 message_id 来判断。
+        """
+        reply_msg_id = None
+        for comp in event.get_messages():
+            if isinstance(comp, Reply):
+                reply_msg_id = str(comp.id)
+                break
+        if not reply_msg_id:
+            return False
+
+        # 在上下文中查找是否有匹配 message_id 且包含图片的消息
+        for msg in context_messages:
+            if str(msg.get("message_id", "")) == reply_msg_id:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") in (
+                            "image_url",
+                            "image_ref",
+                            "image",
+                        ):
+                            return True
+        return False
+
+    async def _filter_reply_dup_images(
+        self, event: AstrMessageEvent, _image_urls: list[str]
+    ) -> list[str]:
+        """当引用图片已在上下文中时，过滤掉来自 Reply chain 的重复图片。
+
+        保留当前消息直接附带的图片（如果有），只去掉 Reply chain 中的。
+        由于 image_urls 是混合列表（当前消息 + Reply chain），通过重新提取来区分。
+        """
+        # 只提取当前消息直接附带的图片（不含 Reply chain）
+        direct_urls = []
+        try:
+            for comp in event.get_messages():
+                if isinstance(comp, Image):
+                    data_url = await self._image_to_data_url(comp)
+                    if data_url:
+                        direct_urls.append(data_url)
+                # Reply chain 的图片不包含
+        except Exception:
+            pass
+        if direct_urls:
+            logger.info(
+                f"[ChatEngine] 引用图片已在上下文中，保留 {len(direct_urls)} 张直接图片"
+            )
+            return direct_urls
+        # 没有直接图片，返回空列表（引用图片已在上下文中，不需要重复携带）
+        logger.info("[ChatEngine] 引用图片已在上下文中，跳过重复携带")
+        return []

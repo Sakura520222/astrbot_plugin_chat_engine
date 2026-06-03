@@ -29,11 +29,13 @@ class ChatContextManager:
         persona_repo: PersonaRepository,
         config: dict,
         provider_getter=None,
+        image_store=None,
     ):
         self.repo = session_repo
         self.persona_repo = persona_repo
         self.config = config
         self.provider_getter = provider_getter
+        self.image_store = image_store
         self.compressor: BaseCompressor = ContextCompressorFactory.create(
             config, provider_getter
         )
@@ -97,6 +99,7 @@ class ChatContextManager:
                 if isinstance(comp, Reply):
                     sender = comp.sender_nickname or ""
                     quoted_text = comp.message_str or ""
+
                     if sender and quoted_text:
                         return f"{sender}: {quoted_text}"
                     elif quoted_text:
@@ -122,9 +125,10 @@ class ChatContextManager:
         return event.is_at_or_wake_command  # 需要@Bot
 
     async def load_context(self, session_key: str) -> list[dict]:
-        """从数据库加载上下文"""
+        """从数据库加载上下文，并将 image_ref 引用解析为 data URL。"""
         try:
-            return await self.repo.get_context(session_key)
+            messages = await self.repo.get_context(session_key)
+            return await self._resolve_images_for_messages(messages)
         except Exception as e:
             logger.error(f"[ChatEngine] 加载上下文失败 [{session_key}]: {e}")
             return []
@@ -169,6 +173,51 @@ class ChatContextManager:
             return self._cached_modalities
         return default_modalities
 
+    async def _store_images_for_messages(self, messages: list[dict]) -> list[dict]:
+        """将消息中的 inline 图片 (data URL) 替换为 image_ref 引用。
+
+        遍历每条消息的 content 列表，将 data: 开头的 image_url 替换为 image_ref。
+        image_store 为 None 时跳过（向后兼容）。
+        """
+        if not self.image_store:
+            return messages
+        stored = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                msg = {
+                    **msg,
+                    "content": await self.image_store.store_message_images(content),
+                }
+            stored.append(msg)
+        return stored
+
+    async def _resolve_images_for_messages(self, messages: list[dict]) -> list[dict]:
+        """将消息中的 image_ref 引用还原为 image_url data URL。
+
+        用于发送给 LLM 和 WebUI 展示。
+        image_store 为 None 时跳过（向后兼容旧数据）。
+        """
+        if not self.image_store:
+            return messages
+        resolved = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                has_ref = any(
+                    isinstance(p, dict) and p.get("type") == "image_ref"
+                    for p in content
+                )
+                if has_ref:
+                    msg = {
+                        **msg,
+                        "content": await self.image_store.resolve_message_images(
+                            content
+                        ),
+                    }
+            resolved.append(msg)
+        return resolved
+
     async def _load_compress_save(
         self,
         session_key: str,
@@ -210,6 +259,9 @@ class ChatContextManager:
                 f"{e}，将保存未压缩的上下文",
                 exc_info=True,
             )
+
+        # 保存前: 将新消息中的 inline 图片替换为 image_ref 引用
+        messages = await self._store_images_for_messages(messages)
 
         try:
             await self.repo.save_context(session_key, messages)

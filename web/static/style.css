@@ -37,7 +37,7 @@ body {
     min-height: 100vh;
 }
 
-/* ---- 侧边栏 ---- */
+/*  侧边栏  */
 .sidebar {
     width: 220px;
     background: var(--bg-card);
@@ -79,7 +79,7 @@ body {
     color: var(--primary);
 }
 
-/* ---- 主内容 ---- */
+/*  主内容  */
 .content {
     flex: 1;
     padding: 30px;
@@ -107,7 +107,7 @@ body {
     font-weight: 600;
 }
 
-/* ---- 卡片 ---- */
+/*  卡片  */
 .card-list {
     display: flex;
     flex-direction: column;
@@ -194,7 +194,7 @@ body {
     color: var(--danger);
 }
 
-/* ---- 按钮 ---- */
+/*  按钮  */
 .btn {
     padding: 8px 16px;
     border: none;
@@ -253,7 +253,7 @@ body {
     color: var(--text);
 }
 
-/* ---- 模态框 ---- */
+/*  模态框  */
 .modal {
     position: fixed;
     inset: 0;
@@ -294,7 +294,7 @@ body {
     font-size: 18px;
 }
 
-/* ---- 表单 ---- */
+/*  表单  */
 .form-group {
     margin-bottom: 16px;
 }
@@ -345,7 +345,7 @@ body {
     margin-top: 20px;
 }
 
-/* ---- 配置表单 ---- */
+/*  配置表单  */
 .config-form {
     max-width: 640px;
 }
@@ -401,7 +401,7 @@ body {
     margin-top: 20px;
 }
 
-/* ---- 会话详情 ---- */
+/*  会话详情  */
 .session-detail {
     max-height: 60vh;
     overflow-y: auto;
@@ -460,7 +460,7 @@ body {
     color: var(--text-dim);
 }
 
-/* ---- 工具开关 ---- */
+/*  工具开关  */
 .tool-switch {
     position: relative;
     display: inline-block;
@@ -504,7 +504,7 @@ body {
     transform: translateX(18px);
 }
 
-/* ---- 分页 ---- */
+/*  分页  */
 .pagination {
     display: flex;
     justify-content: center;
@@ -531,7 +531,7 @@ body {
     border-color: var(--primary);
 }
 
-/* ---- Toast ---- */
+/*  Toast  */
 .toast {
     position: fixed;
     bottom: 30px;
@@ -558,7 +558,7 @@ body {
     to { opacity: 1; transform: translateY(0); }
 }
 
-/* ---- 响应式 ---- */
+/*  响应式  */
 @media (max-width: 768px) {
     .sidebar {
         width: 60px;
@@ -573,4 +573,16 @@ body {
     .content {
         padding: 16px;
     }
+}
+
+/*  引用消息 blockquote  */
+.reply-quote {
+    margin: 0 0 6px 0;
+    padding: 6px 10px;
+    border-left: 3px solid var(--border);
+    background: var(--bg-input);
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: var(--text-muted);
+    white-space: pre-wrap;
 }
