@@ -62,6 +62,15 @@ class ChatEnginePlugin(Star):
         except (ValueError, TypeError):
             return default
 
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        """安全读取 bool 配置项，支持字符串 "true"/"false" 转换"""
+        val = self.config.get(key, default)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() in ("true", "1", "yes")
+        return default
+
     async def initialize(self):
         """插件激活时调用 — 初始化数据库、管理器和 Web 服务"""
         logger.info("[ChatEngine] 正在初始化...")
@@ -173,7 +182,7 @@ class ChatEnginePlugin(Star):
             if not self.context_mgr.should_respond(event):
                 # 被动记录: 群聊中未触发回复的消息也记录到上下文
                 if (
-                    self.config.get("enable_passive_record", False)
+                    self._cfg_bool("enable_passive_record", False)
                     and is_group
                     and message_text
                 ):
@@ -244,7 +253,7 @@ class ChatEnginePlugin(Star):
             logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
             # ---------- 构建工具集和工具描述 ----------
-            enable_tools = self.config.get("enable_tool_calls", True)
+            enable_tools = self._cfg_bool("enable_tool_calls", True)
             tool_set = None
             tool_count = 0
             if enable_tools:
@@ -585,7 +594,7 @@ class ChatEnginePlugin(Star):
         if not text:
             return []
 
-        if not self.config.get("enable_split_send", False):
+        if not self._cfg_bool("enable_split_send", False):
             return [text]
 
         pattern = self.config.get("split_pattern", r"[。！？\n]")
