@@ -232,31 +232,35 @@ class ChatEnginePlugin(Star):
                     and is_group
                     and message_text
                 ):
-                    try:
-                        passive_key = self.context_mgr.build_session_key(event)
-                        passive_text = self.context_mgr.format_user_message(event)
-                        # 使用 "observed" role 而非 "user"，防止压缩器
-                        # 将每条被动消息都计为独立一轮
-                        passive_images = await self._extract_image_urls(event)
-                        if passive_images:
-                            passive_msg = {
-                                "role": "observed",
-                                "content": [
-                                    {"type": "text", "text": passive_text},
-                                ]
-                                + [
-                                    {"type": "image_url", "image_url": {"url": url}}
-                                    for url in passive_images
-                                ],
-                            }
-                        else:
-                            passive_msg = {"role": "observed", "content": passive_text}
-                        await self.context_mgr.record_passive_message(
-                            passive_key, passive_msg
-                        )
-                        logger.debug(f"[ChatEngine] 被动记录消息到 {passive_key}")
-                    except Exception as e:
-                        logger.debug(f"[ChatEngine] 被动记录失败: {e}")
+                    passive_key = self.context_mgr.build_session_key(event)
+                    async with self.context_mgr.get_session_lock(passive_key):
+                        try:
+                            passive_text = self.context_mgr.format_user_message(event)
+                            passive_images = await self._extract_image_urls(event)
+                            if passive_images:
+                                passive_msg = {
+                                    "role": "observed",
+                                    "content": [
+                                        {"type": "text", "text": passive_text},
+                                    ]
+                                    + [
+                                        {"type": "image_url", "image_url": {"url": url}}
+                                        for url in passive_images
+                                    ],
+                                }
+                            else:
+                                passive_msg = {
+                                    "role": "observed",
+                                    "content": passive_text,
+                                }
+                            await self.context_mgr.record_passive_message(
+                                passive_key, passive_msg
+                            )
+                            logger.debug(
+                                f"[ChatEngine] 被动记录消息到 {passive_key}"
+                            )
+                        except Exception as e:
+                            logger.debug(f"[ChatEngine] 被动记录失败: {e}")
 
                 event.should_call_llm(False)  # 恢复默认 LLM
                 return

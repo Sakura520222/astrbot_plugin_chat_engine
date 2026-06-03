@@ -14,7 +14,11 @@ from .token_counter import TokenEstimator
 
 
 class ChatContextManager:
-    """上下文管理器 — 管理会话、用户标识、上下文存取与压缩"""
+    """上下文管理器 — 管理会话、用户标识、上下文存取与压缩
+
+    会话锁生命周期: _session_locks 按 session_key (platform:group_id / platform:private:sender_id)
+    索引，随会话数增长但不会无限膨胀。同一插件实例中活跃会话数有限，无需定期清理。
+    """
 
     _session_locks: dict[str, asyncio.Lock]
 
