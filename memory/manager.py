@@ -1,8 +1,6 @@
 """Memory manager — coordinates short-term, long-term, and auto-summarization."""
 
 import asyncio
-import shutil
-from pathlib import Path
 
 from astrbot.api import logger
 
@@ -92,6 +90,7 @@ class MemoryManager:
             for m in short_memories:
                 lines.append(f"- [id:{m['id']}] {m['content']}")
             sections.append("### Short-Term Memory\n" + "\n".join(lines))
+            logger.debug(f"[Memory] 注入 {len(short_memories)} 条短期记忆")
 
         # 长期记忆 — 语义检索
         if self.long_term.available and query:
@@ -109,6 +108,9 @@ class MemoryManager:
                     for r in results:
                         lines.append(f"- [id:{r['id']}] {r['content']}")
                     sections.append("### Relevant Long-Term Memory\n" + "\n".join(lines))
+                    logger.info(f"[Memory] 检索到 {len(results)} 条相关长期记忆")
+                else:
+                    logger.debug("[Memory] 未检索到相关长期记忆")
             except Exception as e:
                 logger.warning(f"[Memory] 检索长期记忆失败: {e}")
 
@@ -177,8 +179,15 @@ class MemoryManager:
 
         data = await self.short_term.load(session_key)
         last = data.get("last_summary_turn", 0)
+        gap = turn - last
 
-        if turn - last >= interval:
+        logger.info(
+            f"[Memory] 轮数追踪: turn={turn}, last_summary={last}, "
+            f"interval={interval}, gap={gap}"
+        )
+
+        if gap >= interval:
+            logger.info(f"[Memory] 达到总结间隔 ({gap}>={interval})，触发自动总结")
             await self._run_summary(session_key, provider, persona_mgr, context_mgr)
 
     async def on_context_compressed(
@@ -187,6 +196,7 @@ class MemoryManager:
         """上下文压缩触发时执行总结。"""
         if not self._cfg_bool("enable_auto_summary", True):
             return
+        logger.info("[Memory] 上下文压缩触发，执行记忆总结")
         await self._run_summary(session_key, provider, persona_mgr, context_mgr)
 
     async def _run_summary(
@@ -196,10 +206,9 @@ class MemoryManager:
         try:
             data = await self.short_term.load(session_key)
             memories = data.get("memories", [])
-
-            # 没有记忆且没有上下文则跳过
             recent_text = await self._get_recent_context(session_key, context_mgr)
             if not memories and not recent_text:
+                logger.debug("[Memory] 无记忆且无上下文，跳过总结")
                 return
 
             persona_prompt = ""
@@ -271,20 +280,11 @@ class MemoryManager:
     # 生命周期
 
     async def on_session_delete(self, session_key: str) -> None:
-        """清理 session 的所有记忆。"""
-        await self.short_term.delete_session(session_key)
+        """会话删除时，关闭该 session 的 FaissVecDB 实例（释放内存），但保留记忆数据。"""
+        # 短期记忆：保留文件（不调用 delete_session）
+        # 长期记忆：关闭实例但保留向量数据（不删除目录）
         await self.long_term.close(session_key)
-
-        # 删除长期记忆目录
-        if self.long_term.available:
-            import hashlib
-            h = hashlib.sha256(session_key.encode()).hexdigest()
-            lt_dir = Path(self.data_dir) / "memory" / "long_term" / h
-            if lt_dir.exists():
-                try:
-                    shutil.rmtree(str(lt_dir), ignore_errors=True)
-                except Exception as e:
-                    logger.warning(f"[Memory] 删除长期记忆目录失败: {e}")
+        logger.info(f"[Memory] 会话 {session_key} 已关闭，记忆数据已保留")
 
     async def close(self) -> None:
         """关闭所有资源。"""

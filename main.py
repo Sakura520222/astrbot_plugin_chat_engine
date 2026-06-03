@@ -496,6 +496,7 @@ class ChatEnginePlugin(Star):
                         compressed = post_save_count < pre_save_count + 2
 
                         if compressed:
+                            logger.info("[ChatEngine] 检测到上下文压缩，触发记忆总结")
                             await self.memory_mgr.on_context_compressed(
                                 session_key, provider, self.persona_mgr, self.context_mgr
                             )

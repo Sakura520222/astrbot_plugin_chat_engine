@@ -243,12 +243,7 @@ class ChatWebServer:
         ok = await self.plugin.context_mgr.repo.delete_session(session_key)
         if not ok:
             return web.json_response({"error": "会话不存在"}, status=404)
-        # 清理该会话的记忆
-        if self.plugin.memory_mgr:
-            try:
-                await self.plugin.memory_mgr.on_session_delete(session_key)
-            except Exception as e:
-                logger.warning(f"[ChatEngine] 清理会话记忆失败: {e}")
+        # 记忆不随会话删除，保留以供后续会话复用
         return web.json_response({"ok": True})
 
     async def _api_llm_preview(self, request: web.Request) -> web.Response:
