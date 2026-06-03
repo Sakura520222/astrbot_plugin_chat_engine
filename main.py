@@ -9,7 +9,10 @@
 - WebUI 管理面板 (独立 aiohttp 服务)
 """
 
+import asyncio
+import inspect
 import json
+import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -17,6 +20,7 @@ from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .context.manager import ChatContextManager
+from .context.token_counter import TokenEstimator
 from .db.engine import ChatEngineDB
 from .persona.manager import ChatPersonaManager
 from .tools.manager import ChatToolManager
@@ -28,7 +32,7 @@ from .web.server import ChatWebServer
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
     "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩和 WebUI 管理面板。",
-    "1.0.0",
+    "1.1.0",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -41,6 +45,41 @@ class ChatEnginePlugin(Star):
         self.persona_mgr: ChatPersonaManager = None
         self.tool_mgr: ChatToolManager = None
         self.web_server: ChatWebServer = None
+
+    # 配置读取辅助
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        """安全读取 int 配置项，类型异常时回退到默认值"""
+        try:
+            return int(self.config.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        """安全读取 float 配置项，类型异常时回退到默认值"""
+        try:
+            return float(self.config.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        """安全读取 bool 配置项，支持字符串和数值类型转换"""
+        val = self.config.get(key, default)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            lower = val.lower()
+            if lower in ("true", "1", "yes"):
+                return True
+            if lower in ("false", "0", "no"):
+                return False
+            logger.warning(f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}")
+            return default
+        if isinstance(val, (int, float)):
+            if isinstance(val, float) and val not in (0.0, 1.0):
+                logger.warning(f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换")
+            return bool(val)
+        return default
 
     async def initialize(self):
         """插件激活时调用 — 初始化数据库、管理器和 Web 服务"""
@@ -80,7 +119,7 @@ class ChatEnginePlugin(Star):
         logger.info(f"[ChatEngine] 扫描到 {len(tools)} 个工具")
 
         # 启动 WebUI
-        web_port = int(self.config.get("web_port", 8765))
+        web_port = self._cfg_int("web_port", 8765)
         self.web_server = ChatWebServer(self, port=web_port)
         await self.web_server.start()
 
@@ -151,7 +190,27 @@ class ChatEnginePlugin(Star):
 
             # 判断是否应该响应 (群聊未@Bot时跳过)
             if not self.context_mgr.should_respond(event):
-                logger.info("[ChatEngine] 群聊未@Bot，跳过（允许 AstrBot 默认处理）")
+                # 被动记录: 群聊中未触发回复的消息也记录到上下文
+                if (
+                    self._cfg_bool("enable_passive_record", False)
+                    and is_group
+                    and message_text
+                ):
+                    try:
+                        passive_key = self.context_mgr.build_session_key(event)
+                        passive_text = self.context_mgr.format_user_message(event)
+                        # 使用 "observed" role 而非 "user"，防止压缩器
+                        # 将每条被动消息都计为独立一轮
+                        passive_msg = {"role": "observed", "content": passive_text}
+                        await self.context_mgr.record_passive_message(
+                            passive_key, passive_msg
+                        )
+                        logger.debug(
+                            f"[ChatEngine] 被动记录消息到 {passive_key}"
+                        )
+                    except Exception as e:
+                        logger.debug(f"[ChatEngine] 被动记录失败: {e}")
+
                 event.should_call_llm(False)  # 恢复默认 LLM
                 return
 
@@ -171,7 +230,14 @@ class ChatEnginePlugin(Star):
             logger.info(f"[ChatEngine] 会话 Key: {session_key}")
 
             # ---------- 加载上下文 ----------
-            context_messages = await self.context_mgr.load_context(session_key)
+            context_messages_raw = await self.context_mgr.load_context(session_key)
+            # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
+            # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
+            # 此处将其转换为 "user" role 供 LLM API 使用，同时拷贝一份避免修改原始数据。
+            context_messages = [
+                {**msg, "role": "user"} if msg.get("role") == "observed" else msg
+                for msg in context_messages_raw
+            ]
             logger.info(f"[ChatEngine] 已加载 {len(context_messages)} 条上下文消息")
 
             # ---------- 格式化用户消息 ----------
@@ -197,7 +263,7 @@ class ChatEnginePlugin(Star):
             logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
             # ---------- 构建工具集和工具描述 ----------
-            enable_tools = self.config.get("enable_tool_calls", True)
+            enable_tools = self._cfg_bool("enable_tool_calls", True)
             tool_set = None
             tool_count = 0
             if enable_tools:
@@ -219,6 +285,11 @@ class ChatEnginePlugin(Star):
                     logger.warning(f"[ChatEngine] 构建工具集失败: {e}", exc_info=True)
             else:
                 logger.info("[ChatEngine] Tool Calls 已禁用")
+
+            # ---------- Token 安全截断 ----------
+            context_messages = await self._trim_context_to_fit(
+                context_messages, provider
+            )
 
             # ---------- 调用 LLM (含 Tool Call 循环) ----------
             logger.info(
@@ -255,7 +326,18 @@ class ChatEnginePlugin(Star):
             logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
 
             if response_text:
-                yield event.plain_result(response_text)
+                segments = self._split_response(response_text)
+                if len(segments) <= 1:
+                    yield event.plain_result(response_text)
+                else:
+                    logger.info(
+                        f"[ChatEngine] 分段发送: {len(segments)} 段"
+                    )
+                    for seg_idx, segment in enumerate(segments):
+                        yield event.plain_result(segment)
+                        if seg_idx < len(segments) - 1:
+                            delay_ms = max(0, min(self._cfg_int("split_delay_ms", 800), 5000))
+                            await asyncio.sleep(delay_ms / 1000)
 
             if hasattr(final_response, "result_chain") and final_response.result_chain:
                 for comp in final_response.result_chain.chain:
@@ -296,7 +378,7 @@ class ChatEnginePlugin(Star):
         循环直到 LLM 返回纯文本响应或达到最大轮数。
         """
         if max_tool_rounds is None:
-            max_tool_rounds = int(self.config.get("max_tool_rounds", 10))
+            max_tool_rounds = self._cfg_int("max_tool_rounds", 10)
 
         # 构建完整上下文
         current_contexts = list(contexts) + [user_msg]
@@ -382,7 +464,13 @@ class ChatEnginePlugin(Star):
         tool_set=None,
         event: AstrMessageEvent = None,
     ) -> str:
-        """执行单个工具调用，返回结果字符串。"""
+        """执行单个工具调用，返回结果字符串。
+
+        支持三种 handler 返回类型:
+        1. coroutine — 标准 async 函数，直接 await 获取结果
+        2. async generator — 部分插件 handler 使用 yield，通过 async for 收集后取最后一个值
+        3. 同步返回值 — 非 awaitable 非 generator 的普通返回值
+        """
         try:
             tool_manager = self.context.get_llm_tool_manager()
 
@@ -402,11 +490,27 @@ class ChatEnginePlugin(Star):
             if hasattr(tool, "handler") and tool.handler:
                 # 插件注册的工具 (通过 @filter.llm_tool)
                 # 这些 handler 通常接收 event 作为第一个参数
+                # 部分插件 handler 是 async generator (使用 yield)，不能直接 await
+                result = None
+
+                # 尝试传入 event + tool_args
                 try:
-                    result = await tool.handler(event, **tool_args)
+                    ret = tool.handler(event, **tool_args)
                 except TypeError:
-                    # 如果 handler 不接受 event 参数
-                    result = await tool.handler(**tool_args)
+                    # handler 不接受 event 参数
+                    ret = tool.handler(**tool_args)
+
+                if inspect.isasyncgen(ret):
+                    # async generator — 用 async for 收集所有 yield 的值
+                    parts = []
+                    async for item in ret:
+                        if item is not None:
+                            parts.append(item)
+                    result = parts[-1] if parts else None
+                elif inspect.isawaitable(ret):
+                    result = await ret
+                else:
+                    result = ret
             elif hasattr(tool, "call"):
                 # 内置工具 (FunctionTool 子类) — 需要完整的 ContextWrapper
                 from astrbot.core.agent.run_context import ContextWrapper
@@ -448,6 +552,94 @@ class ChatEnginePlugin(Star):
                 {"error": f"工具执行失败: {type(e).__name__}: {str(e)}"},
                 ensure_ascii=False,
             )
+
+    async def _trim_context_to_fit(
+        self, messages: list[dict], provider
+    ) -> list[dict]:
+        """Token 安全截断：确保上下文不超过模型阈值。
+
+        从最旧的消息开始移除，直到总量低于阈值。
+        被动记录的大量消息通常在最前面，会优先被裁剪。
+        """
+        # 获取模型最大 token 数（自动从 provider 获取并回填到配置）
+        max_tokens = await self.context_mgr.get_max_context_tokens(provider)
+
+        # 保留比例 (与 token 压缩模式共用同一个配置)
+        ratio = self._cfg_float("token_threshold_ratio", 0.8)
+        threshold = int(max_tokens * ratio)
+
+        counter = TokenEstimator()
+        total = counter.count_messages_tokens(messages)
+
+        if total <= threshold:
+            return messages
+
+        # 累加最旧消息的 token 数，找到截断点
+        cut_idx = 0
+        for i, msg in enumerate(messages):
+            total -= counter.count_messages_tokens([msg])
+            cut_idx = i + 1
+            if total <= threshold:
+                break
+
+        # 确保至少保留最后1条消息（防止所有消息 token 都超过阈值时返回空列表）
+        if cut_idx >= len(messages):
+            cut_idx = len(messages) - 1
+
+        if cut_idx > 0:
+            logger.info(
+                f"[ChatEngine] Token 安全截断: 移除前 {cut_idx} 条消息 "
+                f"({len(messages)} -> {len(messages) - cut_idx})"
+            )
+
+        return messages[cut_idx:]
+
+    def _split_response(self, text: str) -> list[str]:
+        """将 LLM 回复按配置的分段符号拆分。
+
+        使用 re.split + 捕获组保留分隔符，将文本拆为多段。
+        超过 max_segments 时，从尾部合并多余段落。
+        未启用分段或只有一段时直接返回原文。
+        """
+        if not text:
+            return []
+
+        if not self._cfg_bool("enable_split_send", False):
+            return [text]
+
+        pattern = self.config.get("split_pattern", r"[。！？\n]")
+        max_segments = self._cfg_int("max_segments", 5)
+
+        try:
+            # re.split 捕获组会保留分隔符: [text, delim, text, delim, ...]
+            parts = re.split(f"({pattern})", text)
+        except re.error:
+            logger.warning(f"[ChatEngine] 分段正则无效: {pattern}，跳过分段")
+            return [text]
+
+        # 将 text+delim 配对合并
+        segments = []
+        i = 0
+        while i < len(parts):
+            segment = parts[i]
+            if i + 1 < len(parts):
+                segment += parts[i + 1]  # 追加分隔符
+                i += 2
+            else:
+                i += 1
+            if segment.strip():
+                segments.append(segment.strip())
+
+        if len(segments) <= 1:
+            return [text]
+
+        # 超过最大分段数时，合并尾部段落
+        if len(segments) > max_segments:
+            merged = segments[: max_segments - 1]
+            merged.append("".join(segments[max_segments - 1 :]))
+            segments = merged
+
+        return segments
 
     def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
         """从消息事件中提取图片 URL 列表"""

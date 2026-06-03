@@ -29,10 +29,10 @@
         "hint": "LLM 总结压缩后，保留最近多少轮原始对话。"
     },
     "fallback_max_context_tokens": {
-        "description": "模型最大上下文 Token (Fallback)",
+        "description": "模型最大上下文 Token (自动检测)",
         "type": "int",
-        "default": 32000,
-        "hint": "当模型未报告 max_context_tokens 时使用此值。"
+        "default": 128000,
+        "hint": "自动从 LLM Provider 获取并填入，通常无需手动修改。"
     },
     "user_id_format": {
         "description": "用户标识格式 (群聊)",
@@ -80,5 +80,35 @@
         "type": "string",
         "default": "",
         "hint": "格式: mysql+aiomysql://user:password@host:port/dbname"
+    },
+    "enable_passive_record": {
+        "description": "启用被动记录群聊消息",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，群聊中未触发回复的消息也会记录到上下文中，丰富 LLM 对群聊的感知。仅对群聊生效。"
+    },
+    "enable_split_send": {
+        "description": "启用分段发送",
+        "type": "bool",
+        "default": false,
+        "hint": "将 LLM 回复按标点符号拆分为多条消息分段发送，模拟真人打字节奏。"
+    },
+    "split_pattern": {
+        "description": "分段匹配符号 (正则)",
+        "type": "string",
+        "default": "[。！？\\n]",
+        "hint": "用于拆分 LLM 回复的正则表达式。匹配到的符号作为分段点。"
+    },
+    "max_segments": {
+        "description": "最大分段数",
+        "type": "int",
+        "default": 5,
+        "hint": "单次回复最多拆分成多少段发送。超过则合并后面的段落。"
+    },
+    "split_delay_ms": {
+        "description": "分段发送间隔 (毫秒)",
+        "type": "int",
+        "default": 800,
+        "hint": "每段消息之间的发送延迟，模拟打字节奏。"
     }
 }
