@@ -249,7 +249,7 @@ async function viewSession(key) {
                         return escapeHtml(p.text || '');
                     }
                     if (p.type === 'image_url' && p.image_url && p.image_url.url) {
-                        return `<img src="${p.image_url.url}" style="max-width:200px;max-height:200px;border-radius:6px;margin:4px 0;display:block;" />`;
+                        return `<img src="${escapeHtml(p.image_url.url)}" style="max-width:200px;max-height:200px;border-radius:6px;margin:4px 0;display:block;" />`;
                     }
                     return '';
                 }).filter(Boolean).join('\n');

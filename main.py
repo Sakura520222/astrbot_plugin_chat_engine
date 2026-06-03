@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import copy
 import inspect
 import json
 import re
@@ -290,11 +291,11 @@ class ChatEnginePlugin(Star):
 
             #  模态过滤
             # 根据模型能力过滤上下文和当前消息中不支持的模态内容（如图片）
-            # 注意：只影响传给 LLM 的消息，不影响保存到数据库的原始消息
+            # 深拷贝确保原始消息不被修改，只影响传给 LLM 的副本，不影响保存到数据库
             modalities = await self.context_mgr.get_modalities(provider)
             llm_contexts = list(context_messages)
             llm_user_msg = user_msg
-            all_messages = list(context_messages) + [user_msg]
+            all_messages = copy.deepcopy(list(context_messages) + [user_msg])
             sanitized, stats = sanitize_contexts_by_modalities(all_messages, modalities)
             if stats.changed:
                 logger.info(
@@ -667,13 +668,16 @@ class ChatEnginePlugin(Star):
                         b64 = await comp.convert_to_base64()
                         if b64:
                             # 通过 base64 前缀检测图片格式
-                            fmt = "jpeg"
-                            if b64.startswith("iVBOR"):
+                            if b64.startswith("/9j/"):
+                                fmt = "jpeg"
+                            elif b64.startswith("iVBOR"):
                                 fmt = "png"
                             elif b64.startswith("R0lG"):
                                 fmt = "gif"
                             elif b64.startswith("UklG"):
                                 fmt = "webp"
+                            else:
+                                fmt = "jpeg"
                             urls.append(f"data:image/{fmt};base64,{b64}")
                             continue
                     except Exception as e:

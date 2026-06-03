@@ -29,6 +29,7 @@ class ChatContextManager:
             config, provider_getter
         )
         self.token_counter = TokenEstimator()
+        self._cached_modalities: list[str] | None = None
 
     def build_session_key(self, event) -> str:
         """根据消息事件构建会话 key。
@@ -111,7 +112,7 @@ class ChatContextManager:
     async def get_modalities(self, provider) -> list[str]:
         """获取模型支持的模态能力列表。
 
-        优先从 provider 配置获取，成功时自动回填到插件配置，
+        优先从 provider 配置获取，成功时缓存到实例变量，
         确保 provider 不可用时也有合理的备选值。
 
         返回值示例: ["text", "tool_use", "image"]
@@ -123,16 +124,11 @@ class ChatContextManager:
         except Exception:
             modalities = None
         if modalities and isinstance(modalities, list) and len(modalities) > 0:
-            # 自动回填到插件配置，确保 provider 不可用时也有合理的备选值
-            self.config["fallback_modalities"] = modalities
+            self._cached_modalities = modalities
             return modalities
-        # provider 未报告，使用配置中的备选值（可能由之前自动回填）
-        try:
-            cached = self.config.get("fallback_modalities", None)
-            if cached and isinstance(cached, list) and len(cached) > 0:
-                return cached
-        except Exception:
-            pass
+        # provider 未报告，使用缓存的备选值
+        if self._cached_modalities:
+            return self._cached_modalities
         return default_modalities
 
     async def _load_compress_save(
@@ -209,39 +205,6 @@ class ChatContextManager:
         未传入 provider 时会自动通过 provider_getter 获取，确保压缩正常工作。
         """
         await self._load_compress_save(session_key, [user_msg], provider=provider)
-
-    async def record_passive_message(
-        self,
-        session_key: str,
-        user_msg: dict,
-        provider=None,
-    ) -> None:
-        """记录被动 (未触发回复) 的用户消息到上下文。
-
-        仅追加一条 user 消息，不产生 assistant 回复。
-        同样会触发压缩检查以控制上下文长度。
-        """
-        try:
-            messages = await self.repo.get_context(session_key)
-        except Exception:
-            messages = []
-
-        messages.append(user_msg)
-
-        # 压缩检查
-        try:
-            max_tokens = 0
-            if provider:
-                max_tokens = await self.get_max_context_tokens(provider)
-            messages = await self.compressor.compress(messages, max_tokens)
-        except Exception as e:
-            logger.error(f"[ChatEngine] 被动消息压缩失败: {e}")
-
-        # 保存
-        try:
-            await self.repo.save_context(session_key, messages)
-        except Exception as e:
-            logger.error(f"[ChatEngine] 被动消息保存失败 [{session_key}]: {e}")
 
     def reload_compressor(self):
         """重新加载压缩器 (配置变更后调用)"""
