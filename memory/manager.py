@@ -187,17 +187,17 @@ class MemoryManager:
         )
 
         if gap >= interval:
-            logger.info(f"[Memory] 达到总结间隔 ({gap}>={interval})，触发自动总结")
-            await self._run_summary(session_key, provider, persona_mgr, context_mgr)
+            logger.info(f"[Memory] 达到总结间隔 ({gap}>={interval})，触发自动总结（后台任务）")
+            asyncio.create_task(self._run_summary(session_key, provider, persona_mgr, context_mgr))
 
     async def on_context_compressed(
         self, session_key: str, provider, persona_mgr, context_mgr
     ) -> None:
-        """上下文压缩触发时执行总结。"""
+        """上下文压缩触发时执行总结（后台任务）。"""
         if not self._cfg_bool("enable_auto_summary", True):
             return
-        logger.info("[Memory] 上下文压缩触发，执行记忆总结")
-        await self._run_summary(session_key, provider, persona_mgr, context_mgr)
+        logger.info("[Memory] 上下文压缩触发，执行记忆总结（后台任务）")
+        asyncio.create_task(self._run_summary(session_key, provider, persona_mgr, context_mgr))
 
     async def _run_summary(
         self, session_key: str, provider, persona_mgr, context_mgr
