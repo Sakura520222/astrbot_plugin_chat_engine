@@ -5,6 +5,7 @@ user message formatting, and compression triggering.
 import asyncio
 
 from astrbot.api import logger
+from astrbot.api.message_components import Reply
 from astrbot.api.platform import MessageType
 
 from ..db.persona_repo import PersonaRepository
@@ -71,18 +72,40 @@ class ChatContextManager:
             return event.get_group_id() is not None
 
     def format_user_message(self, event) -> str:
-        """格式化用户消息。添加用户标识前缀。
+        """格式化用户消息。添加用户标识前缀和引用消息上下文。
 
-        格式: "{{user}{昵称}({ID})}说：消息内容"
-        群聊和私聊都添加用户标识前缀，确保 AI 能识别用户。
+        格式: "{{user}{昵称}({ID})}说：[回复 {引用者}: {引用内容}]\n消息内容"
         """
         text = event.message_str or ""
+
+        # 提取引用消息上下文
+        reply_context = self._extract_reply_context(event)
 
         fmt = self.config.get("user_id_format", "{{user}{NAME}({ID})}说：")
         name = event.get_sender_name() or "unknown"
         uid = event.get_sender_id() or "unknown"
         prefix = fmt.replace("{NAME}", name).replace("{ID}", uid)
+
+        if reply_context:
+            return f"{prefix}[回复 {reply_context}]{text}"
         return f"{prefix}{text}"
+
+    def _extract_reply_context(self, event) -> str:
+        """从消息事件中提取引用消息的摘要信息。"""
+        try:
+            for comp in event.get_messages():
+                if isinstance(comp, Reply):
+                    sender = comp.sender_nickname or ""
+                    quoted_text = comp.message_str or ""
+                    if sender and quoted_text:
+                        return f"{sender}: {quoted_text}"
+                    elif quoted_text:
+                        return quoted_text
+                    elif sender:
+                        return f"{sender}的消息"
+        except Exception:
+            pass
+        return ""
 
     def should_respond(self, event) -> bool:
         """判断是否应该响应此消息。
