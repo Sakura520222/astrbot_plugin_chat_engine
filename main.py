@@ -74,11 +74,15 @@ class ChatEnginePlugin(Star):
                 return True
             if lower in ("false", "0", "no"):
                 return False
-            logger.warning(f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}")
+            logger.warning(
+                f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}"
+            )
             return default
         if isinstance(val, (int, float)):
             if isinstance(val, float) and val not in (0.0, 1.0):
-                logger.warning(f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换")
+                logger.warning(
+                    f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换"
+                )
             return bool(val)
         return default
 
@@ -135,18 +139,16 @@ class ChatEnginePlugin(Star):
             await self.db.close()
         logger.info("[ChatEngine] 已关闭")
 
-    # ========================================================================
     # 消息拦截 — 核心处理流程
-    # ========================================================================
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
     async def handle_all_messages(self, event: AstrMessageEvent):
         """拦截所有消息，完全接管 AstrBot 的聊天流程。"""
-        # ---------- 第一步: 无条件抑制 AstrBot 默认 LLM ----------
+        #  第一步: 无条件抑制 AstrBot 默认 LLM
         event.should_call_llm(True)
 
         try:
-            # ---------- 预检查 ----------
+            #  预检查
             message_text = (event.message_str or "").strip()
             sender = event.get_sender_name() or event.get_sender_id() or "unknown"
             is_group = self.context_mgr.is_group_message(event)
@@ -162,7 +164,7 @@ class ChatEnginePlugin(Star):
                 event.should_call_llm(False)
                 return
 
-            # ---------- 命令检测: 如果有其他插件的命令处理器匹配了此消息，交给它们处理 ----------
+            #  命令检测: 如果有其他插件的命令处理器匹配了此消息，交给它们处理
             # 只检查 CommandFilter 类型的处理器，忽略 event_message_type(ALL) 广播处理器
             activated_handlers = event.get_extra("activated_handlers") or []
             has_command_handler = False
@@ -206,16 +208,14 @@ class ChatEnginePlugin(Star):
                         await self.context_mgr.record_passive_message(
                             passive_key, passive_msg
                         )
-                        logger.debug(
-                            f"[ChatEngine] 被动记录消息到 {passive_key}"
-                        )
+                        logger.debug(f"[ChatEngine] 被动记录消息到 {passive_key}")
                     except Exception as e:
                         logger.debug(f"[ChatEngine] 被动记录失败: {e}")
 
                 event.should_call_llm(False)  # 恢复默认 LLM
                 return
 
-            # ---------- 获取 Provider ----------
+            #  获取 Provider
             provider = self.context.get_using_provider(event.unified_msg_origin)
             if not provider:
                 logger.warning("[ChatEngine] 未找到 LLM Provider")
@@ -226,11 +226,11 @@ class ChatEnginePlugin(Star):
 
             logger.info(f"[ChatEngine] 使用 Provider: {provider.meta().id}")
 
-            # ---------- 构建会话 Key ----------
+            #  构建会话 Key
             session_key = self.context_mgr.build_session_key(event)
             logger.info(f"[ChatEngine] 会话 Key: {session_key}")
 
-            # ---------- 加载上下文 ----------
+            #  加载上下文
             context_messages_raw = await self.context_mgr.load_context(session_key)
             # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
             # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
@@ -241,7 +241,7 @@ class ChatEnginePlugin(Star):
             ]
             logger.info(f"[ChatEngine] 已加载 {len(context_messages)} 条上下文消息")
 
-            # ---------- 格式化用户消息 ----------
+            #  格式化用户消息
             user_text = self.context_mgr.format_user_message(event)
 
             image_urls = await self._extract_image_urls(event)
@@ -260,11 +260,11 @@ class ChatEnginePlugin(Star):
             else:
                 user_msg = {"role": "user", "content": user_text}
 
-            # ---------- 获取人格 System Prompt ----------
+            #  获取人格 System Prompt
             system_prompt = await self.persona_mgr.get_system_prompt()
             logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
-            # ---------- 构建工具集和工具描述 ----------
+            #  构建工具集和工具描述
             enable_tools = self._cfg_bool("enable_tool_calls", True)
             tool_set = None
             tool_count = 0
@@ -288,9 +288,12 @@ class ChatEnginePlugin(Star):
             else:
                 logger.info("[ChatEngine] Tool Calls 已禁用")
 
-            # ---------- 模态过滤 ----------
+            #  模态过滤
             # 根据模型能力过滤上下文和当前消息中不支持的模态内容（如图片）
+            # 注意：只影响传给 LLM 的消息，不影响保存到数据库的原始消息
             modalities = await self.context_mgr.get_modalities(provider)
+            llm_contexts = list(context_messages)
+            llm_user_msg = user_msg
             all_messages = list(context_messages) + [user_msg]
             sanitized, stats = sanitize_contexts_by_modalities(all_messages, modalities)
             if stats.changed:
@@ -298,25 +301,23 @@ class ChatEnginePlugin(Star):
                     f"[ChatEngine] 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
                     f"{stats.fixed_audio_blocks} 个音频块"
                 )
-                context_messages = sanitized[:-1]
-                user_msg = sanitized[-1]
+                llm_contexts = sanitized[:-1]
+                llm_user_msg = sanitized[-1]
 
-            # ---------- Token 安全截断 ----------
-            context_messages = await self._trim_context_to_fit(
-                context_messages, provider
-            )
+            #  Token 安全截断
+            llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
 
-            # ---------- 调用 LLM (含 Tool Call 循环) ----------
+            #  调用 LLM (含 Tool Call 循环)
             logger.info(
-                f"[ChatEngine] 开始调用 LLM, 上下文: {len(context_messages) + 1} 条, "
+                f"[ChatEngine] 开始调用 LLM, 上下文: {len(llm_contexts) + 1} 条, "
                 f"工具: {tool_count} 个, 传递原生FC: {tool_set is not None and not tool_set.empty()}"
             )
             try:
                 final_response = await self._llm_call_with_tools(
                     provider=provider,
                     system_prompt=system_prompt,
-                    contexts=context_messages,
-                    user_msg=user_msg,
+                    contexts=llm_contexts,
+                    user_msg=llm_user_msg,
                     tool_set=tool_set,
                     event=event,
                 )
@@ -336,7 +337,7 @@ class ChatEnginePlugin(Star):
                 yield event.plain_result(f"❌ LLM 错误: {err_text}")
                 return
 
-            # ---------- 返回结果 ----------
+            #  返回结果
             response_text = final_response.completion_text or ""
             logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
 
@@ -345,13 +346,13 @@ class ChatEnginePlugin(Star):
                 if len(segments) <= 1:
                     yield event.plain_result(response_text)
                 else:
-                    logger.info(
-                        f"[ChatEngine] 分段发送: {len(segments)} 段"
-                    )
+                    logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
                     for seg_idx, segment in enumerate(segments):
                         yield event.plain_result(segment)
                         if seg_idx < len(segments) - 1:
-                            delay_ms = max(0, min(self._cfg_int("split_delay_ms", 800), 5000))
+                            delay_ms = max(
+                                0, min(self._cfg_int("split_delay_ms", 800), 5000)
+                            )
                             await asyncio.sleep(delay_ms / 1000)
 
             if hasattr(final_response, "result_chain") and final_response.result_chain:
@@ -359,7 +360,7 @@ class ChatEnginePlugin(Star):
                     if isinstance(comp, Image):
                         yield event.chain_result([comp])
 
-            # ---------- 保存上下文 ----------
+            #  保存上下文
             assistant_msg = {"role": "assistant", "content": response_text}
             await self.context_mgr.append_and_save(
                 session_key, user_msg, assistant_msg, provider=provider
@@ -373,9 +374,7 @@ class ChatEnginePlugin(Star):
             except Exception:
                 pass
 
-    # ========================================================================
     # LLM 调用 + Tool Call 循环
-    # ========================================================================
 
     async def _llm_call_with_tools(
         self,
@@ -568,9 +567,7 @@ class ChatEnginePlugin(Star):
                 ensure_ascii=False,
             )
 
-    async def _trim_context_to_fit(
-        self, messages: list[dict], provider
-    ) -> list[dict]:
+    async def _trim_context_to_fit(self, messages: list[dict], provider) -> list[dict]:
         """Token 安全截断：确保上下文不超过模型阈值。
 
         从最旧的消息开始移除，直到总量低于阈值。

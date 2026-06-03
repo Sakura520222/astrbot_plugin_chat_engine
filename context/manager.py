@@ -167,7 +167,9 @@ class ChatContextManager:
                 max_tokens = await self.get_max_context_tokens(_provider)
             messages = await self.compressor.compress(messages, max_tokens)
         except Exception as e:
-            _provider_name = type(_provider).__name__ if _provider is not None else "None"
+            _provider_name = (
+                type(_provider).__name__ if _provider is not None else "None"
+            )
             logger.error(
                 f"[ChatEngine] 上下文压缩失败 [session={session_key}, "
                 f"provider={_provider_name}, messages={len(messages)}]: "
@@ -206,9 +208,7 @@ class ChatContextManager:
         同样会触发压缩检查以控制上下文长度。
         未传入 provider 时会自动通过 provider_getter 获取，确保压缩正常工作。
         """
-        await self._load_compress_save(
-            session_key, [user_msg], provider=provider
-        )
+        await self._load_compress_save(session_key, [user_msg], provider=provider)
 
     async def record_passive_message(
         self,

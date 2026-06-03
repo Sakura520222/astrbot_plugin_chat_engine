@@ -244,10 +244,15 @@ async function viewSession(key) {
             if (typeof msg.content === 'string') {
                 content = escapeHtml(msg.content);
             } else if (Array.isArray(msg.content)) {
-                content = msg.content
-                    .filter(p => p.type === 'text')
-                    .map(p => escapeHtml(p.text || ''))
-                    .join('\n');
+                content = msg.content.map(p => {
+                    if (p.type === 'text') {
+                        return escapeHtml(p.text || '');
+                    }
+                    if (p.type === 'image_url' && p.image_url && p.image_url.url) {
+                        return `<img src="${p.image_url.url}" style="max-width:200px;max-height:200px;border-radius:6px;margin:4px 0;display:block;" />`;
+                    }
+                    return '';
+                }).filter(Boolean).join('\n');
             }
             const roleLabel = { user: 'USER', assistant: 'ASSISTANT', system: 'SYSTEM', tool: 'TOOL' }[role] || role.toUpperCase();
             return `

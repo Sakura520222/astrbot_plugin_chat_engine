@@ -88,9 +88,7 @@ class ChatWebServer:
             await self.runner.cleanup()
             logger.info("[ChatEngine] WebUI 已关闭")
 
-    # ========================================================================
     # 人格 API
-    # ========================================================================
 
     async def _api_list_personas(self, request: web.Request) -> web.Response:
         personas = await self.plugin.persona_mgr.list_personas()
@@ -181,9 +179,7 @@ class ChatWebServer:
             return web.json_response({"error": "人格不存在"}, status=404)
         return web.json_response({"ok": True})
 
-    # ========================================================================
     # 会话 API
-    # ========================================================================
 
     async def _api_list_sessions(self, request: web.Request) -> web.Response:
         page = int(request.query.get("page", 1))
@@ -217,9 +213,7 @@ class ChatWebServer:
             return web.json_response({"error": "会话不存在"}, status=404)
         return web.json_response({"ok": True})
 
-    # ========================================================================
     # 配置 API
-    # ========================================================================
 
     async def _api_get_config(self, request: web.Request) -> web.Response:
         config_keys = [
@@ -280,9 +274,7 @@ class ChatWebServer:
 
         return web.json_response({"ok": True})
 
-    # ========================================================================
     # 工具 API
-    # ========================================================================
 
     async def _api_list_tools(self, request: web.Request) -> web.Response:
         tools = await self.plugin.tool_mgr.get_all_tools_info()
@@ -302,9 +294,7 @@ class ChatWebServer:
         await self.plugin.tool_mgr.disable_tool(name)
         return web.json_response({"ok": True})
 
-    # ========================================================================
     # 静态文件
-    # ========================================================================
 
     async def _serve_index(self, request: web.Request) -> web.Response:
         return await self._serve_file("index.html")
