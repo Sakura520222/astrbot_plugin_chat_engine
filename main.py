@@ -46,6 +46,22 @@ class ChatEnginePlugin(Star):
         self.tool_mgr: ChatToolManager = None
         self.web_server: ChatWebServer = None
 
+    # 配置读取辅助
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        """安全读取 int 配置项，类型异常时回退到默认值"""
+        try:
+            return int(self.config.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        """安全读取 float 配置项，类型异常时回退到默认值"""
+        try:
+            return float(self.config.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
     async def initialize(self):
         """插件激活时调用 — 初始化数据库、管理器和 Web 服务"""
         logger.info("[ChatEngine] 正在初始化...")
@@ -84,10 +100,7 @@ class ChatEnginePlugin(Star):
         logger.info(f"[ChatEngine] 扫描到 {len(tools)} 个工具")
 
         # 启动 WebUI
-        try:
-            web_port = int(self.config.get("web_port", 8765))
-        except (ValueError, TypeError):
-            web_port = 8765
+        web_port = self._cfg_int("web_port", 8765)
         self.web_server = ChatWebServer(self, port=web_port)
         await self.web_server.start()
 
@@ -304,12 +317,7 @@ class ChatEnginePlugin(Star):
                     for seg_idx, segment in enumerate(segments):
                         yield event.plain_result(segment)
                         if seg_idx < len(segments) - 1:
-                            try:
-                                delay_ms = max(0, min(
-                                    int(self.config.get("split_delay_ms", 800)), 5000
-                                ))
-                            except (ValueError, TypeError):
-                                delay_ms = 800
+                            delay_ms = max(0, min(self._cfg_int("split_delay_ms", 800), 5000))
                             await asyncio.sleep(delay_ms / 1000)
 
             if hasattr(final_response, "result_chain") and final_response.result_chain:
@@ -351,7 +359,7 @@ class ChatEnginePlugin(Star):
         循环直到 LLM 返回纯文本响应或达到最大轮数。
         """
         if max_tool_rounds is None:
-            max_tool_rounds = int(self.config.get("max_tool_rounds", 10))
+            max_tool_rounds = self._cfg_int("max_tool_rounds", 10)
 
         # 构建完整上下文
         current_contexts = list(contexts) + [user_msg]
@@ -538,10 +546,7 @@ class ChatEnginePlugin(Star):
         max_tokens = await self.context_mgr.get_max_context_tokens(provider)
 
         # 保留比例 (与 token 压缩模式共用同一个配置)
-        try:
-            ratio = float(self.config.get("token_threshold_ratio", 0.8))
-        except (ValueError, TypeError):
-            ratio = 0.8
+        ratio = self._cfg_float("token_threshold_ratio", 0.8)
         threshold = int(max_tokens * ratio)
 
         counter = TokenEstimator()
@@ -584,7 +589,7 @@ class ChatEnginePlugin(Star):
             return [text]
 
         pattern = self.config.get("split_pattern", r"[。！？\n]")
-        max_segments = int(self.config.get("max_segments", 5))
+        max_segments = self._cfg_int("max_segments", 5)
 
         try:
             # re.split 捕获组会保留分隔符: [text, delim, text, delim, ...]
