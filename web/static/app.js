@@ -242,6 +242,7 @@ function goSessionPage(page) {
 }
 
 async function viewSession(key) {
+    currentSessionKey = key;
     try {
         const data = await api('GET', `/api/sessions/${encodeURIComponent(key)}`);
         const modal = document.getElementById('session-modal');
@@ -284,6 +285,87 @@ async function viewSession(key) {
 
 function hideSessionModal() {
     document.getElementById('session-modal').classList.add('hidden');
+}
+
+// LLM 预览
+let currentSessionKey = null;
+
+async function showLlmPreview() {
+    if (!currentSessionKey) return;
+    try {
+        const data = await api('GET', `/api/sessions/${encodeURIComponent(currentSessionKey)}/llm-preview`);
+        const container = document.getElementById('llm-preview-content');
+
+        const roleColors = {
+            system: 'var(--warning)',
+            user: 'var(--primary)',
+            assistant: 'var(--success)',
+            tool: 'var(--text-dim)',
+        };
+
+        let html = '';
+
+        // 概览信息
+        html += `<div class="preview-stats">
+            <div class="stat-item"><span class="stat-label">Provider</span><span class="stat-value">${data.provider || '-'}</span></div>
+            <div class="stat-item"><span class="stat-label">Modalities</span><span class="stat-value">${(data.modalities || []).join(', ') || '-'}</span></div>
+            <div class="stat-item"><span class="stat-label">上下文条数</span><span class="stat-value">${data.context_count}</span></div>
+            <div class="stat-item"><span class="stat-label">工具数</span><span class="stat-value">${data.tool_count}</span></div>
+            <div class="stat-item"><span class="stat-label">估算 Token</span><span class="stat-value">${data.estimated_tokens}</span></div>
+            ${data.filter_summary ? `<div class="stat-item"><span class="stat-label">模态过滤</span><span class="stat-value">图片=${data.filter_summary.fixed_image_blocks}, 音频=${data.filter_summary.fixed_audio_blocks}</span></div>` : ''}
+        </div>`;
+
+        // System Prompt
+        if (data.system_prompt) {
+            html += `<div class="preview-section">
+                <div class="preview-section-title" onclick="this.nextElementSibling.classList.toggle('collapsed')">System Prompt (${data.system_prompt_length} 字)</div>
+                <pre class="preview-code collapsed">${escapeHtml(data.system_prompt)}</pre>
+            </div>`;
+        }
+
+        // 上下文消息
+        html += `<div class="preview-section">
+            <div class="preview-section-title">上下文消息 (${data.context_count} 条)</div>`;
+
+        for (const msg of data.contexts || []) {
+            const role = msg.role || 'unknown';
+            const color = roleColors[role] || 'var(--text-dim)';
+            let content = '';
+            const c = msg.content;
+            if (typeof c === 'string') {
+                content = escapeHtml(c);
+            } else if (Array.isArray(c)) {
+                content = c.map(p => {
+                    if (p.type === 'text') return escapeHtml(p.text || '');
+                    if (p.type === 'image_url') return `<span class="img-tag">[image]</span>`;
+                    if (p.type === 'image_ref') return `<span class="img-tag">[image_ref:${p.image_id}]</span>`;
+                    return `<span class="img-tag">[${p.type}]</span>`;
+                }).filter(Boolean).join('\n');
+            }
+            html += `<div class="preview-msg">
+                <span class="preview-role" style="color:${color}">${role.toUpperCase()}</span>
+                <div class="preview-content">${content || '<em>(空)</em>'}</div>
+            </div>`;
+        }
+        html += '</div>';
+
+        // 工具列表
+        if (data.tools && data.tools.length > 0) {
+            html += `<div class="preview-section">
+                <div class="preview-section-title" onclick="this.nextElementSibling.classList.toggle('collapsed')">工具列表 (${data.tool_count})</div>
+                <div class="preview-tools collapsed">${(data.tools || []).map(t => `<span class="tool-tag">${escapeHtml(t)}</span>`).join('')}</div>
+            </div>`;
+        }
+
+        container.innerHTML = html;
+        document.getElementById('llm-preview-modal').classList.remove('hidden');
+    } catch (e) {
+        toast('LLM 预览失败: ' + e.message, 'error');
+    }
+}
+
+function hideLlmPreview() {
+    document.getElementById('llm-preview-modal').classList.add('hidden');
 }
 
 async function deleteSession(key) {

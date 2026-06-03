@@ -1,6 +1,6 @@
-/* ============================================================
-   Chat Engine WebUI Styles
-   ============================================================ */
+/* 
+    Chat Engine WebUI Styles
+*/
 
 :root {
     --bg: #0f1117;
@@ -585,4 +585,125 @@ body {
     font-size: 0.85em;
     color: var(--text-muted);
     white-space: pre-wrap;
+}
+
+/* LLM 预览 Modal */
+
+#llm-preview-modal .modal-content {
+    max-width: 820px;
+    max-height: 85vh;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.preview-stats {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.stat-item {
+    background: var(--bg-hover);
+    padding: 8px 14px;
+    border-radius: 6px;
+}
+
+.stat-label {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.stat-value {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.preview-section {
+    margin-bottom: 16px;
+}
+
+.preview-section-title {
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text-dim);
+}
+
+.preview-code {
+    background: var(--bg-input);
+    padding: 10px;
+    border-radius: 6px;
+    font-family: 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 13px;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.preview-msg {
+    padding: 6px 10px;
+    margin-bottom: 4px;
+    border-radius: 6px;
+    background: var(--bg-hover);
+}
+
+.preview-msg.system {
+    border-left: 3px solid var(--warning);
+}
+
+.preview-msg.user {
+    border-left: 3px solid var(--primary);
+}
+
+.preview-msg.assistant {
+    border-left: 3px solid var(--success);
+}
+
+.preview-msg.tool {
+    border-left: 3px solid #f0a030;
+}
+
+.preview-msg.observed {
+    border-left: 3px solid var(--text-dim);
+}
+
+.preview-role {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 2px;
+}
+
+.preview-content {
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.img-tag {
+    background: var(--bg-hover);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--primary);
+}
+
+.preview-tools {
+    margin-top: 8px;
+}
+
+.tool-tag {
+    display: inline-block;
+    background: var(--bg-hover);
+    color: var(--primary);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    margin: 2px;
 }

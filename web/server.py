@@ -54,6 +54,9 @@ class ChatWebServer:
 
         #  会话管理
         self.app.router.add_get("/api/sessions", self._api_list_sessions)
+        self.app.router.add_get(
+            "/api/sessions/{key:.*}/llm-preview", self._api_llm_preview
+        )
         self.app.router.add_get("/api/sessions/{key:.*}", self._api_get_session)
         self.app.router.add_delete("/api/sessions/{key:.*}", self._api_delete_session)
 
@@ -212,6 +215,110 @@ class ChatWebServer:
         if not ok:
             return web.json_response({"error": "会话不存在"}, status=404)
         return web.json_response({"ok": True})
+
+    async def _api_llm_preview(self, request: web.Request) -> web.Response:
+        """模拟构建 LLM 调用上下文，返回完整预览数据。
+
+        展示加载后经过所有处理（observed→user、图片解析、模态过滤等）
+        的最终上下文，以及 system prompt、工具列表和 token 估算。
+        """
+        import json as _json
+        import traceback
+
+        try:
+            from astrbot.core.provider.modalities import (
+                sanitize_contexts_by_modalities,
+            )
+
+            session_key = request.match_info["key"]
+
+            # 加载并解析上下文
+            raw_messages = await self.plugin.context_mgr.load_context(session_key)
+
+            # observed → user（模拟 handle_all_messages 的逻辑）
+            contexts = []
+            for msg in raw_messages:
+                if msg.get("role") == "observed":
+                    contexts.append({**msg, "role": "user"})
+                else:
+                    contexts.append(msg)
+
+            # 模态过滤
+            modalities = []
+            provider = None
+            try:
+                provider = self.plugin.context.get_using_provider()
+                modalities = await self.plugin.context_mgr.get_modalities(provider)
+            except Exception:
+                pass
+
+            filtered_contexts = contexts
+            stats = None
+            if modalities:
+                from copy import deepcopy
+
+                filtered_contexts, stats = sanitize_contexts_by_modalities(
+                    deepcopy(contexts), modalities
+                )
+
+            # System prompt
+            system_prompt = ""
+            try:
+                system_prompt = await self.plugin.persona_mgr.get_system_prompt()
+            except Exception:
+                pass
+
+            # Token 估算
+            from ..context.token_counter import TokenEstimator
+
+            estimator = TokenEstimator()
+            estimated_tokens = estimator.count_messages_tokens(filtered_contexts)
+            if system_prompt:
+                estimated_tokens += estimator._estimate_text(system_prompt)
+
+            # 工具列表
+            tool_names = []
+            try:
+                tool_names = sorted(await self.plugin.tool_mgr.get_enabled_names())
+            except Exception:
+                pass
+
+            # 模态过滤摘要
+            filter_summary = None
+            if stats and stats.changed:
+                filter_summary = {
+                    "fixed_image_blocks": stats.fixed_image_blocks,
+                    "fixed_audio_blocks": stats.fixed_audio_blocks,
+                    "fixed_tool_messages": stats.fixed_tool_messages,
+                    "removed_tool_calls": stats.removed_tool_calls,
+                }
+
+            result = {
+                "session_key": session_key,
+                "provider": (
+                    provider.meta().id if provider and hasattr(provider, "meta") else None
+                ),
+                "modalities": modalities,
+                "system_prompt": system_prompt,
+                "system_prompt_length": len(system_prompt),
+                "contexts": filtered_contexts,
+                "context_count": len(filtered_contexts),
+                "tools": tool_names,
+                "tool_count": len(tool_names),
+                "estimated_tokens": estimated_tokens,
+                "filter_summary": filter_summary,
+            }
+            body = _json.dumps(result, ensure_ascii=False, default=str)
+            return web.Response(body=body, content_type="application/json")
+        except Exception as e:
+            logger.error(f"LLM 预览异常: {e}\n{traceback.format_exc()}")
+            return web.Response(
+                body=_json.dumps(
+                    {"error": str(e)}, ensure_ascii=False, default=str
+                ),
+                content_type="application/json",
+                status=500,
+            )
 
     # 配置 API
 

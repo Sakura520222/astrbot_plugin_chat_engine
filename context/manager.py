@@ -136,8 +136,8 @@ class ChatContextManager:
     async def get_max_context_tokens(self, provider) -> int:
         """获取模型最大上下文 Token 数。
 
-        优先从 provider 配置获取，成功时缓存到实例变量，
-        确保 provider 不可用时也有合理的备选值。
+        优先从 provider 配置获取，成功时缓存到实例变量并回填到插件配置，
+        确保 provider 不可用时也有合理的备选值，同时 WebUI 可显示检测到的值。
         """
         try:
             max_tokens = provider.provider_config.get("max_context_tokens", 0)
@@ -145,6 +145,13 @@ class ChatContextManager:
             max_tokens = 0
         if max_tokens > 0:
             self._cached_max_context_tokens = max_tokens
+            # 仅在值变化时回填并持久化，避免每条消息都写磁盘
+            if self.config.get("fallback_max_context_tokens") != max_tokens:
+                self.config["fallback_max_context_tokens"] = max_tokens
+                try:
+                    self.config.save_config()
+                except Exception:
+                    pass
             return max_tokens
         # provider 未报告，使用缓存的备选值
         if self._cached_max_context_tokens is not None:

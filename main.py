@@ -779,4 +779,3 @@ class ChatEnginePlugin(Star):
         if hasattr(comp, "file") and comp.file:
             return comp.file
         return None
-
