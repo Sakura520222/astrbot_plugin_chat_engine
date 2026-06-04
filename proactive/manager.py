@@ -8,7 +8,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 
-PROACTIVE_SYSTEM_SUFFIX = """
+PROACTIVE_SYSTEM_SUFFIX_PRIVATE = """
 
 You are proactively sending a message to the user. This is NOT a response to their message.
 Based on the conversation history, memories, and trigger reason, generate a natural, brief message.
@@ -18,6 +18,24 @@ Guidelines:
 - Be casual and natural
 - Reference something specific from context or memory if relevant
 - Don't be pushy or annoying
+- Match the tone of your persona
+- Output ONLY the message text, nothing else
+- Do NOT mention that this is a proactive/system-triggered message
+"""
+
+PROACTIVE_SYSTEM_SUFFIX_GROUP = """
+
+You are proactively sending a message in a GROUP chat. This is NOT a response to anyone's message.
+Based on the conversation history, memories, and trigger reason, generate a natural, brief message.
+
+Guidelines:
+- Keep it to 1-3 short sentences — be more concise than in private chat
+- Be casual and natural
+- Be considerate: you are speaking in front of many people, avoid flooding the chat
+- Only speak up when you genuinely have something relevant or interesting to say
+- If the trigger reason is weak or you have nothing meaningful to add, output a single empty line to abort
+- Reference something specific from recent group conversation if relevant
+- Don't be pushy or annoying — silence is better than noise in a group
 - Match the tone of your persona
 - Output ONLY the message text, nothing else
 - Do NOT mention that this is a proactive/system-triggered message
@@ -250,7 +268,11 @@ class ProactiveManager:
                     system_prompt = await self._persona_mgr.get_system_prompt()
                 except Exception:
                     pass
-            system_prompt += PROACTIVE_SYSTEM_SUFFIX
+            is_group = ":private:" not in session_key
+            system_prompt += (
+                PROACTIVE_SYSTEM_SUFFIX_GROUP if is_group
+                else PROACTIVE_SYSTEM_SUFFIX_PRIVATE
+            )
 
             # 3. 注入记忆
             if self._memory_mgr:
