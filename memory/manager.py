@@ -33,6 +33,8 @@ class MemoryManager:
         self.short_term: ShortTermMemoryStore = None
         self.long_term: LongTermMemoryStore = None
         self.summarizer: MemorySummarizer = None
+        # 每会话一把锁，防止同一会话的总结任务并发执行
+        self._summary_locks: dict[str, asyncio.Lock] = {}
 
     async def initialize(self):
         """初始化存储和总结器。"""
@@ -254,52 +256,66 @@ class MemoryManager:
     async def _run_summary(
         self, session_key: str, provider, persona_mgr, context_mgr
     ) -> None:
-        """执行一次自动总结。"""
-        try:
-            data = await self.short_term.load(session_key)
-            memories = data.get("memories", [])
-            recent_text = await self._get_recent_context(session_key, context_mgr)
-            if not memories and not recent_text:
-                logger.debug("[Memory] 无记忆且无上下文，跳过总结")
-                return
+        """执行一次自动总结（带并发锁，同一会话同时只运行一个总结任务）。"""
+        lock = self._summary_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._summary_locks[session_key] = lock
 
-            persona_prompt = ""
-            if persona_mgr:
-                try:
-                    persona_prompt = await persona_mgr.get_system_prompt()
-                except Exception:
-                    pass
-
-            _provider = provider
-            if not _provider and self._provider_getter:
-                try:
-                    _provider = self._provider_getter()
-                except Exception:
-                    pass
-
-            result = await self.summarizer.summarize(
-                short_term_data=data,
-                recent_context_text=recent_text or "",
-                persona_prompt=persona_prompt,
-                provider=_provider,
+        if lock.locked():
+            logger.info(
+                f"[Memory] 总结任务已在执行中，跳过本次触发: {session_key}"
             )
+            return
 
-            if result:
-                await self.short_term.replace_memories(
-                    session_key,
-                    keeps=result.get("keep", []),
-                    deletes=result.get("delete", []),
-                    adds=result.get("add", []),
-                    updates=result.get("update", {}),
+        async with lock:
+            try:
+                data = await self.short_term.load(session_key)
+                memories = data.get("memories", [])
+                recent_text = await self._get_recent_context(
+                    session_key, context_mgr
                 )
-                # 更新 last_summary_turn
-                current_data = await self.short_term.load(session_key)
-                await self.short_term.set_last_summary_turn(
-                    session_key, current_data.get("turn_count", 0)
+                if not memories and not recent_text:
+                    logger.debug("[Memory] 无记忆且无上下文，跳过总结")
+                    return
+
+                persona_prompt = ""
+                if persona_mgr:
+                    try:
+                        persona_prompt = await persona_mgr.get_system_prompt()
+                    except Exception:
+                        pass
+
+                _provider = provider
+                if not _provider and self._provider_getter:
+                    try:
+                        _provider = self._provider_getter()
+                    except Exception:
+                        pass
+
+                result = await self.summarizer.summarize(
+                    short_term_data=data,
+                    recent_context_text=recent_text or "",
+                    persona_prompt=persona_prompt,
+                    provider=_provider,
                 )
 
-        except Exception as e:
-            logger.error(f"[Memory] 自动总结失败 [{session_key}]: {e}")
+                if result:
+                    await self.short_term.replace_memories(
+                        session_key,
+                        keeps=result.get("keep", []),
+                        deletes=result.get("delete", []),
+                        adds=result.get("add", []),
+                        updates=result.get("update", {}),
+                    )
+                    # 更新 last_summary_turn
+                    current_data = await self.short_term.load(session_key)
+                    await self.short_term.set_last_summary_turn(
+                        session_key, current_data.get("turn_count", 0)
+                    )
+
+            except Exception as e:
+                logger.error(f"[Memory] 自动总结失败 [{session_key}]: {e}")
 
     async def _get_recent_context(self, session_key: str, context_mgr) -> str:
         """获取最近几轮对话的纯文本。"""
@@ -337,6 +353,7 @@ class MemoryManager:
         # 短期记忆：保留文件（不调用 delete_session）
         # 长期记忆：关闭实例但保留向量数据（不删除目录）
         await self.long_term.close(session_key)
+        self._summary_locks.pop(session_key, None)
         logger.info(f"[Memory] 会话 {session_key} 已关闭，记忆数据已保留")
 
     async def close(self) -> None:
