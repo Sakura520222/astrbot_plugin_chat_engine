@@ -1052,7 +1052,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         type: str,
         pinned="true",
     ):
-        '''Save a memory. Choose type based on persistence value:
+        """Save a memory. Choose type based on persistence value:
         - short_term: temporary context (current topic, recent plans, dialogue state)
         - long_term: persistent facts (user preferences, identity, key decisions, recurring patterns)
 
@@ -1060,7 +1060,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             content(string): Memory content. One fact per memory, concise, under 200 chars.
             type(string): Memory type. Must be "short_term" or "long_term".
             pinned(string): Only for long_term. "true" = always active every turn (rules, preferences, standing instructions). "false" = retrieved by semantic relevance only. Default "true".
-        '''
+        """
         if not self.memory_mgr:
             return "Memory system is not available."
         session_key = self.context_mgr.build_session_key(event)
