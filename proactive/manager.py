@@ -173,6 +173,15 @@ class ProactiveManager:
 
         await self._save_registry()
 
+    async def reset_round_count(self, session_key: str):
+        """机器人回复后重置轮数计数器，使计数仅从上一次回复开始。"""
+        session = self._sessions.get(session_key)
+        if not session:
+            return
+        if session.get("round_count", 0) != 0:
+            session["round_count"] = 0
+            await self._save_registry()
+
     # 定时任务工具 (LLM Tool)
 
     async def schedule_reply(
@@ -348,7 +357,11 @@ class ProactiveManager:
 
             logger.info(f"[Proactive] 已发送主动回复到 {session_key}: {text[:50]}...")
 
-            # 9. 保存到上下文
+            # 9. 重置轮数计数器（回复已发送，从零开始重新计数）
+            session["round_count"] = 0
+            await self._save_registry()
+
+            # 10. 保存到上下文
             if self._context_mgr:
                 try:
                     user_msg = {

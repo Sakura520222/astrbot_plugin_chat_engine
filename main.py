@@ -626,14 +626,14 @@ class ChatEnginePlugin(Star):
                     except Exception as e:
                         logger.warning(f"[ChatEngine] 记忆轮数追踪失败: {e}")
 
-                # 主动回复: 注册会话 + 轮数计数
+                # 主动回复: 注册会话 + 重置轮数（机器人已回复，从零开始计数）
                 if self.proactive_mgr:
                     try:
                         await self.proactive_mgr.register_session(
                             session_key,
                             event.unified_msg_origin,
                         )
-                        await self.proactive_mgr.on_message(session_key)
+                        await self.proactive_mgr.reset_round_count(session_key)
                     except Exception as e:
                         logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
 
