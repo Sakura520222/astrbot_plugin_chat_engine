@@ -495,6 +495,9 @@ const CONFIG_FIELDS = [
     { key: 'memory_summary_interval', label: '自动总结触发轮数', type: 'number', hint: '每隔多少轮对话触发一次短期记忆自动总结。' },
     { key: 'memory_summary_recent_turns', label: '总结参考最近轮数', type: 'number', hint: '自动总结时参考最近几轮对话。' },
     { key: 'enable_auto_summary', label: '启用自动总结', type: 'checkbox', hint: '开启后，按配置轮数和上下文压缩时自动总结短期记忆。' },
+    { key: 'enable_proactive', label: '启用主动回复', type: 'checkbox', hint: '开启后，支持 LLM 定时回复、超时主动发言、N 轮触发回复等功能。' },
+    { key: 'proactive_timeout_minutes', label: '超时主动发言分钟数', type: 'number', hint: '用户未发言超过此分钟数后，AI 主动发起对话。需在会话设置中单独启用。' },
+    { key: 'proactive_round_interval', label: 'N 轮触发回复（仅群聊）', type: 'number', hint: '每收到 N 条消息触发一次主动回复，仅对群聊生效。0 表示禁用。需在会话设置中单独启用。' },
 ];
 
 let currentConfig = {};
@@ -608,12 +611,13 @@ async function onMemorySessionChange() {
     currentMemorySessionKey = select.value;
     if (!currentMemorySessionKey) {
         document.getElementById('memory-content').style.display = 'none';
+        document.getElementById('proactive-settings').style.display = 'none';
         document.getElementById('memory-empty').style.display = '';
         return;
     }
     document.getElementById('memory-content').style.display = '';
     document.getElementById('memory-empty').style.display = 'none';
-    await loadMemories();
+    await Promise.all([loadMemories(), loadProactiveSettings()]);
 }
 
 async function loadMemories() {
@@ -753,6 +757,58 @@ async function deleteMemory(type, id) {
 
 // 初始化
 
+
+// 主动回复管理
+
+let proactiveSessions = {};
+
+async function loadProactiveSettings() {
+    try {
+        const data = await api('GET', '/api/proactive/sessions');
+        proactiveSessions = {};
+        (data.sessions || []).forEach(s => {
+            proactiveSessions[s.session_key] = s;
+        });
+        updateProactiveToggles();
+    } catch (e) {
+        // 主动回复可能未启用，静默失败
+    }
+}
+
+function updateProactiveToggles() {
+    const settings = proactiveSessions[currentMemorySessionKey] || {};
+    document.getElementById('proactive-timeout-toggle').checked = !!settings.timeout_enabled;
+    document.getElementById('proactive-round-toggle').checked = !!settings.round_enabled;
+    document.getElementById('proactive-settings').style.display = currentMemorySessionKey ? '' : 'none';
+}
+
+async function toggleProactiveTimeout() {
+    if (!currentMemorySessionKey) return;
+    const enabled = document.getElementById('proactive-timeout-toggle').checked;
+    const key = encodeURIComponent(currentMemorySessionKey);
+    try {
+        await api('PUT', `/api/proactive/${key}/timeout`, { enabled });
+        toast(enabled ? '已启用超时主动发言' : '已关闭超时主动发言');
+    } catch (e) {
+        toast('设置失败: ' + e.message, 'error');
+        document.getElementById('proactive-timeout-toggle').checked = !enabled;
+    }
+}
+
+async function toggleProactiveRound() {
+    if (!currentMemorySessionKey) return;
+    const enabled = document.getElementById('proactive-round-toggle').checked;
+    const key = encodeURIComponent(currentMemorySessionKey);
+    try {
+        await api('PUT', `/api/proactive/${key}/round`, { enabled });
+        toast(enabled ? '已启用轮数触发' : '已关闭轮数触发');
+    } catch (e) {
+        toast('设置失败: ' + e.message, 'error');
+        document.getElementById('proactive-round-toggle').checked = !enabled;
+    }
+}
+
+// 初始化
 
 document.addEventListener('DOMContentLoaded', () => {
     loadPersonas();

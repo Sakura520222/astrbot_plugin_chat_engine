@@ -1,11 +1,13 @@
 """Memory tool implementations — called from @llm_tool methods in main.py."""
 
-import json
-
 
 async def save_memory_tool(
-    memory_mgr, session_key: str, content: str,
-    mem_type: str, source: str = "tool", pinned: bool = False,
+    memory_mgr,
+    session_key: str,
+    content: str,
+    mem_type: str,
+    source: str = "tool",
+    pinned: bool = False,
 ) -> str:
     """保存一条记忆。"""
     if mem_type not in ("short_term", "long_term"):
@@ -28,7 +30,9 @@ async def save_memory_tool(
 
     else:  # long_term
         if not memory_mgr.long_term.available:
-            return "Long-term memory is not available (no EmbeddingProvider configured)."
+            return (
+                "Long-term memory is not available (no EmbeddingProvider configured)."
+            )
 
         # 检查上限
         max_count = memory_mgr._cfg_int("long_term_max_count", 200)
@@ -37,7 +41,10 @@ async def save_memory_tool(
             return f"Long-term memory is full ({max_count} items)."
 
         mid = await memory_mgr.long_term.save(
-            session_key, content, source=source, pinned=pinned,
+            session_key,
+            content,
+            source=source,
+            pinned=pinned,
         )
         if mid:
             status = "pinned" if pinned else "active"
@@ -45,7 +52,9 @@ async def save_memory_tool(
         return "Failed to save to long-term memory."
 
 
-async def search_memory_tool(memory_mgr, session_key: str, query: str, top_k: int = 5) -> str:
+async def search_memory_tool(
+    memory_mgr, session_key: str, query: str, top_k: int = 5
+) -> str:
     """搜索长期记忆。"""
     if not memory_mgr.long_term.available:
         return "Long-term memory is not available (no EmbeddingProvider configured)."
@@ -59,7 +68,9 @@ async def search_memory_tool(memory_mgr, session_key: str, query: str, top_k: in
         top_k=top_k,
         fetch_k=memory_mgr._cfg_int("long_term_fetch_k", 20),
         enable_rerank=memory_mgr._cfg_bool("long_term_enable_rerank", True),
-        similarity_threshold=memory_mgr._cfg_float("long_term_similarity_threshold", 0.3),
+        similarity_threshold=memory_mgr._cfg_float(
+            "long_term_similarity_threshold", 0.3
+        ),
     )
 
     if not results:
@@ -71,7 +82,9 @@ async def search_memory_tool(memory_mgr, session_key: str, query: str, top_k: in
     return "\n".join(lines)
 
 
-async def update_memory_tool(memory_mgr, session_key: str, mem_id: str, content: str) -> str:
+async def update_memory_tool(
+    memory_mgr, session_key: str, mem_id: str, content: str
+) -> str:
     """更新一条记忆（自动查找短期/长期）。"""
     # 截断过长内容
     max_chars = memory_mgr._cfg_int("short_term_max_chars", 200)
@@ -92,7 +105,9 @@ async def update_memory_tool(memory_mgr, session_key: str, mem_id: str, content:
     return "Memory not found."
 
 
-async def delete_memory_tool(memory_mgr, session_key: str, mem_id: str, mem_type: str) -> str:
+async def delete_memory_tool(
+    memory_mgr, session_key: str, mem_id: str, mem_type: str
+) -> str:
     """删除一条记忆。"""
     if mem_type == "short_term":
         ok = await memory_mgr.short_term.delete(session_key, mem_id)

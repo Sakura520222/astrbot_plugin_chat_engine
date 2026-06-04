@@ -104,7 +104,10 @@ class MemoryManager:
                     for m in pinned:
                         pinned_ids.add(m["id"])
                         lines.append(f"- [id:{m['id']}] {m['content']}")
-                    sections.append("### Pinned Long-Term Memory (Always Active)\n" + "\n".join(lines))
+                    sections.append(
+                        "### Pinned Long-Term Memory (Always Active)\n"
+                        + "\n".join(lines)
+                    )
                     logger.info(f"[Memory] 注入 {len(pinned)} 条置顶长期记忆")
             except Exception as e:
                 logger.warning(f"[Memory] 获取置顶长期记忆失败: {e}")
@@ -118,7 +121,9 @@ class MemoryManager:
                         top_k=self._cfg_int("long_term_retrieval_top_k", 5),
                         fetch_k=self._cfg_int("long_term_fetch_k", 20),
                         enable_rerank=self._cfg_bool("long_term_enable_rerank", True),
-                        similarity_threshold=self._cfg_float("long_term_similarity_threshold", 0.3),
+                        similarity_threshold=self._cfg_float(
+                            "long_term_similarity_threshold", 0.3
+                        ),
                     )
                     if results:
                         # 去重：排除已经作为置顶注入的
@@ -127,8 +132,12 @@ class MemoryManager:
                             lines = []
                             for r in filtered:
                                 lines.append(f"- [id:{r['id']}] {r['content']}")
-                            sections.append("### Relevant Long-Term Memory\n" + "\n".join(lines))
-                            logger.info(f"[Memory] 检索到 {len(filtered)} 条相关长期记忆")
+                            sections.append(
+                                "### Relevant Long-Term Memory\n" + "\n".join(lines)
+                            )
+                            logger.info(
+                                f"[Memory] 检索到 {len(filtered)} 条相关长期记忆"
+                            )
                     else:
                         logger.debug("[Memory] 未检索到相关长期记忆")
                 except Exception as e:
@@ -142,17 +151,25 @@ class MemoryManager:
     # CRUD 操作
 
     async def save_memory(
-        self, session_key: str, content: str, mem_type: str,
-        source: str = "tool", pinned: bool = False,
+        self,
+        session_key: str,
+        content: str,
+        mem_type: str,
+        source: str = "tool",
+        pinned: bool = False,
     ) -> str | None:
         """保存记忆，返回 ID。"""
         if mem_type == "short_term":
             return await self.short_term.add(session_key, content, source=source)
         elif mem_type == "long_term":
-            return await self.long_term.save(session_key, content, source=source, pinned=pinned)
+            return await self.long_term.save(
+                session_key, content, source=source, pinned=pinned
+            )
         return None
 
-    async def search_long_term(self, session_key: str, query: str, top_k: int = 5) -> list[dict]:
+    async def search_long_term(
+        self, session_key: str, query: str, top_k: int = 5
+    ) -> list[dict]:
         """搜索长期记忆。"""
         return await self.long_term.search(
             session_key,
@@ -164,7 +181,11 @@ class MemoryManager:
         )
 
     async def update_memory(
-        self, session_key: str, mem_id: str, content: str, pinned: bool | None = None,
+        self,
+        session_key: str,
+        mem_id: str,
+        content: str,
+        pinned: bool | None = None,
     ) -> bool:
         """更新记忆（自动查找短期/长期）。"""
         ok = await self.short_term.update(session_key, mem_id, content)
@@ -190,7 +211,9 @@ class MemoryManager:
 
     # 自动总结触发
 
-    async def on_turn_complete(self, session_key: str, provider, persona_mgr, context_mgr) -> None:
+    async def on_turn_complete(
+        self, session_key: str, provider, persona_mgr, context_mgr
+    ) -> None:
         """轮数 +1，检查是否需要触发自动总结。"""
         if not self._cfg_bool("enable_auto_summary", True):
             return
@@ -210,8 +233,12 @@ class MemoryManager:
         )
 
         if gap >= interval:
-            logger.info(f"[Memory] 达到总结间隔 ({gap}>={interval})，触发自动总结（后台任务）")
-            asyncio.create_task(self._run_summary(session_key, provider, persona_mgr, context_mgr))
+            logger.info(
+                f"[Memory] 达到总结间隔 ({gap}>={interval})，触发自动总结（后台任务）"
+            )
+            asyncio.create_task(
+                self._run_summary(session_key, provider, persona_mgr, context_mgr)
+            )
 
     async def on_context_compressed(
         self, session_key: str, provider, persona_mgr, context_mgr
@@ -220,7 +247,9 @@ class MemoryManager:
         if not self._cfg_bool("enable_auto_summary", True):
             return
         logger.info("[Memory] 上下文压缩触发，执行记忆总结（后台任务）")
-        asyncio.create_task(self._run_summary(session_key, provider, persona_mgr, context_mgr))
+        asyncio.create_task(
+            self._run_summary(session_key, provider, persona_mgr, context_mgr)
+        )
 
     async def _run_summary(
         self, session_key: str, provider, persona_mgr, context_mgr
@@ -288,7 +317,8 @@ class MemoryManager:
                     content = msg.get("content", "")
                     if isinstance(content, list):
                         content = " ".join(
-                            p.get("text", "") for p in content
+                            p.get("text", "")
+                            for p in content
                             if isinstance(p, dict) and p.get("type") == "text"
                         )
                     if content:

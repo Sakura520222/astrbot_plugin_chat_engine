@@ -217,5 +217,23 @@
         "type": "bool",
         "default": true,
         "hint": "开启后，按配置轮数和上下文压缩时自动总结短期记忆。"
+    },
+    "enable_proactive": {
+        "description": "启用主动回复",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，支持 LLM 定时回复、超时主动发言、N 轮触发回复等功能。"
+    },
+    "proactive_timeout_minutes": {
+        "description": "超时主动发言分钟数",
+        "type": "int",
+        "default": 30,
+        "hint": "用户未发言超过此分钟数后，AI 主动发起对话。需在会话设置中单独启用。"
+    },
+    "proactive_round_interval": {
+        "description": "N 轮触发回复（仅群聊）",
+        "type": "int",
+        "default": 0,
+        "hint": "每收到 N 条消息（含被动消息）触发一次主动回复，仅对群聊生效。0 表示禁用。需在会话设置中单独启用。"
     }
 }

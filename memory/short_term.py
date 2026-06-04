@@ -70,13 +70,15 @@ class ShortTermMemoryStore:
             data = await self.load(session_key)
             now = datetime.utcnow().isoformat()
             mid = uuid.uuid4().hex
-            data["memories"].append({
-                "id": mid,
-                "content": content,
-                "created_at": now,
-                "updated_at": now,
-                "source": source,
-            })
+            data["memories"].append(
+                {
+                    "id": mid,
+                    "content": content,
+                    "created_at": now,
+                    "updated_at": now,
+                    "source": source,
+                }
+            )
             await self.save_data(session_key, data)
             return mid
 
@@ -127,8 +129,12 @@ class ShortTermMemoryStore:
             await self.save_data(session_key, data)
 
     async def replace_memories(
-        self, session_key: str, keeps: list[str], deletes: list[str],
-        adds: list[dict], updates: dict[str, str],
+        self,
+        session_key: str,
+        keeps: list[str],
+        deletes: list[str],
+        adds: list[dict],
+        updates: dict[str, str],
     ) -> None:
         """根据总结结果批量更新短期记忆。"""
         async with self._get_lock(session_key):
@@ -144,13 +150,15 @@ class ShortTermMemoryStore:
                     m["updated_at"] = now
                 new_memories.append(m)
             for content in adds:
-                new_memories.append({
-                    "id": uuid.uuid4().hex,
-                    "content": content,
-                    "created_at": now,
-                    "updated_at": now,
-                    "source": "auto",
-                })
+                new_memories.append(
+                    {
+                        "id": uuid.uuid4().hex,
+                        "content": content,
+                        "created_at": now,
+                        "updated_at": now,
+                        "source": "auto",
+                    }
+                )
             data["memories"] = new_memories
             await self.save_data(session_key, data)
 

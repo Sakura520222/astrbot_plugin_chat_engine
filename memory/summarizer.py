@@ -2,7 +2,6 @@
 
 from astrbot.api import logger
 
-
 # 总结 prompt 模板
 SUMMARY_SYSTEM_SUFFIX = """
 
@@ -44,13 +43,9 @@ def parse_summary_output(text: str) -> dict:
         if not body:
             continue
         if head == "KEEP":
-            result["keep"].extend(
-                x.strip() for x in body.split(",") if x.strip()
-            )
+            result["keep"].extend(x.strip() for x in body.split(",") if x.strip())
         elif head == "DELETE":
-            result["delete"].extend(
-                x.strip() for x in body.split(",") if x.strip()
-            )
+            result["delete"].extend(x.strip() for x in body.split(",") if x.strip())
         elif head == "ADD":
             if body:
                 result["add"].append(body)
@@ -106,9 +101,7 @@ class MemorySummarizer:
                 return None
 
             result = parse_summary_output(response.completion_text)
-            has_ops = any(
-                result[k] for k in ("delete", "add", "update")
-            )
+            has_ops = any(result[k] for k in ("delete", "add", "update"))
             if has_ops or result["keep"]:
                 logger.info(
                     f"[Memory] 总结完成: keep={len(result['keep'])}, "

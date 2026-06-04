@@ -25,8 +25,9 @@ from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
 from .context.manager import ChatContextManager
 from .context.token_counter import TokenEstimator
 from .db.engine import ChatEngineDB
-from .persona.manager import ChatPersonaManager
 from .memory.manager import MemoryManager
+from .persona.manager import ChatPersonaManager
+from .proactive.manager import ProactiveManager
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
 from .web.server import ChatWebServer
@@ -49,6 +50,7 @@ class ChatEnginePlugin(Star):
         self.persona_mgr: ChatPersonaManager = None
         self.tool_mgr: ChatToolManager = None
         self.memory_mgr: MemoryManager = None
+        self.proactive_mgr: ProactiveManager = None
         self.web_server: ChatWebServer = None
 
     # 配置读取辅助
@@ -145,10 +147,32 @@ class ChatEnginePlugin(Star):
                 await self.memory_mgr.initialize()
                 logger.info("[ChatEngine] 记忆系统已初始化")
             except Exception as e:
-                logger.warning(f"[ChatEngine] 记忆系统初始化失败，记忆功能将被禁用: {e}")
+                logger.warning(
+                    f"[ChatEngine] 记忆系统初始化失败，记忆功能将被禁用: {e}"
+                )
                 self.memory_mgr = None
         else:
             logger.info("[ChatEngine] 记忆功能已禁用")
+
+        # 主动回复管理器
+        if self._cfg_bool("enable_proactive", False):
+            try:
+                self.proactive_mgr = ProactiveManager(
+                    config=self.config,
+                    data_dir=data_dir,
+                    context=self.context,
+                    provider_getter=_get_provider,
+                    persona_mgr=self.persona_mgr,
+                    context_mgr=self.context_mgr,
+                    memory_mgr=self.memory_mgr,
+                )
+                await self.proactive_mgr.initialize()
+                logger.info("[ChatEngine] 主动回复系统已初始化")
+            except Exception as e:
+                logger.warning(f"[ChatEngine] 主动回复系统初始化失败: {e}")
+                self.proactive_mgr = None
+        else:
+            logger.info("[ChatEngine] 主动回复功能未启用")
 
         # 启动 WebUI
         web_port = self._cfg_int("web_port", 8765)
@@ -164,6 +188,8 @@ class ChatEnginePlugin(Star):
             await self.web_server.stop()
         if self.memory_mgr:
             await self.memory_mgr.close()
+        if self.proactive_mgr:
+            await self.proactive_mgr.close()
         if self.db:
             await self.db.close()
         logger.info("[ChatEngine] 已关闭")
@@ -293,6 +319,17 @@ class ChatEnginePlugin(Star):
                             logger.debug(f"[ChatEngine] 被动记录消息到 {passive_key}")
                         except Exception as e:
                             logger.debug(f"[ChatEngine] 被动记录失败: {e}")
+
+                # 主动回复: 注册会话 + 轮数计数
+                if self.proactive_mgr:
+                    try:
+                        passive_umo = event.unified_msg_origin
+                        await self.proactive_mgr.register_session(
+                            passive_key, passive_umo
+                        )
+                        await self.proactive_mgr.on_message(passive_key)
+                    except Exception as e:
+                        logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
 
                 event.should_call_llm(False)  # 恢复默认 LLM
                 return
@@ -498,7 +535,10 @@ class ChatEnginePlugin(Star):
                         if compressed:
                             logger.info("[ChatEngine] 检测到上下文压缩，触发记忆总结")
                             await self.memory_mgr.on_context_compressed(
-                                session_key, provider, self.persona_mgr, self.context_mgr
+                                session_key,
+                                provider,
+                                self.persona_mgr,
+                                self.context_mgr,
                             )
 
                         await self.memory_mgr.on_turn_complete(
@@ -506,6 +546,17 @@ class ChatEnginePlugin(Star):
                         )
                     except Exception as e:
                         logger.warning(f"[ChatEngine] 记忆轮数追踪失败: {e}")
+
+                # 主动回复: 注册会话 + 轮数计数
+                if self.proactive_mgr:
+                    try:
+                        await self.proactive_mgr.register_session(
+                            session_key,
+                            event.unified_msg_origin,
+                        )
+                        await self.proactive_mgr.on_message(session_key)
+                    except Exception as e:
+                        logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
 
         except Exception as e:
             logger.error(f"[ChatEngine] 顶层异常: {e}", exc_info=True)
@@ -788,8 +839,7 @@ class ChatEnginePlugin(Star):
                 quote_chars = """“”‘’「」『』"""
                 # 标点后跟非引号字符 (即行内标点不作为分割点)
                 punct_then_nonquote = (
-                    f"[^{char_class}{quote_chars}]*"
-                    f"[{char_class}](?=[^{quote_chars}]|$)"
+                    f"[^{char_class}{quote_chars}]*[{char_class}](?=[^{quote_chars}]|$)"
                 )
                 segments = []
                 for line in text.split("\n"):
@@ -812,17 +862,13 @@ class ChatEnginePlugin(Star):
                         tail = line[last_end:]
                         if tail.strip():
                             parts.append(tail)
-                        segments.extend(
-                            [p.strip() for p in parts if p.strip()]
-                        )
+                        segments.extend([p.strip() for p in parts if p.strip()])
             else:
                 # sentence 模式: 按标点符号分段 (经典模式)
                 # 单次 finditer 收集片段 + 追踪尾部位置
                 segments = []
                 last_end = 0
-                for m in re.finditer(
-                    f"[^{char_class}]*[{char_class}]", text
-                ):
+                for m in re.finditer(f"[^{char_class}]*[{char_class}]", text):
                     segments.append(m.group())
                     last_end = m.end()
                 # 循环结束后处理尾部文本
@@ -848,42 +894,40 @@ class ChatEnginePlugin(Star):
     # Emoji 正则: 包含 Unicode Emoji 属性的字符
     _EMOJI_RE = re.compile(
         "["
-        "\U0001F600-\U0001F64F"  # Emoticons
-        "\U0001F300-\U0001F5FF"  # Symbols & Pictographs
-        "\U0001F680-\U0001F6FF"  # Transport & Map
-        "\U0001F1E0-\U0001F1FF"  # Flags
-        "\U00002702-\U000027B0"  # Dingbats
-        "\U0000FE00-\U0000FE0F"  # Variation Selectors
-        "\U0001F900-\U0001F9FF"  # Supplemental Symbols
-        "\U0001FA00-\U0001FA6F"  # Chess Symbols
-        "\U0001FA70-\U0001FAFF"  # Symbols Extended-A
-        "\U00002600-\U000026FF"  # Misc Symbols
-        "\U0000200D"             # Zero Width Joiner
-        "\U0000FE0F"             # Variation Selector-16
-        "\U00002B50"             # Star
-        "\U00002B55"             # Circle
-        "\U0000231A-\U0000231B"  # Watch/Hourglass
-        "\U000023E9-\U000023F3"  # Various symbols
-        "\U000023F8-\U000023FA"  # Various symbols
-        "\U000025AA-\U000025AB"  # Squares
-        "\U000025B6"             # Play button
-        "\U000025C0"             # Reverse button
-        "\U000025FB-\U000025FE"  # Squares
+        "\U0001f600-\U0001f64f"  # Emoticons
+        "\U0001f300-\U0001f5ff"  # Symbols & Pictographs
+        "\U0001f680-\U0001f6ff"  # Transport & Map
+        "\U0001f1e0-\U0001f1ff"  # Flags
+        "\U00002702-\U000027b0"  # Dingbats
+        "\U0000fe00-\U0000fe0f"  # Variation Selectors
+        "\U0001f900-\U0001f9ff"  # Supplemental Symbols
+        "\U0001fa00-\U0001fa6f"  # Chess Symbols
+        "\U0001fa70-\U0001faff"  # Symbols Extended-A
+        "\U00002600-\U000026ff"  # Misc Symbols
+        "\U0000200d"  # Zero Width Joiner
+        "\U0000fe0f"  # Variation Selector-16
+        "\U00002b50"  # Star
+        "\U00002b55"  # Circle
+        "\U0000231a-\U0000231b"  # Watch/Hourglass
+        "\U000023e9-\U000023f3"  # Various symbols
+        "\U000023f8-\U000023fa"  # Various symbols
+        "\U000025aa-\U000025ab"  # Squares
+        "\U000025b6"  # Play button
+        "\U000025c0"  # Reverse button
+        "\U000025fb-\U000025fe"  # Squares
         "\U00002934-\U00002935"  # Arrows
-        "\U00002B05-\U00002B07"  # Arrows
-        "\U00002B1B-\U00002B1C"  # Squares
-        "\U00003030"             # Wavy Dash
-        "\U0000303D"             # Part Alternation Mark
-        "\U00003297"             # Circled Ideograph Congratulation
-        "\U00003299"             # Circled Ideograph Secret
+        "\U00002b05-\U00002b07"  # Arrows
+        "\U00002b1b-\U00002b1c"  # Squares
+        "\U00003030"  # Wavy Dash
+        "\U0000303d"  # Part Alternation Mark
+        "\U00003297"  # Circled Ideograph Congratulation
+        "\U00003299"  # Circled Ideograph Secret
         "]+",
         flags=re.UNICODE,
     )
 
     # 括号及其内容: 中英文括号
-    _BRACKET_RE = re.compile(
-        r"[\(（\[【][^\)）\]】]*?[\)）\]】]"
-    )
+    _BRACKET_RE = re.compile(r"[\(（\[【][^\)）\]】]*?[\)）\]】]")
 
     def _clean_response(self, text: str) -> str:
         """对 LLM 回复进行文本清洗。
@@ -983,27 +1027,32 @@ class ChatEnginePlugin(Star):
 
     @staticmethod
     def _build_memory_tool_guidance() -> str:
-        """构建记忆工具的使用指引，注入到 system prompt 中。"""
+        """构建记忆工具和主动回复工具的使用指引，注入到 system prompt 中。"""
         return """
 
 ## Memory Tool Usage Guide
 
-You have access to memory tools (save_memory, search_memory, update_memory, delete_memory). Use them proactively:
+You have access to memory tools (save_memory, search_memory, update_memory, delete_memory) and proactive reply tools (schedule_reply). Use them proactively:
 
 - **save_memory**: When the user shares personal preferences, habits, important facts, or explicitly says things like "记住了", "记住", "别忘了", "记住这个". Choose type="long_term" for persistent facts (preferences, identity) or type="short_term" for temporary context (current topic, recent plans).
-  - **pinned="true"**: Use for standing rules or instructions that must ALWAYS be active regardless of topic (e.g. "user wants responses under 30 chars", "always reply in a cute tone", "use Japanese when the user says '日语模式'"). Pinned memories bypass semantic search and are injected every turn.
+  - **pinned="true"**: Use for standing rules or instructions that must ALWAYS be active regardless of topic (e.g. "user wants responses under 30 chars", "always reply in a cute tone"). Pinned memories bypass semantic search and are injected every turn.
 - **search_memory**: Before answering questions about the user's preferences or past discussions, search your long-term memory for relevant context.
 - **update_memory**: When the user corrects or updates previously remembered information.
 - **delete_memory**: When the user explicitly asks to forget something.
+- **schedule_reply**: When the user asks you to remind them later, when you want to follow up on a topic, or when saying things like "一会提醒我", "过XX分钟告诉我". Also use when the conversation naturally suggests a follow-up would be welcome.
 
-Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these memory tools to the user — just use them naturally when appropriate.
+Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these tools to the user — just use them naturally when appropriate.
 """
 
     @filter.llm_tool(name="save_memory")
     async def tool_save_memory(
-        self, event: AstrMessageEvent, content: str, type: str, pinned="false",
+        self,
+        event: AstrMessageEvent,
+        content: str,
+        type: str,
+        pinned="false",
     ):
-        '''Save a memory. Choose type based on persistence value:
+        """Save a memory. Choose type based on persistence value:
         - short_term: temporary context (current topic, recent plans, dialogue state)
         - long_term: persistent facts (user preferences, identity, key decisions, recurring patterns)
 
@@ -1011,7 +1060,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             content(string): Memory content. One fact per memory, concise, under 200 chars.
             type(string): Memory type. Must be "short_term" or "long_term".
             pinned(string): Only for long_term. Set "true" if this is a rule or standing instruction that must ALWAYS be followed (e.g. user preferences about response style, format, persona rules). Pinned memories are injected every turn regardless of topic. Default "false".
-        '''
+        """
         if not self.memory_mgr:
             return "Memory system is not available."
         session_key = self.context_mgr.build_session_key(event)
@@ -1019,9 +1068,14 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         is_pinned = str(pinned).lower() in ("true", "1", "yes")
         try:
             from .memory.tools import save_memory_tool
+
             return await save_memory_tool(
-                self.memory_mgr, session_key, content, type,
-                source="tool", pinned=is_pinned,
+                self.memory_mgr,
+                session_key,
+                content,
+                type,
+                source="tool",
+                pinned=is_pinned,
             )
         except Exception as e:
             logger.error(f"[ChatEngine] save_memory 工具失败: {e}")
@@ -1029,63 +1083,90 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
 
     @filter.llm_tool(name="search_memory")
     async def tool_search_memory(self, event: AstrMessageEvent, query: str, top_k="5"):
-        '''Semantic search in long-term memory.
+        """Semantic search in long-term memory.
         Short-term memory is always visible in the system prompt and does not need searching.
 
         Args:
             query(string): Search query text.
             top_k(string): Number of results to return. Default 5.
-        '''
+        """
         if not self.memory_mgr:
             return "Memory system is not available."
         session_key = self.context_mgr.build_session_key(event)
         try:
             from .memory.tools import search_memory_tool
+
             k = int(top_k) if isinstance(top_k, str) else (top_k or 5)
-            return await search_memory_tool(
-                self.memory_mgr, session_key, query, k
-            )
+            return await search_memory_tool(self.memory_mgr, session_key, query, k)
         except Exception as e:
             logger.error(f"[ChatEngine] search_memory 工具失败: {e}")
             return f"Search failed: {type(e).__name__}"
 
     @filter.llm_tool(name="update_memory")
     async def tool_update_memory(self, event: AstrMessageEvent, id: str, content: str):
-        '''Update an existing memory. Automatically searches both short-term and long-term
+        """Update an existing memory. Automatically searches both short-term and long-term
         storage by ID (short-term first, then long-term).
 
         Args:
             id(string): Memory ID (shown in brackets in the system prompt memories section).
             content(string): New memory content. One fact, under 200 chars.
-        '''
+        """
         if not self.memory_mgr:
             return "Memory system is not available."
         session_key = self.context_mgr.build_session_key(event)
         try:
             from .memory.tools import update_memory_tool
-            return await update_memory_tool(
-                self.memory_mgr, session_key, id, content
-            )
+
+            return await update_memory_tool(self.memory_mgr, session_key, id, content)
         except Exception as e:
             logger.error(f"[ChatEngine] update_memory 工具失败: {e}")
             return f"Update failed: {type(e).__name__}"
 
     @filter.llm_tool(name="delete_memory")
     async def tool_delete_memory(self, event: AstrMessageEvent, id: str, type: str):
-        '''Delete a specific memory by ID.
+        """Delete a specific memory by ID.
 
         Args:
             id(string): Memory ID to delete.
             type(string): Memory type. Must be "short_term" or "long_term".
-        '''
+        """
         if not self.memory_mgr:
             return "Memory system is not available."
         session_key = self.context_mgr.build_session_key(event)
         try:
             from .memory.tools import delete_memory_tool
-            return await delete_memory_tool(
-                self.memory_mgr, session_key, id, type
-            )
+
+            return await delete_memory_tool(self.memory_mgr, session_key, id, type)
         except Exception as e:
             logger.error(f"[ChatEngine] delete_memory 工具失败: {e}")
             return f"Delete failed: {type(e).__name__}"
+
+    # 主动回复工具 — LLM Tool Call
+
+    @filter.llm_tool(name="schedule_reply")
+    async def tool_schedule_reply(
+        self,
+        event: AstrMessageEvent,
+        delay_minutes: str,
+        reason: str,
+    ):
+        """Schedule a proactive message to be sent to the user after a delay.
+        Use this when you want to follow up, remind, or check in with the user later.
+
+        Args:
+            delay_minutes(string): Minutes to wait before sending. Min 1, max 1440 (24h).
+            reason(string): Why you want to follow up. Helps generate the right message.
+        """
+        if not self.proactive_mgr:
+            return "Proactive replies are not enabled."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            mins = int(delay_minutes)
+            return await self.proactive_mgr.schedule_reply(
+                session_key,
+                mins,
+                reason,
+            )
+        except Exception as e:
+            logger.error(f"[ChatEngine] schedule_reply 工具失败: {e}")
+            return f"Schedule failed: {type(e).__name__}"

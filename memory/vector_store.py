@@ -29,7 +29,7 @@ class LongTermMemoryStore:
         # 使用 getter 函数动态获取 provider，避免缓存已关闭的客户端
         self._embedding_getter = embedding_getter
         self._rerank_getter = rerank_getter
-        self._instances: dict[str, "FaissVecDB"] = {}
+        self._instances: dict[str, FaissVecDB] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         logger.info("[Memory] 长期记忆存储已创建（EmbeddingProvider 延迟检测）")
 
@@ -105,8 +105,11 @@ class LongTermMemoryStore:
             return None
 
     async def save(
-        self, session_key: str, content: str,
-        source: str = "tool", pinned: bool = False,
+        self,
+        session_key: str,
+        content: str,
+        source: str = "tool",
+        pinned: bool = False,
     ) -> str | None:
         """保存一条长期记忆，返回记忆 ID。失败返回 None。"""
         if not self.available:
@@ -164,18 +167,24 @@ class LongTermMemoryStore:
                 if r.similarity < similarity_threshold:
                     continue
                 data = r.data
-                filtered.append({
-                    "id": data.get("metadata", {}).get("id", data.get("id", "")),
-                    "content": data.get("text", ""),
-                    "similarity": round(r.similarity, 4),
-                })
+                filtered.append(
+                    {
+                        "id": data.get("metadata", {}).get("id", data.get("id", "")),
+                        "content": data.get("text", ""),
+                        "similarity": round(r.similarity, 4),
+                    }
+                )
             return filtered
         except Exception as e:
             logger.error(f"[Memory] 检索长期记忆失败: {e!r}", exc_info=True)
             return []
 
     async def update(
-        self, session_key: str, doc_id: str, content: str, pinned: bool | None = None,
+        self,
+        session_key: str,
+        doc_id: str,
+        content: str,
+        pinned: bool | None = None,
     ) -> bool:
         """更新长期记忆（删除旧向量 + 插入新向量）。"""
         if not self.available:
@@ -236,15 +245,21 @@ class LongTermMemoryStore:
             for doc in docs:
                 # metadata 在 DocumentStorage 中是 JSON 字符串，需要解析
                 raw_meta = doc.get("metadata", "{}")
-                meta = json.loads(raw_meta) if isinstance(raw_meta, str) else (raw_meta or {})
-                result.append({
-                    "id": meta.get("id", str(doc.get("doc_id", ""))),
-                    "content": doc.get("text", ""),
-                    "source": meta.get("source", ""),
-                    "pinned": meta.get("pinned", False),
-                    "created_at": meta.get("created_at", ""),
-                    "updated_at": meta.get("updated_at", ""),
-                })
+                meta = (
+                    json.loads(raw_meta)
+                    if isinstance(raw_meta, str)
+                    else (raw_meta or {})
+                )
+                result.append(
+                    {
+                        "id": meta.get("id", str(doc.get("doc_id", ""))),
+                        "content": doc.get("text", ""),
+                        "source": meta.get("source", ""),
+                        "pinned": meta.get("pinned", False),
+                        "created_at": meta.get("created_at", ""),
+                        "updated_at": meta.get("updated_at", ""),
+                    }
+                )
             return result
         except Exception as e:
             logger.error(f"[Memory] 列出长期记忆失败: {e}")

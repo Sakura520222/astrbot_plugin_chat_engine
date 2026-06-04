@@ -54,6 +54,19 @@
                         <button class="btn btn-secondary" onclick="loadMemorySessionList()">🔄 刷新会话</button>
                     </div>
                 </div>
+                <div id="proactive-settings" class="card" style="display:none;margin-top:8px;padding:8px 12px;">
+                    <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+                        <span style="font-weight:600;">⚡ 主动回复</span>
+                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                            <input type="checkbox" id="proactive-timeout-toggle" onchange="toggleProactiveTimeout()">
+                            ⏰ 超时主动发言
+                        </label>
+                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                            <input type="checkbox" id="proactive-round-toggle" onchange="toggleProactiveRound()">
+                            🔄 轮数触发
+                        </label>
+                    </div>
+                </div>
                 <div id="memory-content" style="display:none;">
                     <div class="memory-panels">
                         <div class="memory-panel">

@@ -99,6 +99,17 @@ class ChatWebServer:
             "/api/memories/{key:.*}/long/{id}", self._api_delete_long_term_memory
         )
 
+        #  主动回复管理
+        self.app.router.add_get(
+            "/api/proactive/sessions", self._api_list_proactive_sessions
+        )
+        self.app.router.add_put(
+            "/api/proactive/{key:.*}/timeout", self._api_set_proactive_timeout
+        )
+        self.app.router.add_put(
+            "/api/proactive/{key:.*}/round", self._api_set_proactive_round
+        )
+
         #  前端页面
         self.app.router.add_get("/", self._serve_index)
         self.app.router.add_get("/{filename}", self._serve_static)
@@ -383,6 +394,9 @@ class ChatWebServer:
             "memory_summary_interval",
             "memory_summary_recent_turns",
             "enable_auto_summary",
+            "enable_proactive",
+            "proactive_timeout_minutes",
+            "proactive_round_interval",
         ]
         config_data = {}
         for key in config_keys:
@@ -423,6 +437,9 @@ class ChatWebServer:
             "memory_summary_interval",
             "memory_summary_recent_turns",
             "enable_auto_summary",
+            "enable_proactive",
+            "proactive_timeout_minutes",
+            "proactive_round_interval",
         ]
         for key in allowed_keys:
             if key in data:
@@ -466,9 +483,7 @@ class ChatWebServer:
         """获取记忆管理器，未初始化时返回 None"""
         return getattr(self.plugin, "memory_mgr", None)
 
-    async def _api_list_short_term_memories(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _api_list_short_term_memories(self, request: web.Request) -> web.Response:
         mgr = self._get_memory_mgr()
         if not mgr:
             return web.json_response({"memories": []})
@@ -479,9 +494,7 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-    async def _api_list_long_term_memories(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _api_list_long_term_memories(self, request: web.Request) -> web.Response:
         mgr = self._get_memory_mgr()
         if not mgr:
             return web.json_response({"memories": []})
@@ -492,9 +505,7 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-    async def _api_add_short_term_memory(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _api_add_short_term_memory(self, request: web.Request) -> web.Response:
         mgr = self._get_memory_mgr()
         if not mgr:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
@@ -511,9 +522,7 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-    async def _api_add_long_term_memory(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _api_add_long_term_memory(self, request: web.Request) -> web.Response:
         mgr = self._get_memory_mgr()
         if not mgr:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
@@ -525,15 +534,17 @@ class ChatWebServer:
             return web.json_response({"error": "内容不能为空"}, status=400)
         try:
             mid = await mgr.save_memory(
-                session_key, content, "long_term", source="manual", pinned=pinned,
+                session_key,
+                content,
+                "long_term",
+                source="manual",
+                pinned=pinned,
             )
             return web.json_response({"ok": True, "id": mid})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-    async def _api_update_short_term_memory(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _api_update_short_term_memory(self, request: web.Request) -> web.Response:
         mgr = self._get_memory_mgr()
         if not mgr:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
@@ -549,9 +560,7 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-    async def _api_update_long_term_memory(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _api_update_long_term_memory(self, request: web.Request) -> web.Response:
         mgr = self._get_memory_mgr()
         if not mgr:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
@@ -566,14 +575,16 @@ class ChatWebServer:
         pinned = bool(pinned_raw) if pinned_raw is not None else None
         try:
             ok = await mgr.update_memory(
-                session_key, mem_id, content, pinned=pinned,
+                session_key,
+                mem_id,
+                content,
+                pinned=pinned,
             )
             return web.json_response({"ok": ok})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
-    async def _api_delete_short_term_memory(
-        self, request: web.Request
-    ) -> web.Response:
+
+    async def _api_delete_short_term_memory(self, request: web.Request) -> web.Response:
         mgr = self._get_memory_mgr()
         if not mgr:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
@@ -587,9 +598,7 @@ class ChatWebServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-    async def _api_delete_long_term_memory(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _api_delete_long_term_memory(self, request: web.Request) -> web.Response:
         mgr = self._get_memory_mgr()
         if not mgr:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
@@ -599,6 +608,47 @@ class ChatWebServer:
             ok = await mgr.delete_memory(session_key, mem_id, "long_term")
             if not ok:
                 return web.json_response({"error": "记忆不存在"}, status=404)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    # 主动回复 API
+
+    def _get_proactive_mgr(self):
+        return getattr(self.plugin, "proactive_mgr", None)
+
+    async def _api_list_proactive_sessions(self, request: web.Request) -> web.Response:
+        mgr = self._get_proactive_mgr()
+        if not mgr:
+            return web.json_response({"sessions": []})
+        try:
+            sessions = await mgr.list_sessions()
+            return web.json_response({"sessions": sessions})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_set_proactive_timeout(self, request: web.Request) -> web.Response:
+        mgr = self._get_proactive_mgr()
+        if not mgr:
+            return web.json_response({"error": "主动回复未启用"}, status=400)
+        session_key = request.match_info["key"]
+        data = await request.json()
+        enabled = bool(data.get("enabled", False))
+        try:
+            await mgr.set_timeout_enabled(session_key, enabled)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_set_proactive_round(self, request: web.Request) -> web.Response:
+        mgr = self._get_proactive_mgr()
+        if not mgr:
+            return web.json_response({"error": "主动回复未启用"}, status=400)
+        session_key = request.match_info["key"]
+        data = await request.json()
+        enabled = bool(data.get("enabled", False))
+        try:
+            await mgr.set_round_enabled(session_key, enabled)
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
