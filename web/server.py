@@ -23,6 +23,7 @@ class ChatWebServer:
         self.site = None
         self.static_dir = Path(__file__).parent / "static"
         self._auth_tokens = {}  # token -> {"username": str, "expires_at": float}
+        self._last_token_cleanup = time.time()  # 上次清理过期 token 的时间
         self._setup_routes()
         self._setup_middlewares()
 
@@ -724,13 +725,32 @@ class ChatWebServer:
         return False
 
     def _validate_token(self, token: str) -> bool:
-        """验证 token 是否有效且未过期"""
+        """验证 token 是否有效且未过期，顺便清理过期 token。"""
+        now = time.time()
+        # 每 60 分钟执行一次批量清理，防止过期 token 无限堆积
+        if now - self._last_token_cleanup > 3600:
+            self._last_token_cleanup = now
+            self._cleanup_expired_tokens(now)
+
         if token in self._auth_tokens:
             info = self._auth_tokens[token]
-            if info["expires_at"] > time.time():
+            if info["expires_at"] > now:
                 return True
             del self._auth_tokens[token]
         return False
+
+    def _cleanup_expired_tokens(self, now: float | None = None) -> int:
+        """清理所有过期 token，返回清理数量。"""
+        if now is None:
+            now = time.time()
+        expired = [
+            t for t, info in self._auth_tokens.items() if info["expires_at"] <= now
+        ]
+        for t in expired:
+            del self._auth_tokens[t]
+        if expired:
+            logger.debug(f"[WebUI] 清理 {len(expired)} 个过期 token")
+        return len(expired)
 
     async def _api_auth_login(self, request: web.Request) -> web.Response:
         """登录接口 — 验证用户名密码，签发 token 并写入 Cookie"""

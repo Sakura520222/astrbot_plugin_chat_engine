@@ -76,6 +76,8 @@ class ProactiveManager:
         self._scheduled_tasks: dict[str, asyncio.Task] = {}
         self._monitor_task: asyncio.Task | None = None
         self._running = False
+        self._registry_dirty = False  # 脏标记：数据已变更但尚未写入磁盘
+        self._registry_save_interval = 30  # 脏数据最长延迟写入秒数
 
     # 配置读取辅助
 
@@ -125,8 +127,18 @@ class ProactiveManager:
         try:
             text = json.dumps(self._sessions, ensure_ascii=False, indent=2)
             await asyncio.to_thread(self._registry_path.write_text, text, "utf-8")
+            self._registry_dirty = False
         except Exception as e:
             logger.error(f"[Proactive] 保存注册表失败: {e}")
+
+    def _mark_dirty(self):
+        """标记注册表为脏，将在下次定期保存时写入磁盘。"""
+        self._registry_dirty = True
+
+    async def _flush_registry(self):
+        """将脏数据立即写入磁盘；无变更时跳过。"""
+        if self._registry_dirty:
+            await self._save_registry()
 
     def _get_or_create_session(self, session_key: str, umo: str | None = None) -> dict:
         if session_key not in self._sessions:
@@ -148,7 +160,7 @@ class ProactiveManager:
         """注册/更新会话（每次收到消息时调用）。"""
         self._get_or_create_session(session_key, umo)
         self._sessions[session_key]["last_message_at"] = self._utcnow()
-        await self._save_registry()
+        self._mark_dirty()
 
     async def on_message(self, session_key: str):
         """收到消息时调用：更新时间戳 + 检查轮数触发。"""
@@ -171,7 +183,7 @@ class ProactiveManager:
                     asyncio.create_task(self._send_proactive(session_key, reason))
                     return
 
-        await self._save_registry()
+        self._mark_dirty()
 
     async def reset_round_count(self, session_key: str):
         """机器人回复后重置轮数计数器，使计数仅从上一次回复开始。"""
@@ -180,7 +192,7 @@ class ProactiveManager:
             return
         if session.get("round_count", 0) != 0:
             session["round_count"] = 0
-            await self._save_registry()
+            self._mark_dirty()
 
     # 定时任务工具 (LLM Tool)
 
@@ -414,10 +426,14 @@ class ProactiveManager:
     # 后台超时监控
 
     async def _timeout_monitor(self):
-        """每 60 秒检查一次超时触发。"""
+        """每 60 秒检查一次超时触发，并顺便 flush 脏数据。"""
         while self._running:
             try:
                 await asyncio.sleep(60)
+
+                # 定期将脏数据写入磁盘（防抖核心：每 60 秒最多写一次）
+                await self._flush_registry()
+
                 timeout_min = self._cfg_int("proactive_timeout_minutes", 30)
                 if timeout_min <= 0:
                     continue
@@ -456,11 +472,12 @@ class ProactiveManager:
     # 生命周期
 
     async def close(self):
-        """关闭所有后台任务。"""
+        """关闭所有后台任务，最终 flush 脏数据。"""
         self._running = False
         for task in self._scheduled_tasks.values():
             task.cancel()
         self._scheduled_tasks.clear()
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
+        await self._flush_registry()
         logger.info("[Proactive] 已关闭")
