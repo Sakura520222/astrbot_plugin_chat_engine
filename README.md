@@ -136,7 +136,7 @@ astrbot_plugin_chat_engine/
 ## 兼容性
 
 - AstrBot v4.25+
-- 平台: QQ OneBot (aiocqhttp) / Telegram
+- 平台: QQ OneBot (aiocqhttp) / Telegram (未测试)
 - 数据库: SQLite / MySQL
 - Python 3.10+
 
