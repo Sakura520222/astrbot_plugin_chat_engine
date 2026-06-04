@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,8 @@ class ProactiveManager:
         persona_mgr=None,
         context_mgr=None,
         memory_mgr=None,
+        clean_fn: Callable[[str], str] | None = None,
+        split_fn: Callable[[str], list[str]] | None = None,
     ):
         self.config = config
         self.data_dir = data_dir
@@ -43,6 +46,8 @@ class ProactiveManager:
         self._persona_mgr = persona_mgr
         self._context_mgr = context_mgr
         self._memory_mgr = memory_mgr
+        self._clean_fn = clean_fn
+        self._split_fn = split_fn
 
         self._registry_dir = Path(data_dir) / "proactive"
         self._registry_dir.mkdir(parents=True, exist_ok=True)
@@ -281,19 +286,47 @@ class ProactiveManager:
             if not text:
                 return
 
-            # 7. 发送消息
+            # 7. 文本清洗
+            if self._clean_fn:
+                text = self._clean_fn(text)
+
+            if not text:
+                return
+
+            # 8. 发送消息（支持分段）
             from astrbot.core.message.components import Plain
             from astrbot.core.message.message_event_result import MessageChain
 
-            chain = MessageChain([Plain(text)])
-            sent = await self._context.send_message(umo, chain)
-            if not sent:
-                logger.warning(f"[Proactive] 发送失败: {session_key}")
-                return
+            if self._split_fn:
+                segments = self._split_fn(text)
+            else:
+                segments = [text]
+
+            if len(segments) <= 1:
+                chain = MessageChain([Plain(text)])
+                sent = await self._context.send_message(umo, chain)
+                if not sent:
+                    logger.warning(f"[Proactive] 发送失败: {session_key}")
+                    return
+            else:
+                logger.info(f"[Proactive] 分段发送: {len(segments)} 段")
+                delay_ms = max(
+                    0, min(self._cfg_int("split_delay_ms", 800), 5000)
+                )
+                for seg_idx, segment in enumerate(segments):
+                    chain = MessageChain([Plain(segment)])
+                    sent = await self._context.send_message(umo, chain)
+                    if not sent:
+                        logger.warning(
+                            f"[Proactive] 分段发送失败 ({seg_idx + 1}/{len(segments)}): {session_key}"
+                        )
+                        break
+                    if seg_idx < len(segments) - 1:
+                        await asyncio.sleep(delay_ms / 1000)
 
             logger.info(f"[Proactive] 已发送主动回复到 {session_key}: {text[:50]}...")
 
-            # 8. 保存到上下文
+            # 9. 保存到上下文
             if self._context_mgr:
                 try:
                     user_msg = {

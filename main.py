@@ -165,6 +165,8 @@ class ChatEnginePlugin(Star):
                     persona_mgr=self.persona_mgr,
                     context_mgr=self.context_mgr,
                     memory_mgr=self.memory_mgr,
+                    clean_fn=self._clean_response,
+                    split_fn=self._split_response,
                 )
                 await self.proactive_mgr.initialize()
                 logger.info("[ChatEngine] 主动回复系统已初始化")
