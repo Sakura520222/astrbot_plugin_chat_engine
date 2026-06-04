@@ -30,6 +30,7 @@ from .persona.manager import ChatPersonaManager
 from .proactive.manager import ProactiveManager
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
+from .utils.config import cfg_bool, cfg_float, cfg_int
 from .web.server import ChatWebServer
 
 
@@ -139,40 +140,15 @@ class ChatEnginePlugin(Star):
 
     def _cfg_int(self, key: str, default: int) -> int:
         """安全读取 int 配置项，类型异常时回退到默认值"""
-        try:
-            return int(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        return cfg_int(self.config, key, default)
 
     def _cfg_float(self, key: str, default: float) -> float:
         """安全读取 float 配置项，类型异常时回退到默认值"""
-        try:
-            return float(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        return cfg_float(self.config, key, default)
 
     def _cfg_bool(self, key: str, default: bool) -> bool:
         """安全读取 bool 配置项，支持字符串和数值类型转换"""
-        val = self.config.get(key, default)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, str):
-            lower = val.lower()
-            if lower in ("true", "1", "yes"):
-                return True
-            if lower in ("false", "0", "no"):
-                return False
-            logger.warning(
-                f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}"
-            )
-            return default
-        if isinstance(val, (int, float)):
-            if isinstance(val, float) and val not in (0.0, 1.0):
-                logger.warning(
-                    f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换"
-                )
-            return bool(val)
-        return default
+        return cfg_bool(self.config, key, default)
 
     async def initialize(self):
         """插件激活时调用 — 初始化数据库、管理器和 Web 服务"""

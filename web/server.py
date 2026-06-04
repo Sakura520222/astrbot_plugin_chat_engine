@@ -200,7 +200,9 @@ class ChatWebServer:
         )
 
     async def _api_create_persona(self, request: web.Request) -> web.Response:
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         name = data.get("name", "").strip()
         if not name:
             return web.json_response({"error": "名称不能为空"}, status=400)
@@ -227,7 +229,9 @@ class ChatWebServer:
 
     async def _api_update_persona(self, request: web.Request) -> web.Response:
         persona_id = int(request.match_info["id"])
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
 
         kwargs = {}
         if "name" in data:
@@ -448,7 +452,9 @@ class ChatWebServer:
         return web.json_response(config_data)
 
     async def _api_update_config(self, request: web.Request) -> web.Response:
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         allowed_keys = [
             "compression_mode",
             "max_turns",
@@ -554,7 +560,9 @@ class ChatWebServer:
         if not mgr:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
         session_key = request.match_info["key"]
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         content = data.get("content", "").strip()
         if not content:
             return web.json_response({"error": "内容不能为空"}, status=400)
@@ -571,7 +579,9 @@ class ChatWebServer:
         if not mgr:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
         session_key = request.match_info["key"]
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         content = data.get("content", "").strip()
         pinned = bool(data.get("pinned", False))
         if not content:
@@ -594,7 +604,9 @@ class ChatWebServer:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
         session_key = request.match_info["key"]
         mem_id = request.match_info["id"]
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         content = data.get("content", "").strip()
         if not content:
             return web.json_response({"error": "内容不能为空"}, status=400)
@@ -610,7 +622,9 @@ class ChatWebServer:
             return web.json_response({"error": "记忆系统未启用"}, status=400)
         session_key = request.match_info["key"]
         mem_id = request.match_info["id"]
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         content = data.get("content", "").strip()
         if not content:
             return web.json_response({"error": "内容不能为空"}, status=400)
@@ -676,7 +690,9 @@ class ChatWebServer:
         if not mgr:
             return web.json_response({"error": "主动回复未启用"}, status=400)
         session_key = request.match_info["key"]
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         enabled = bool(data.get("enabled", False))
         try:
             await mgr.set_timeout_enabled(session_key, enabled)
@@ -689,7 +705,9 @@ class ChatWebServer:
         if not mgr:
             return web.json_response({"error": "主动回复未启用"}, status=400)
         session_key = request.match_info["key"]
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         enabled = bool(data.get("enabled", False))
         try:
             await mgr.set_round_enabled(session_key, enabled)
@@ -698,6 +716,16 @@ class ChatWebServer:
             return web.json_response({"error": str(e)}, status=500)
 
     # 认证
+
+    @staticmethod
+    async def _safe_json(
+        request: web.Request,
+    ) -> tuple[dict | None, web.Response | None]:
+        """安全解析 JSON body。成功返回 (data, None)，失败返回 (None, error_response)。"""
+        try:
+            return await request.json(), None
+        except (json.JSONDecodeError, Exception):
+            return None, web.json_response({"error": "无效的 JSON 格式"}, status=400)
 
     def _is_auth_enabled(self) -> bool:
         """检查是否启用了 WebUI 认证"""
@@ -754,7 +782,9 @@ class ChatWebServer:
 
     async def _api_auth_login(self, request: web.Request) -> web.Response:
         """登录接口 — 验证用户名密码，签发 token 并写入 Cookie"""
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         username = data.get("username", "")
         password = data.get("password", "")
 
@@ -772,7 +802,8 @@ class ChatWebServer:
                 "chatengine_token",
                 token,
                 max_age=86400,
-                httponly=False,
+                httponly=True,
+                samesite="Lax",
                 path="/",
             )
             return resp

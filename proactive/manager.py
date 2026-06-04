@@ -2,11 +2,14 @@
 
 import asyncio
 import json
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
 from astrbot.api import logger
+
+from ..utils.config import cfg_bool, cfg_int
 
 PROACTIVE_SYSTEM_SUFFIX_PRIVATE = """
 
@@ -77,25 +80,14 @@ class ProactiveManager:
         self._monitor_task: asyncio.Task | None = None
         self._running = False
         self._registry_dirty = False  # 脏标记：数据已变更但尚未写入磁盘
-        self._registry_save_interval = 30  # 脏数据最长延迟写入秒数
 
     # 配置读取辅助
 
     def _cfg_int(self, key: str, default: int) -> int:
-        try:
-            return int(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        return cfg_int(self.config, key, default)
 
     def _cfg_bool(self, key: str, default: bool) -> bool:
-        val = self.config.get(key, default)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, str):
-            return val.lower() in ("true", "1", "yes")
-        if isinstance(val, (int, float)):
-            return bool(val)
-        return default
+        return cfg_bool(self.config, key, default)
 
     @staticmethod
     def _utcnow() -> str:
@@ -178,6 +170,8 @@ class ProactiveManager:
                 session["round_count"] = session.get("round_count", 0) + 1
                 if session["round_count"] >= interval:
                     session["round_count"] = 0
+                    # 即时写入：确保 round_count 重置在 spawn 任务前持久化，
+                    # 防止进程崩溃后重复触发
                     await self._save_registry()
                     reason = f"已收到 {interval} 条消息，触发轮数主动回复"
                     asyncio.create_task(self._send_proactive(session_key, reason))
@@ -211,7 +205,7 @@ class ProactiveManager:
             return "Session not registered. Cannot schedule reply."
 
         delay_minutes = max(1, min(delay_minutes, 1440))  # 1 min ~ 24h
-        task_id = f"schedule_{session_key}_{delay_minutes}m"
+        task_id = f"schedule_{uuid.uuid4().hex[:8]}"
 
         async def _fire():
             await asyncio.sleep(delay_minutes * 60)

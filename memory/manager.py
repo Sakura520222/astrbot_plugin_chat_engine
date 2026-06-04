@@ -4,6 +4,7 @@ import asyncio
 
 from astrbot.api import logger
 
+from ..utils.config import cfg_bool, cfg_float, cfg_int
 from .short_term import ShortTermMemoryStore
 from .summarizer import MemorySummarizer
 from .vector_store import LongTermMemoryStore
@@ -51,29 +52,16 @@ class MemoryManager:
         logger.info("[Memory] 短期记忆: 已启用")
         logger.info("[Memory] 长期记忆: 延迟检测（首次使用时确认 EmbeddingProvider）")
 
-    # 配置读取辅助 (与 main.py 相同模式)
+    # 配置读取辅助
 
     def _cfg_int(self, key: str, default: int) -> int:
-        try:
-            return int(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        return cfg_int(self.config, key, default)
 
     def _cfg_float(self, key: str, default: float) -> float:
-        try:
-            return float(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        return cfg_float(self.config, key, default)
 
     def _cfg_bool(self, key: str, default: bool) -> bool:
-        val = self.config.get(key, default)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, str):
-            return val.lower() in ("true", "1", "yes")
-        if isinstance(val, (int, float)):
-            return bool(val)
-        return default
+        return cfg_bool(self.config, key, default)
 
     # System Prompt 注入
 
