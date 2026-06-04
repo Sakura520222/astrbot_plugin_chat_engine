@@ -1050,17 +1050,17 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         event: AstrMessageEvent,
         content: str,
         type: str,
-        pinned="false",
+        pinned="true",
     ):
-        """Save a memory. Choose type based on persistence value:
+        '''Save a memory. Choose type based on persistence value:
         - short_term: temporary context (current topic, recent plans, dialogue state)
         - long_term: persistent facts (user preferences, identity, key decisions, recurring patterns)
 
         Args:
             content(string): Memory content. One fact per memory, concise, under 200 chars.
             type(string): Memory type. Must be "short_term" or "long_term".
-            pinned(string): Only for long_term. Set "true" if this is a rule or standing instruction that must ALWAYS be followed (e.g. user preferences about response style, format, persona rules). Pinned memories are injected every turn regardless of topic. Default "false".
-        """
+            pinned(string): Only for long_term. "true" = always active every turn (rules, preferences, standing instructions). "false" = retrieved by semantic relevance only. Default "true".
+        '''
         if not self.memory_mgr:
             return "Memory system is not available."
         session_key = self.context_mgr.build_session_key(event)
