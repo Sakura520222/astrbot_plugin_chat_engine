@@ -97,6 +97,37 @@ class ChatEnginePlugin(Star):
 
         return new_msg
 
+    @staticmethod
+    def _strip_history_images(messages: list[dict]) -> list[dict]:
+        """移除历史上下文消息中的图片，替换为 [Image] 文本标记。
+
+        仅当前用户消息保留图片，历史消息中的图片替换为纯文本占位符，
+        减少 Token 消耗同时保留"曾经发过图片"的语义信息。
+        """
+        result = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                new_parts = []
+                replaced = False
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        replaced = True
+                    else:
+                        new_parts.append(part)
+                if replaced:
+                    has_text = any(
+                        isinstance(p, dict)
+                        and p.get("type") == "text"
+                        and p.get("text", "").strip()
+                        for p in new_parts
+                    )
+                    if not has_text:
+                        new_parts.insert(0, {"type": "text", "text": "[Image]"})
+                msg = {**msg, "content": new_parts}
+            result.append(msg)
+        return result
+
     def _enrich_context_with_ids(self, context_messages: list[dict]) -> list[dict]:
         """为上下文消息列表中的用户/被动消息注入 [msg:ID] 标记。
 
@@ -504,6 +535,9 @@ class ChatEnginePlugin(Star):
                     )
                     llm_contexts = sanitized[:-1]
                     llm_user_msg = sanitized[-1]
+
+                #  剥离历史上下文中的图片，仅保留当前用户消息的图片
+                llm_contexts = self._strip_history_images(llm_contexts)
 
                 #  Token 安全截断
                 llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
