@@ -213,6 +213,14 @@ class MemoryManager:
 
     # 自动总结触发
 
+    def _get_summary_lock(self, session_key: str) -> asyncio.Lock:
+        """获取（或创建）指定会话的总结锁。"""
+        lock = self._summary_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._summary_locks[session_key] = lock
+        return lock
+
     async def on_turn_complete(
         self, session_key: str, provider, persona_mgr, context_mgr
     ) -> None:
@@ -229,14 +237,17 @@ class MemoryManager:
         last = data.get("last_summary_turn", 0)
         gap = turn - last
 
-        logger.info(
-            f"[Memory] 轮数追踪: turn={turn}, last_summary={last}, "
-            f"interval={interval}, gap={gap}"
-        )
-
         if gap >= interval:
+            lock = self._get_summary_lock(session_key)
+            if lock.locked():
+                logger.debug(
+                    f"[Memory] 总结任务执行中，跳过本次触发 "
+                    f"(turn={turn}, gap={gap})"
+                )
+                return
             logger.info(
-                f"[Memory] 达到总结间隔 ({gap}>={interval})，触发自动总结（后台任务）"
+                f"[Memory] 达到总结间隔 (gap={gap}>={interval})，"
+                f"触发自动总结 (turn={turn})"
             )
             asyncio.create_task(
                 self._run_summary(session_key, provider, persona_mgr, context_mgr)
@@ -248,7 +259,13 @@ class MemoryManager:
         """上下文压缩触发时执行总结（后台任务）。"""
         if not self._cfg_bool("enable_auto_summary", True):
             return
-        logger.info("[Memory] 上下文压缩触发，执行记忆总结（后台任务）")
+        lock = self._get_summary_lock(session_key)
+        if lock.locked():
+            logger.debug(
+                f"[Memory] 总结任务执行中，跳过压缩触发的总结: {session_key}"
+            )
+            return
+        logger.info("[Memory] 上下文压缩触发，执行记忆总结")
         asyncio.create_task(
             self._run_summary(session_key, provider, persona_mgr, context_mgr)
         )
@@ -257,14 +274,11 @@ class MemoryManager:
         self, session_key: str, provider, persona_mgr, context_mgr
     ) -> None:
         """执行一次自动总结（带并发锁，同一会话同时只运行一个总结任务）。"""
-        lock = self._summary_locks.get(session_key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._summary_locks[session_key] = lock
+        lock = self._get_summary_lock(session_key)
 
         if lock.locked():
-            logger.info(
-                f"[Memory] 总结任务已在执行中，跳过本次触发: {session_key}"
+            logger.debug(
+                f"[Memory] 总结任务已在执行中，跳过: {session_key}"
             )
             return
 
