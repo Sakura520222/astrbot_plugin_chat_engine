@@ -11,6 +11,8 @@ from aiohttp import web
 
 from astrbot.api import logger
 
+from ..utils.config import cfg_bool
+
 
 class ChatWebServer:
     """独立 Web 服务器 — 提供 Chat Engine 管理 API 和前端页面"""
@@ -39,7 +41,8 @@ class ChatWebServer:
                     response = await handler(request)
                 except web.HTTPException as ex:
                     response = ex
-            response.headers["Access-Control-Allow-Origin"] = "*"
+            allowed_origin = self.plugin.config.get("web_cors_origin", "*")
+            response.headers["Access-Control-Allow-Origin"] = allowed_origin
             response.headers["Access-Control-Allow-Methods"] = (
                 "GET, POST, PUT, DELETE, OPTIONS"
             )
@@ -724,17 +727,12 @@ class ChatWebServer:
         """安全解析 JSON body。成功返回 (data, None)，失败返回 (None, error_response)。"""
         try:
             return await request.json(), None
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, ValueError, TypeError):
             return None, web.json_response({"error": "无效的 JSON 格式"}, status=400)
 
     def _is_auth_enabled(self) -> bool:
         """检查是否启用了 WebUI 认证"""
-        val = self.plugin.config.get("web_auth_enabled", False)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, str):
-            return val.lower() in ("true", "1", "yes")
-        return bool(val)
+        return cfg_bool(self.plugin.config, "web_auth_enabled", False)
 
     def _check_auth(self, request: web.Request) -> bool:
         """验证请求的认证信息（支持 Authorization header 和 Cookie）"""
