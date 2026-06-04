@@ -11,8 +11,15 @@ async function api(method, path, body = null) {
         method,
         headers: { 'Content-Type': 'application/json' },
     };
+    const token = localStorage.getItem('auth_token');
+    if (token) opts.headers['Authorization'] = `Bearer ${token}`;
     if (body) opts.body = JSON.stringify(body);
     const resp = await fetch(`${API_BASE}${path}`, opts);
+    if (resp.status === 401) {
+        localStorage.removeItem('auth_token');
+        window.location.href = '/login';
+        throw new Error('未授权');
+    }
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     return data;
@@ -848,8 +855,43 @@ async function toggleProactiveRound() {
     }
 }
 
-// 初始化
+//  认证管理
 
-document.addEventListener('DOMContentLoaded', () => {
-    loadPersonas();
+
+async function checkAuth() {
+    try {
+        const resp = await fetch('/api/auth/status', {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` },
+        });
+        const data = await resp.json();
+        if (data.enabled && !data.authenticated) {
+            window.location.href = '/login';
+            return false;
+        }
+        // 认证已启用时显示退出按钮
+        if (data.enabled) {
+            const footer = document.getElementById('sidebar-footer');
+            if (footer) footer.style.display = '';
+        }
+        return true;
+    } catch (e) {
+        return true; // 网络异常不阻塞
+    }
+}
+
+async function logout() {
+    try {
+        await api('POST', '/api/auth/logout');
+    } catch (e) {
+        // 忽略登出请求错误
+    }
+    localStorage.removeItem('auth_token');
+    window.location.href = '/login';
+}
+
+//  初始化
+
+document.addEventListener('DOMContentLoaded', async () => {
+    const ok = await checkAuth();
+    if (ok) loadPersonas();
 });

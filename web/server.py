@@ -1,6 +1,8 @@
 """Independent aiohttp Web server for the Chat Engine plugin management UI."""
 
 import json
+import secrets
+import time
 import traceback
 from copy import deepcopy
 from pathlib import Path
@@ -20,11 +22,12 @@ class ChatWebServer:
         self.runner = None
         self.site = None
         self.static_dir = Path(__file__).parent / "static"
+        self._auth_tokens = {}  # token -> {"username": str, "expires_at": float}
         self._setup_routes()
-        self._setup_cors()
+        self._setup_middlewares()
 
-    def _setup_cors(self):
-        """设置 CORS 中间件"""
+    def _setup_middlewares(self):
+        """设置 CORS 和认证中间件"""
 
         @web.middleware
         async def cors_middleware(request, handler):
@@ -39,13 +42,52 @@ class ChatWebServer:
             response.headers["Access-Control-Allow-Methods"] = (
                 "GET, POST, PUT, DELETE, OPTIONS"
             )
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, Authorization"
+            )
             return response
 
+        @web.middleware
+        async def auth_middleware(request, handler):
+            # OPTIONS preflight — 直接放行
+            if request.method == "OPTIONS":
+                return await handler(request)
+
+            # 公开路径 — 无需认证
+            public_paths = {
+                "/login",
+                "/login.html",
+                "/api/auth/login",
+                "/api/auth/status",
+            }
+            if request.path in public_paths:
+                return await handler(request)
+
+            # 认证未启用 — 直接放行
+            if not self._is_auth_enabled():
+                return await handler(request)
+
+            # 验证 token
+            if self._check_auth(request):
+                return await handler(request)
+
+            # API 请求返回 401
+            if request.path.startswith("/api/"):
+                return web.json_response({"error": "未授权"}, status=401)
+
+            # 页面请求重定向到登录页
+            raise web.HTTPFound("/login")
+
         self.app.middlewares.append(cors_middleware)
+        self.app.middlewares.append(auth_middleware)
 
     def _setup_routes(self):
         """注册所有 API 路由"""
+        #  认证 API
+        self.app.router.add_post("/api/auth/login", self._api_auth_login)
+        self.app.router.add_get("/api/auth/status", self._api_auth_status)
+        self.app.router.add_post("/api/auth/logout", self._api_auth_logout)
+
         #  人格管理
         self.app.router.add_get("/api/personas", self._api_list_personas)
         self.app.router.add_post("/api/personas", self._api_create_persona)
@@ -111,6 +153,7 @@ class ChatWebServer:
         )
 
         #  前端页面
+        self.app.router.add_get("/login", self._serve_login)
         self.app.router.add_get("/", self._serve_index)
         self.app.router.add_get("/{filename}", self._serve_static)
 
@@ -652,6 +695,93 @@ class ChatWebServer:
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    # 认证
+
+    def _is_auth_enabled(self) -> bool:
+        """检查是否启用了 WebUI 认证"""
+        val = self.plugin.config.get("web_auth_enabled", False)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() in ("true", "1", "yes")
+        return bool(val)
+
+    def _check_auth(self, request: web.Request) -> bool:
+        """验证请求的认证信息（支持 Authorization header 和 Cookie）"""
+        # 1. Authorization header
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if self._validate_token(token):
+                return True
+
+        # 2. Cookie
+        token = request.cookies.get("chatengine_token", "")
+        if token and self._validate_token(token):
+            return True
+
+        return False
+
+    def _validate_token(self, token: str) -> bool:
+        """验证 token 是否有效且未过期"""
+        if token in self._auth_tokens:
+            info = self._auth_tokens[token]
+            if info["expires_at"] > time.time():
+                return True
+            del self._auth_tokens[token]
+        return False
+
+    async def _api_auth_login(self, request: web.Request) -> web.Response:
+        """登录接口 — 验证用户名密码，签发 token 并写入 Cookie"""
+        data = await request.json()
+        username = data.get("username", "")
+        password = data.get("password", "")
+
+        expected_username = self.plugin.config.get("web_username", "admin")
+        expected_password = self.plugin.config.get("web_password", "")
+
+        if username == expected_username and password == expected_password:
+            token = secrets.token_hex(32)
+            self._auth_tokens[token] = {
+                "username": username,
+                "expires_at": time.time() + 86400,  # 24 小时
+            }
+            resp = web.json_response({"ok": True, "token": token})
+            resp.set_cookie(
+                "chatengine_token", token,
+                max_age=86400, httponly=False, path="/",
+            )
+            return resp
+
+        return web.json_response({"error": "用户名或密码错误"}, status=401)
+
+    async def _api_auth_status(self, request: web.Request) -> web.Response:
+        """查询认证状态 — 前端用于判断是否需要跳转登录页"""
+        enabled = self._is_auth_enabled()
+        authenticated = not enabled or self._check_auth(request)
+        return web.json_response({
+            "enabled": enabled,
+            "authenticated": authenticated,
+        })
+
+    async def _api_auth_logout(self, request: web.Request) -> web.Response:
+        """登出接口 — 使当前 token 失效并清除 Cookie"""
+        token = ""
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        if not token:
+            token = request.cookies.get("chatengine_token", "")
+        if token:
+            self._auth_tokens.pop(token, None)
+        resp = web.json_response({"ok": True})
+        resp.del_cookie("chatengine_token", path="/")
+        return resp
+
+    async def _serve_login(self, request: web.Request) -> web.Response:
+        """提供登录页面"""
+        return await self._serve_file("login.html")
 
     # 静态文件
 

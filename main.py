@@ -906,7 +906,7 @@ class ChatEnginePlugin(Star):
         "\U00002600-\U000026ff"  # Misc Symbols
         "\U0000200d"  # Zero Width Joiner
         "\U0000fe0f"  # Variation Selector-16
-        "\U00002b50"  # Star
+       # "\U00002b50"  # Star
         "\U00002b55"  # Circle
         "\U0000231a-\U0000231b"  # Watch/Hourglass
         "\U000023e9-\U000023f3"  # Various symbols
