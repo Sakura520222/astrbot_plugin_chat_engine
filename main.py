@@ -18,7 +18,7 @@ import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Reply
+from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
 
@@ -52,6 +52,57 @@ class ChatEnginePlugin(Star):
         self.memory_mgr: MemoryManager = None
         self.proactive_mgr: ProactiveManager = None
         self.web_server: ChatWebServer = None
+        self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
+
+    # 上下文消息 ID 注入
+
+    @staticmethod
+    def _inject_msg_id_tag(msg: dict) -> dict:
+        """为单条消息的 content 前注入 [msg:ID] 标记。
+
+        仅对有 message_id 且 role 为 user/observed 的消息注入。
+        返回修改后的副本，不修改原始消息。
+        """
+        msg_id = msg.get("message_id", "")
+        role = msg.get("role", "")
+        if not msg_id or role not in ("user", "observed"):
+            return msg
+
+        tag = f"[msg:{msg_id}] "
+        content = msg.get("content")
+        new_msg = {**msg}
+
+        if isinstance(content, str):
+            new_msg["content"] = tag + content
+        elif isinstance(content, list):
+            # 在第一个 text 块前插入标记
+            new_parts = []
+            tag_inserted = False
+            for part in content:
+                if (
+                    not tag_inserted
+                    and isinstance(part, dict)
+                    and part.get("type") == "text"
+                ):
+                    new_parts.append(
+                        {"type": "text", "text": tag + part.get("text", "")}
+                    )
+                    tag_inserted = True
+                else:
+                    new_parts.append(part)
+            if not tag_inserted:
+                # 没有 text 块，在最前面插入
+                new_parts.insert(0, {"type": "text", "text": tag.strip()})
+            new_msg["content"] = new_parts
+
+        return new_msg
+
+    def _enrich_context_with_ids(self, context_messages: list[dict]) -> list[dict]:
+        """为上下文消息列表中的用户/被动消息注入 [msg:ID] 标记。
+
+        返回新列表，不修改原始数据。
+        """
+        return [self._inject_msg_id_tag(msg) for msg in context_messages]
 
     # 配置读取辅助
 
@@ -457,6 +508,10 @@ class ChatEnginePlugin(Star):
                 #  Token 安全截断
                 llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
 
+                #  注入 [msg:ID] 标记，让 LLM 可以引用特定消息
+                llm_contexts = self._enrich_context_with_ids(llm_contexts)
+                llm_user_msg = self._inject_msg_id_tag(llm_user_msg)
+
                 #  调用 LLM (含 Tool Call 循环)
                 logger.info(
                     f"[ChatEngine] 开始调用 LLM, 上下文: {len(llm_contexts) + 1} 条, "
@@ -496,19 +551,41 @@ class ChatEnginePlugin(Star):
                 # 文本清洗 (在分段发送之前)
                 response_text = self._clean_response(response_text)
 
+                # 检查是否有待发送的引用回复
+                pending_quote_id = self._pending_quotes.pop(session_key, None)
+
                 if response_text:
                     segments = self._split_response(response_text)
                     if len(segments) <= 1:
-                        yield event.plain_result(response_text)
+                        if pending_quote_id:
+                            yield event.chain_result(
+                                [Reply(id=pending_quote_id), Plain(response_text)]
+                            )
+                            logger.info(
+                                f"[ChatEngine] 引用回复已发送: quote_msg_id={pending_quote_id}"
+                            )
+                        else:
+                            yield event.plain_result(response_text)
                     else:
                         logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
                         for seg_idx, segment in enumerate(segments):
-                            yield event.plain_result(segment)
+                            if seg_idx == 0 and pending_quote_id:
+                                yield event.chain_result(
+                                    [Reply(id=pending_quote_id), Plain(segment)]
+                                )
+                                logger.info(
+                                    f"[ChatEngine] 引用回复已发送: quote_msg_id={pending_quote_id}"
+                                )
+                            else:
+                                yield event.plain_result(segment)
                             if seg_idx < len(segments) - 1:
                                 delay_ms = max(
                                     0, min(self._cfg_int("split_delay_ms", 800), 5000)
                                 )
                                 await asyncio.sleep(delay_ms / 1000)
+                elif pending_quote_id:
+                    # LLM 返回空但设置了引用——清除 pending
+                    self._pending_quotes.pop(session_key, None)
 
                 if (
                     hasattr(final_response, "result_chain")
@@ -1032,9 +1109,9 @@ class ChatEnginePlugin(Star):
         """构建记忆工具和主动回复工具的使用指引，注入到 system prompt 中。"""
         return """
 
-## Memory Tool Usage Guide
+## Tool Usage Guide
 
-You have access to memory tools (save_memory, search_memory, update_memory, delete_memory) and proactive reply tools (schedule_reply). Use them proactively:
+You have access to memory tools (save_memory, search_memory, update_memory, delete_memory), proactive reply tools (schedule_reply), and quote reply tool (reply_with_quote). Use them proactively:
 
 - **save_memory**: When the user shares personal preferences, habits, important facts, or explicitly says things like "记住了", "记住", "别忘了", "记住这个". Choose type="long_term" for persistent facts (preferences, identity) or type="short_term" for temporary context (current topic, recent plans).
   - **pinned="true"**: Use for standing rules or instructions that must ALWAYS be active regardless of topic (e.g. "user wants responses under 30 chars", "always reply in a cute tone"). Pinned memories bypass semantic search and are injected every turn.
@@ -1042,6 +1119,7 @@ You have access to memory tools (save_memory, search_memory, update_memory, dele
 - **update_memory**: When the user corrects or updates previously remembered information.
 - **delete_memory**: When the user explicitly asks to forget something.
 - **schedule_reply**: When the user asks you to remind them later, when you want to follow up on a topic, or when saying things like "一会提醒我", "过XX分钟告诉我". Also use when the conversation naturally suggests a follow-up would be welcome.
+- **reply_with_quote**: When you want to reply to a specific earlier message in the conversation. Each user message is tagged with `[msg:ID]` — call `reply_with_quote(message_id)` first, then generate your reply text. It will be sent as a quoted reply on the platform. Use this when directly addressing a specific past message (e.g. answering an earlier question, confirming something the user said). Do NOT overuse — only when there is a clear reference target.
 
 Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these tools to the user — just use them naturally when appropriate.
 """
@@ -1172,3 +1250,40 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         except Exception as e:
             logger.error(f"[ChatEngine] schedule_reply 工具失败: {e}")
             return f"Schedule failed: {type(e).__name__}"
+
+    # 消息引用回复工具 — LLM Tool Call
+
+    @filter.llm_tool(name="reply_with_quote")
+    async def tool_reply_with_quote(
+        self,
+        event: AstrMessageEvent,
+        message_id: str,
+    ):
+        """Quote (reply to) a specific historical message from the conversation.
+        Use when your response directly addresses or answers a specific earlier message.
+        After calling this tool, generate your reply text as normal — it will be sent as a quoted reply.
+
+        Args:
+            message_id(string): The message ID to quote. Shown as [msg:ID] tag in context messages.
+        """
+        session_key = self.context_mgr.build_session_key(event)
+
+        # 验证 message_id 存在于当前会话上下文中
+        try:
+            messages = await self.context_mgr.load_context(session_key)
+            found = any(
+                msg.get("message_id") == message_id
+                for msg in messages
+            )
+        except Exception:
+            found = False
+
+        if not found:
+            return f"Message ID '{message_id}' not found in current session context. Available IDs can be found in [msg:ID] tags."
+
+        self._pending_quotes[session_key] = message_id
+        logger.info(
+            f"[ChatEngine] 引用回复已准备: session={session_key}, "
+            f"quote_msg_id={message_id}"
+        )
+        return "Quote reply prepared. Now generate your response text — it will be sent as a quoted reply to that message."

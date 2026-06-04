@@ -370,7 +370,7 @@ class ProactiveManager:
             logger.error(f"[Proactive] 主动回复失败 [{session_key}]: {e}")
 
     async def _get_recent_context(self, session_key: str) -> str:
-        """获取最近几轮对话的纯文本。"""
+        """获取最近几轮对话的纯文本，包含 [msg:ID] 标记。"""
         if not self._context_mgr:
             return ""
         try:
@@ -386,6 +386,11 @@ class ProactiveManager:
                             for p in content
                             if isinstance(p, dict) and p.get("type") == "text"
                         )
+                    # 为用户消息注入 [msg:ID] 标记
+                    if role == "user" and content:
+                        msg_id = msg.get("message_id", "")
+                        if msg_id:
+                            content = f"[msg:{msg_id}] {content}"
                     if content:
                         recent.append(f"[{role}]: {content}")
                 if len(recent) >= 10:
