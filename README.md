@@ -1,6 +1,6 @@
 # Chat Engine - AstrBot 聊天增强插件
 
-完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩和 WebUI 管理面板。
+完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。
 
 ## 功能特性
 
@@ -20,6 +20,25 @@
 - **上下文压缩**: 双模式支持
   - 轮数限制: 超过限制直接丢弃最早的消息
   - Token 阈值: 达到模型上下文的 N% 时自动 LLM 总结压缩
+- **消息 ID 注入**: 用户和被动消息自动注入 `[msg:ID]` 标记，为引用回复提供锚点
+- **历史图片剥离**: 历史消息中的图片替换为 `[Image]` 文本占位符，仅当前消息保留图片，减少 Token 消耗
+
+### 记忆系统
+- **短期记忆**: 会话级别临时记忆，可配置最大条数和单条最大字符数
+- **长期记忆**: 持久化存储，支持向量语义检索（Embedding + 可选 Rerank），可配置返回条数、候选数和相似度阈值
+- **自动总结**: 按配置轮数自动将短期记忆总结为长期记忆，上下文压缩时联动触发
+- **置顶记忆**: 标记为 pinned 的记忆每轮必注入 System Prompt，不受语义检索过滤
+- **会话级并发锁**: 同一会话的自动总结任务串行执行，避免并发写入冲突
+- **LLM 记忆工具**: `save_memory`、`search_memory`、`update_memory`、`delete_memory`，LLM 可主动记忆和管理
+
+### 主动回复
+- **超时主动发言**: 用户未发言超过配置分钟数后，AI 主动发起对话
+- **N 轮触发回复**: 群聊中每收到 N 条消息（含被动消息）触发一次主动回复
+- **定时回复**: `schedule_reply` LLM Tool，支持 LLM 主动安排延迟回复（提醒、跟进等）
+- **消息引用回复**: `reply_with_quote` LLM Tool，支持引用上下文中特定历史消息进行回复
+- 主动回复支持文本清洗与分段发送
+- 区分私聊和群聊场景的主动消息后缀
+- WebUI 会话级主动回复设置控制
 
 ### 人格管理
 - 完全独立于 AstrBot 自带的人格系统
@@ -48,12 +67,15 @@
 
 ### WebUI 管理面板
 - 独立 aiohttp 服务，可配置端口
+- 登录认证: 支持配置用户名和密码，保护管理面板访问
 - 人格管理 (CRUD)
 - 会话管理 (查看、删除)
 - LLM 预览（查看发送给 LLM 的完整上下文、System Prompt、工具列表和 Token 估算）
 - 压缩配置
 - 用户标识格式配置
 - 工具管理
+- 记忆管理（查看、搜索）
+- 主动回复会话设置
 
 ## 安装
 
@@ -89,7 +111,24 @@
 | `clean_brackets` | `true` | 去除括号内容 |
 | `clean_trailing_chars` | `true` | 清理句尾字符 |
 | `trailing_chars_pattern` | `[~～\\.。!！?？…·•\\-—_\\s]+$` | 句尾清理字符 (正则) |
+| `enable_memory` | `true` | 启用记忆功能 |
+| `short_term_max_count` | `30` | 短期记忆最大条数 |
+| `short_term_max_chars` | `200` | 每条短期记忆最大字符数 |
+| `long_term_max_count` | `200` | 长期记忆最大条数 |
+| `long_term_retrieval_top_k` | `5` | 长期记忆检索返回条数 |
+| `long_term_fetch_k` | `20` | 长期记忆检索候选数 |
+| `long_term_enable_rerank` | `true` | 启用长期记忆重排 |
+| `long_term_similarity_threshold` | `0.3` | 长期记忆相似度阈值 (0.0-1.0) |
+| `memory_summary_interval` | `5` | 自动总结触发轮数 |
+| `memory_summary_recent_turns` | `5` | 总结参考最近轮数 |
+| `enable_auto_summary` | `true` | 启用自动总结 |
+| `enable_proactive` | `false` | 启用主动回复 |
+| `proactive_timeout_minutes` | `30` | 超时主动发言分钟数 |
+| `proactive_round_interval` | `0` | N 轮触发回复（仅群聊，0 禁用） |
 | `web_port` | `8765` | WebUI 端口 |
+| `web_auth_enabled` | `false` | 启用 WebUI 登录认证 |
+| `web_username` | `admin` | WebUI 登录用户名 |
+| `web_password` | `""` | WebUI 登录密码 |
 | `db_type` | `sqlite` | 数据库类型: `sqlite` / `mysql` |
 | `mysql_url` | `""` | MySQL 连接 URL |
 
@@ -97,7 +136,7 @@
 
 ```
 astrbot_plugin_chat_engine/
-├── main.py                    # 消息拦截 + LLM 调用编排 + 文本清洗
+├── main.py                    # 消息拦截 + LLM 调用编排 + 文本清洗 + 记忆/主动回复工具
 ├── db/                        # 独立数据库层 (SQLAlchemy)
 │   ├── models.py              # 数据模型 (独立 MetaData)
 │   ├── engine.py              # 数据库引擎
@@ -110,13 +149,21 @@ astrbot_plugin_chat_engine/
 │   ├── manager.py             # 会话 Key / 用户标识 / 压缩触发 / 被动记录 / 会话锁 / 图片解析
 │   ├── compressor.py          # 双模式压缩器
 │   └── token_counter.py       # Token 估算
+├── memory/                    # 记忆系统
+│   ├── manager.py             # 记忆管理器 (短期/长期/自动总结/并发锁)
+│   ├── short_term.py          # 短期记忆存储
+│   ├── vector_store.py        # 长期记忆向量存储 (Embedding + 语义检索)
+│   ├── summarizer.py          # 记忆总结器 (LLM 总结)
+│   └── tools.py               # 记忆 LLM 工具 (save/search/update/delete)
+├── proactive/                 # 主动回复
+│   └── manager.py             # 超时发言 / N 轮触发 / 定时回复 / 消息清洗分段
 ├── persona/                   # 人格管理
 │   └── manager.py             # CRUD + 活跃人格
 ├── tools/                     # 工具扫描与管理
 │   ├── scanner.py             # 扫描所有已注册工具
 │   └── manager.py             # 启用/禁用状态
 └── web/                       # WebUI
-    ├── server.py              # aiohttp REST API (含 LLM 预览)
+    ├── server.py              # aiohttp REST API (含 LLM 预览 + 记忆管理 + 登录认证)
     └── static/                # 前端 HTML/CSS/JS
 ```
 
@@ -129,9 +176,14 @@ astrbot_plugin_chat_engine/
 - **Provider 复用**: 复用 AstrBot 已配置的 LLM Provider，也支持自定义配置
 - **被动记录**: 未触发回复的群聊消息以 `observed` 角色存储，压缩时归入当前轮次
 - **图片存储**: 图片转为 base64 data URL 发送给 LLM，文件按 sha256 去重存储，上下文中以 `image_ref` 引用节省空间
+- **历史图片剥离**: 历史上下文中的图片替换为 `[Image]` 文本占位符，仅当前用户消息保留图片，减少 Token 消耗
 - **引用回复**: 提取 Reply 组件中的发送者和内容，自动拼接到用户消息前缀
 - **会话锁**: `asyncio.Lock` 按 session_key 索引，确保同一会话的消息串行处理
 - **安全截断**: 调用 LLM 前通过 `TokenEstimator` 检测总量，超出阈值自动裁剪最旧消息
+- **消息 ID 注入**: 用户/被动消息内容前自动注入 `[msg:ID]` 标记，为 `reply_with_quote` 工具提供锚点
+- **记忆向量检索**: 长期记忆通过 Embedding 向量化存储，支持语义检索和可选 Rerank 重排
+- **记忆并发控制**: 自动总结使用会话级 `asyncio.Lock`，后台异步执行不阻塞消息处理
+- **动态 Provider 获取**: 记忆管理器通过 Getter 函数在运行时动态获取 Provider，解决加载时序问题
 
 ## 兼容性
 
@@ -142,7 +194,7 @@ astrbot_plugin_chat_engine/
 
 ## 状态
 
-⚠️ **本插件目前处于初始开发测试阶段**，功能仍在持续完善中。如果您在使用过程中遇到问题，或有任何改进建议，欢迎通过 [Issues](../../issues) 提交反馈或直接提交 Pull Request。
+本插件目前处于活跃开发阶段，功能仍在持续完善中。如果您在使用过程中遇到问题，或有任何改进建议，欢迎通过 [Issues](../../issues) 提交反馈或直接提交 Pull Request。
 
 ## License
 

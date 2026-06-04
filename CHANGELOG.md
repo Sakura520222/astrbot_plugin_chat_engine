@@ -1,5 +1,58 @@
 # 变更日志
 
+## [1.2.0] - 2026-06-04
+
+### 新增
+- **记忆系统**:
+  - 短期记忆: 会话级别，可配置最大条数和单条最大字符数
+  - 长期记忆: 持久化存储，支持向量语义检索，可配置返回条数、候选数、相似度阈值
+  - 自动总结: 按配置轮数自动将短期记忆总结为长期记忆，支持上下文压缩时联动触发
+  - 置顶记忆: 标记为 pinned 的记忆每轮必注入 System Prompt，不受语义检索过滤
+  - 会话级并发锁: 同一会话的自动总结任务串行执行，避免并发写入冲突
+  - 后台异步执行: 自动总结和上下文压缩触发的总结任务在后台异步运行，不阻塞消息处理
+  - 记忆工具 (LLM Tool Call): `save_memory`、`search_memory`、`update_memory`、`delete_memory`
+- **主动回复**:
+  - 超时主动发言: 用户未发言超过配置分钟数后，AI 主动发起对话
+  - N 轮触发回复: 群聊中每收到 N 条消息（含被动消息）触发一次主动回复
+  - 定时回复工具: `schedule_reply` LLM Tool，支持 LLM 主动安排延迟回复
+  - 主动回复支持文本清洗与分段发送
+  - 区分私聊和群聊场景的主动消息后缀
+  - WebUI 会话级主动回复设置控制
+- **WebUI 登录认证**: 新增登录页面，支持配置用户名和密码，保护管理面板访问
+- **消息引用回复**: LLM Tool `reply_with_quote`，支持引用上下文中特定历史消息进行回复
+- **上下文消息 ID 注入**: 用户/被动消息自动注入 `[msg:ID]` 标记，为引用回复提供锚点
+- **历史上下文图片剥离**: 历史消息中的图片替换为 `[Image]` 文本占位符，仅当前用户消息保留图片，减少 Token 消耗
+
+### 改进
+- 记忆管理器重构为 Getter 函数动态获取 Provider，解决插件加载先于 Provider 初始化的时序问题
+- 增强记忆管理和上下文压缩的日志记录与逻辑
+
+### 修复
+- 修复主动回复时轮数计数逻辑：注册会话后改用 `reset_round_count`，确保每次回复后从零开始重新计数
+- 修复记忆存储默认设置，将 `pinned` 默认值设为 `"true"`
+- 修复自动总结和上下文压缩触发的总结任务改为后台异步执行
+
+### 配置项新增
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `enable_memory` | `true` | 启用记忆功能 |
+| `short_term_max_count` | `30` | 短期记忆最大条数 |
+| `short_term_max_chars` | `200` | 每条短期记忆最大字符数 |
+| `long_term_max_count` | `200` | 长期记忆最大条数 |
+| `long_term_retrieval_top_k` | `5` | 长期记忆检索返回条数 |
+| `long_term_fetch_k` | `20` | 长期记忆检索候选数 |
+| `long_term_enable_rerank` | `true` | 启用长期记忆重排 |
+| `long_term_similarity_threshold` | `0.3` | 长期记忆相似度阈值 |
+| `memory_summary_interval` | `5` | 自动总结触发轮数 |
+| `memory_summary_recent_turns` | `5` | 总结参考最近轮数 |
+| `enable_auto_summary` | `true` | 启用自动总结 |
+| `enable_proactive` | `false` | 启用主动回复 |
+| `proactive_timeout_minutes` | `30` | 超时主动发言分钟数 |
+| `proactive_round_interval` | `0` | N 轮触发回复（仅群聊） |
+| `web_auth_enabled` | `false` | 启用 WebUI 登录认证 |
+| `web_username` | `admin` | WebUI 登录用户名 |
+| `web_password` | `""` | WebUI 登录密码 |
+
 ## [1.1.1] - 2026-06-03
 
 ### 新增
@@ -31,7 +84,7 @@
 - WebUI 前端样式优化
 
 ### 修复
-- 修复事件循环获取方式：`asyncio.get_event_loop()` → `asyncio.get_running_loop()`，避免在异步上下文中获取错误的事件循环
+- 修复事件循环获取方式：`asyncio.get_event_loop()` -> `asyncio.get_running_loop()`，避免在异步上下文中获取错误的事件循环
 - 修复配置保存的异步问题
 
 ### 配置项新增
