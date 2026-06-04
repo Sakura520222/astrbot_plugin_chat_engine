@@ -749,8 +749,11 @@ class ChatWebServer:
             }
             resp = web.json_response({"ok": True, "token": token})
             resp.set_cookie(
-                "chatengine_token", token,
-                max_age=86400, httponly=False, path="/",
+                "chatengine_token",
+                token,
+                max_age=86400,
+                httponly=False,
+                path="/",
             )
             return resp
 
@@ -760,10 +763,12 @@ class ChatWebServer:
         """查询认证状态 — 前端用于判断是否需要跳转登录页"""
         enabled = self._is_auth_enabled()
         authenticated = not enabled or self._check_auth(request)
-        return web.json_response({
-            "enabled": enabled,
-            "authenticated": authenticated,
-        })
+        return web.json_response(
+            {
+                "enabled": enabled,
+                "authenticated": authenticated,
+            }
+        )
 
     async def _api_auth_logout(self, request: web.Request) -> web.Response:
         """登出接口 — 使当前 token 失效并清除 Cookie"""

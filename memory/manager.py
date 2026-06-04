@@ -238,15 +238,8 @@ class MemoryManager:
         gap = turn - last
 
         if gap >= interval:
-            lock = self._get_summary_lock(session_key)
-            if lock.locked():
-                logger.debug(
-                    f"[Memory] 总结任务执行中，跳过本次触发 "
-                    f"(turn={turn}, gap={gap})"
-                )
-                return
             logger.info(
-                f"[Memory] 达到总结间隔 (gap={gap}>={interval})，"
+                f"[Memory] 达到总结间隔 (gap={gap}>={interval}), "
                 f"触发自动总结 (turn={turn})"
             )
             asyncio.create_task(
@@ -256,14 +249,8 @@ class MemoryManager:
     async def on_context_compressed(
         self, session_key: str, provider, persona_mgr, context_mgr
     ) -> None:
-        """上下文压缩触发时执行总结（后台任务）。"""
+        """上下文压缩触发时执行总结。"""
         if not self._cfg_bool("enable_auto_summary", True):
-            return
-        lock = self._get_summary_lock(session_key)
-        if lock.locked():
-            logger.debug(
-                f"[Memory] 总结任务执行中，跳过压缩触发的总结: {session_key}"
-            )
             return
         logger.info("[Memory] 上下文压缩触发，执行记忆总结")
         asyncio.create_task(
@@ -273,22 +260,32 @@ class MemoryManager:
     async def _run_summary(
         self, session_key: str, provider, persona_mgr, context_mgr
     ) -> None:
-        """执行一次自动总结（带并发锁，同一会话同时只运行一个总结任务）。"""
-        lock = self._get_summary_lock(session_key)
+        """执行一次自动总结。
 
-        if lock.locked():
-            logger.debug(
-                f"[Memory] 总结任务已在执行中，跳过: {session_key}"
-            )
-            return
+        使用 per-session asyncio.Lock 保证互斥：同一会话同时只有一个总结任务
+        在临界区内执行。如果排队期间另一个任务已完成总结，通过二次检查
+        last_summary_turn 跳过重复工作。
+        """
+        lock = self._get_summary_lock(session_key)
 
         async with lock:
             try:
                 data = await self.short_term.load(session_key)
+
+                # 获取锁后二次检查：排队等待期间其他任务可能已完成总结
+                turn = data.get("turn_count", 0)
+                last = data.get("last_summary_turn", 0)
+                gap = turn - last
+                interval = self._cfg_int("memory_summary_interval", 5)
+                if interval > 0 and gap < interval:
+                    logger.debug(
+                        f"[Memory] 总结已由其他任务完成，跳过 "
+                        f"(turn={turn}, gap={gap}<{interval})"
+                    )
+                    return
+
                 memories = data.get("memories", [])
-                recent_text = await self._get_recent_context(
-                    session_key, context_mgr
-                )
+                recent_text = await self._get_recent_context(session_key, context_mgr)
                 if not memories and not recent_text:
                     logger.debug("[Memory] 无记忆且无上下文，跳过总结")
                     return

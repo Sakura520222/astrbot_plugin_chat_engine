@@ -1019,7 +1019,7 @@ class ChatEnginePlugin(Star):
         "\U00002600-\U000026ff"  # Misc Symbols
         "\U0000200d"  # Zero Width Joiner
         "\U0000fe0f"  # Variation Selector-16
-       # "\U00002b50"  # Star
+        # "\U00002b50"  # Star
         "\U00002b55"  # Circle
         "\U0000231a-\U0000231b"  # Watch/Hourglass
         "\U000023e9-\U000023f3"  # Various symbols
@@ -1305,10 +1305,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         # 验证 message_id 存在于当前会话上下文中
         try:
             messages = await self.context_mgr.load_context(session_key)
-            found = any(
-                msg.get("message_id") == message_id
-                for msg in messages
-            )
+            found = any(msg.get("message_id") == message_id for msg in messages)
         except Exception:
             found = False
 

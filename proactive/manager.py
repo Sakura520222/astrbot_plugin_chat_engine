@@ -279,7 +279,8 @@ class ProactiveManager:
                     pass
             is_group = ":private:" not in session_key
             system_prompt += (
-                PROACTIVE_SYSTEM_SUFFIX_GROUP if is_group
+                PROACTIVE_SYSTEM_SUFFIX_GROUP
+                if is_group
                 else PROACTIVE_SYSTEM_SUFFIX_PRIVATE
             )
 
@@ -341,9 +342,7 @@ class ProactiveManager:
                     return
             else:
                 logger.info(f"[Proactive] 分段发送: {len(segments)} 段")
-                delay_ms = max(
-                    0, min(self._cfg_int("split_delay_ms", 800), 5000)
-                )
+                delay_ms = max(0, min(self._cfg_int("split_delay_ms", 800), 5000))
                 for seg_idx, segment in enumerate(segments):
                     chain = MessageChain([Plain(segment)])
                     sent = await self._context.send_message(umo, chain)
