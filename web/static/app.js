@@ -778,7 +778,11 @@ async function loadProactiveSettings() {
 function updateProactiveToggles() {
     const settings = proactiveSessions[currentMemorySessionKey] || {};
     document.getElementById('proactive-timeout-toggle').checked = !!settings.timeout_enabled;
-    document.getElementById('proactive-round-toggle').checked = !!settings.round_enabled;
+    // 轮数触发仅对群聊显示（私聊 session_key 包含 ":private:"）
+    const isGroup = currentMemorySessionKey && !currentMemorySessionKey.includes(':private:');
+    const roundToggle = document.getElementById('proactive-round-toggle');
+    roundToggle.checked = isGroup && !!settings.round_enabled;
+    roundToggle.parentElement.style.display = isGroup ? '' : 'none';
     document.getElementById('proactive-settings').style.display = currentMemorySessionKey ? '' : 'none';
 }
 

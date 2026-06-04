@@ -214,11 +214,17 @@ class ProactiveManager:
     async def _send_proactive(self, session_key: str, reason: str):
         """生成主动回复并发送。"""
         session = self._sessions.get(session_key)
-        if not session or not session.get("umo"):
+        if not session:
             logger.warning(f"[Proactive] 会话 {session_key} 未注册，跳过")
             return
 
-        umo = session["umo"]
+        umo = session.get("umo", "")
+        # 需要先收到过至少一条消息才能获取真实的 UMO（平台实例 ID）
+        if not umo:
+            logger.debug(
+                f"[Proactive] 会话 {session_key} 尚未收到过消息（UMO 为空），跳过主动回复"
+            )
+            return
 
         try:
             # 1. 获取 Provider
