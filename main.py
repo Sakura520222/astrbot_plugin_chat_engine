@@ -991,6 +991,7 @@ class ChatEnginePlugin(Star):
 You have access to memory tools (save_memory, search_memory, update_memory, delete_memory). Use them proactively:
 
 - **save_memory**: When the user shares personal preferences, habits, important facts, or explicitly says things like "记住了", "记住", "别忘了", "记住这个". Choose type="long_term" for persistent facts (preferences, identity) or type="short_term" for temporary context (current topic, recent plans).
+  - **pinned="true"**: Use for standing rules or instructions that must ALWAYS be active regardless of topic (e.g. "user wants responses under 30 chars", "always reply in a cute tone", "use Japanese when the user says '日语模式'"). Pinned memories bypass semantic search and are injected every turn.
 - **search_memory**: Before answering questions about the user's preferences or past discussions, search your long-term memory for relevant context.
 - **update_memory**: When the user corrects or updates previously remembered information.
 - **delete_memory**: When the user explicitly asks to forget something.
@@ -999,7 +1000,9 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
 """
 
     @filter.llm_tool(name="save_memory")
-    async def tool_save_memory(self, event: AstrMessageEvent, content: str, type: str):
+    async def tool_save_memory(
+        self, event: AstrMessageEvent, content: str, type: str, pinned="false",
+    ):
         '''Save a memory. Choose type based on persistence value:
         - short_term: temporary context (current topic, recent plans, dialogue state)
         - long_term: persistent facts (user preferences, identity, key decisions, recurring patterns)
@@ -1007,14 +1010,18 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         Args:
             content(string): Memory content. One fact per memory, concise, under 200 chars.
             type(string): Memory type. Must be "short_term" or "long_term".
+            pinned(string): Only for long_term. Set "true" if this is a rule or standing instruction that must ALWAYS be followed (e.g. user preferences about response style, format, persona rules). Pinned memories are injected every turn regardless of topic. Default "false".
         '''
         if not self.memory_mgr:
             return "Memory system is not available."
         session_key = self.context_mgr.build_session_key(event)
+        # 解析 pinned 字符串
+        is_pinned = str(pinned).lower() in ("true", "1", "yes")
         try:
             from .memory.tools import save_memory_tool
             return await save_memory_tool(
-                self.memory_mgr, session_key, content, type, source="tool"
+                self.memory_mgr, session_key, content, type,
+                source="tool", pinned=is_pinned,
             )
         except Exception as e:
             logger.error(f"[ChatEngine] save_memory 工具失败: {e}")

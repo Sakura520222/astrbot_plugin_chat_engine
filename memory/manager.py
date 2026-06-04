@@ -92,27 +92,47 @@ class MemoryManager:
             sections.append("### Short-Term Memory\n" + "\n".join(lines))
             logger.debug(f"[Memory] 注入 {len(short_memories)} 条短期记忆")
 
-        # 长期记忆 — 语义检索
-        if self.long_term.available and query:
+        # 长期记忆 — 置顶记忆（始终注入）+ 语义检索
+        if self.long_term.available:
+            pinned_ids: set[str] = set()
+
+            # 置顶记忆：不依赖 query，每次都注入
             try:
-                results = await self.long_term.search(
-                    session_key,
-                    query=query,
-                    top_k=self._cfg_int("long_term_retrieval_top_k", 5),
-                    fetch_k=self._cfg_int("long_term_fetch_k", 20),
-                    enable_rerank=self._cfg_bool("long_term_enable_rerank", True),
-                    similarity_threshold=self._cfg_float("long_term_similarity_threshold", 0.3),
-                )
-                if results:
+                pinned = await self.long_term.list_pinned(session_key)
+                if pinned:
                     lines = []
-                    for r in results:
-                        lines.append(f"- [id:{r['id']}] {r['content']}")
-                    sections.append("### Relevant Long-Term Memory\n" + "\n".join(lines))
-                    logger.info(f"[Memory] 检索到 {len(results)} 条相关长期记忆")
-                else:
-                    logger.debug("[Memory] 未检索到相关长期记忆")
+                    for m in pinned:
+                        pinned_ids.add(m["id"])
+                        lines.append(f"- [id:{m['id']}] {m['content']}")
+                    sections.append("### Pinned Long-Term Memory (Always Active)\n" + "\n".join(lines))
+                    logger.info(f"[Memory] 注入 {len(pinned)} 条置顶长期记忆")
             except Exception as e:
-                logger.warning(f"[Memory] 检索长期记忆失败: {e}")
+                logger.warning(f"[Memory] 获取置顶长期记忆失败: {e}")
+
+            # 语义检索：根据 query 检索相关记忆
+            if query:
+                try:
+                    results = await self.long_term.search(
+                        session_key,
+                        query=query,
+                        top_k=self._cfg_int("long_term_retrieval_top_k", 5),
+                        fetch_k=self._cfg_int("long_term_fetch_k", 20),
+                        enable_rerank=self._cfg_bool("long_term_enable_rerank", True),
+                        similarity_threshold=self._cfg_float("long_term_similarity_threshold", 0.3),
+                    )
+                    if results:
+                        # 去重：排除已经作为置顶注入的
+                        filtered = [r for r in results if r["id"] not in pinned_ids]
+                        if filtered:
+                            lines = []
+                            for r in filtered:
+                                lines.append(f"- [id:{r['id']}] {r['content']}")
+                            sections.append("### Relevant Long-Term Memory\n" + "\n".join(lines))
+                            logger.info(f"[Memory] 检索到 {len(filtered)} 条相关长期记忆")
+                    else:
+                        logger.debug("[Memory] 未检索到相关长期记忆")
+                except Exception as e:
+                    logger.warning(f"[Memory] 检索长期记忆失败: {e}")
 
         if not sections:
             return ""
@@ -122,13 +142,14 @@ class MemoryManager:
     # CRUD 操作
 
     async def save_memory(
-        self, session_key: str, content: str, mem_type: str, source: str = "tool"
+        self, session_key: str, content: str, mem_type: str,
+        source: str = "tool", pinned: bool = False,
     ) -> str | None:
         """保存记忆，返回 ID。"""
         if mem_type == "short_term":
             return await self.short_term.add(session_key, content, source=source)
         elif mem_type == "long_term":
-            return await self.long_term.save(session_key, content, source=source)
+            return await self.long_term.save(session_key, content, source=source, pinned=pinned)
         return None
 
     async def search_long_term(self, session_key: str, query: str, top_k: int = 5) -> list[dict]:
@@ -142,12 +163,14 @@ class MemoryManager:
             similarity_threshold=self._cfg_float("long_term_similarity_threshold", 0.3),
         )
 
-    async def update_memory(self, session_key: str, mem_id: str, content: str) -> bool:
+    async def update_memory(
+        self, session_key: str, mem_id: str, content: str, pinned: bool | None = None,
+    ) -> bool:
         """更新记忆（自动查找短期/长期）。"""
         ok = await self.short_term.update(session_key, mem_id, content)
         if ok:
             return True
-        return await self.long_term.update(session_key, mem_id, content)
+        return await self.long_term.update(session_key, mem_id, content, pinned=pinned)
 
     async def delete_memory(self, session_key: str, mem_id: str, mem_type: str) -> bool:
         """删除指定记忆。"""

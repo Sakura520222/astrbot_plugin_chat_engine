@@ -3,7 +3,10 @@
 import json
 
 
-async def save_memory_tool(memory_mgr, session_key: str, content: str, mem_type: str, source: str = "tool") -> str:
+async def save_memory_tool(
+    memory_mgr, session_key: str, content: str,
+    mem_type: str, source: str = "tool", pinned: bool = False,
+) -> str:
     """保存一条记忆。"""
     if mem_type not in ("short_term", "long_term"):
         return f"Invalid type '{mem_type}'. Must be 'short_term' or 'long_term'."
@@ -33,9 +36,12 @@ async def save_memory_tool(memory_mgr, session_key: str, content: str, mem_type:
         if len(current) >= max_count:
             return f"Long-term memory is full ({max_count} items)."
 
-        mid = await memory_mgr.long_term.save(session_key, content, source=source)
+        mid = await memory_mgr.long_term.save(
+            session_key, content, source=source, pinned=pinned,
+        )
         if mid:
-            return f"Saved to long-term memory (id: {mid})"
+            status = "pinned" if pinned else "active"
+            return f"Saved to long-term memory (id: {mid}, {status})"
         return "Failed to save to long-term memory."
 
 

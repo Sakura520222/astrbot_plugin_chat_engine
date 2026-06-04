@@ -104,7 +104,10 @@ class LongTermMemoryStore:
             logger.error(f"[Memory] 创建 FaissVecDB 失败 [{session_key}]: {e}")
             return None
 
-    async def save(self, session_key: str, content: str, source: str = "tool") -> str | None:
+    async def save(
+        self, session_key: str, content: str,
+        source: str = "tool", pinned: bool = False,
+    ) -> str | None:
         """保存一条长期记忆，返回记忆 ID。失败返回 None。"""
         if not self.available:
             return None
@@ -118,6 +121,7 @@ class LongTermMemoryStore:
                     "id": mid,
                     "source": source,
                     "session_key": session_key,
+                    "pinned": pinned,
                     "created_at": self._utcnow(),
                     "updated_at": self._utcnow(),
                 }
@@ -170,7 +174,9 @@ class LongTermMemoryStore:
             logger.error(f"[Memory] 检索长期记忆失败: {e!r}", exc_info=True)
             return []
 
-    async def update(self, session_key: str, doc_id: str, content: str) -> bool:
+    async def update(
+        self, session_key: str, doc_id: str, content: str, pinned: bool | None = None,
+    ) -> bool:
         """更新长期记忆（删除旧向量 + 插入新向量）。"""
         if not self.available:
             return False
@@ -180,19 +186,20 @@ class LongTermMemoryStore:
                 return False
             try:
                 old_doc = await self._get_doc_by_id(vec_db, doc_id)
-                source = (
-                    old_doc.get("metadata", {}).get("source", "tool")
-                    if old_doc else "tool"
-                )
+                # metadata 在 DocumentStorage 中是 JSON 字符串，需要解析
+                old_meta = {}
+                if old_doc:
+                    raw = old_doc.get("metadata", "{}")
+                    old_meta = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                source = old_meta.get("source", "tool")
+                old_pinned = old_meta.get("pinned", False)
                 await vec_db.delete(doc_id)
                 metadata = {
                     "id": doc_id,
                     "source": source,
                     "session_key": session_key,
-                    "created_at": (
-                        old_doc.get("metadata", {}).get("created_at", self._utcnow())
-                        if old_doc else self._utcnow()
-                    ),
+                    "pinned": pinned if pinned is not None else old_pinned,
+                    "created_at": old_meta.get("created_at", self._utcnow()),
                     "updated_at": self._utcnow(),
                 }
                 await vec_db.insert(content=content, metadata=metadata, id=doc_id)
@@ -234,6 +241,7 @@ class LongTermMemoryStore:
                     "id": meta.get("id", str(doc.get("doc_id", ""))),
                     "content": doc.get("text", ""),
                     "source": meta.get("source", ""),
+                    "pinned": meta.get("pinned", False),
                     "created_at": meta.get("created_at", ""),
                     "updated_at": meta.get("updated_at", ""),
                 })
@@ -241,6 +249,11 @@ class LongTermMemoryStore:
         except Exception as e:
             logger.error(f"[Memory] 列出长期记忆失败: {e}")
             return []
+
+    async def list_pinned(self, session_key: str) -> list[dict]:
+        """列出所有置顶的长期记忆（每次都注入 system prompt）。"""
+        all_memories = await self.list_all(session_key)
+        return [m for m in all_memories if m.get("pinned")]
 
     async def _get_doc_by_id(self, vec_db, doc_id: str) -> dict | None:
         """通过 ID 获取文档。"""

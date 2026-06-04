@@ -666,10 +666,10 @@ function renderLongTermMemories() {
         return;
     }
     container.innerHTML = longTermMemories.map(m => `
-        <div class="card" style="padding:8px 12px;">
+        <div class="card" style="padding:8px 12px;${m.pinned ? 'border-left:3px solid var(--accent, #e67e22);' : ''}">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
                 <div style="flex:1;min-width:0;">
-                    <div style="font-size:12px;color:var(--text-dim);">[${escapeHtml(m.id.substring(0, 8))}] ${m.source === 'manual' ? '✋' : '🔧'} ${m.updated_at ? new Date(m.updated_at).toLocaleString() : ''}</div>
+                    <div style="font-size:12px;color:var(--text-dim);">[${escapeHtml(m.id.substring(0, 8))}] ${m.pinned ? '📌 ' : ''}${m.source === 'manual' ? '✋' : '🔧'} ${m.updated_at ? new Date(m.updated_at).toLocaleString() : ''}</div>
                     <div style="margin-top:2px;">${escapeHtml(m.content)}</div>
                 </div>
                 <div style="display:flex;gap:4px;flex-shrink:0;">
@@ -686,6 +686,8 @@ function showAddMemoryModal(type) {
     document.getElementById('memory-type').value = type;
     document.getElementById('memory-edit-id').value = '';
     document.getElementById('memory-content-input').value = '';
+    document.getElementById('memory-pinned').checked = false;
+    document.getElementById('memory-pinned-group').style.display = type === 'long_term' ? '' : 'none';
     document.getElementById('memory-modal').classList.remove('hidden');
 }
 
@@ -697,6 +699,8 @@ function editMemory(type, id) {
     document.getElementById('memory-type').value = type;
     document.getElementById('memory-edit-id').value = id;
     document.getElementById('memory-content-input').value = mem.content;
+    document.getElementById('memory-pinned').checked = !!mem.pinned;
+    document.getElementById('memory-pinned-group').style.display = type === 'long_term' ? '' : 'none';
     document.getElementById('memory-modal').classList.remove('hidden');
 }
 
@@ -704,20 +708,25 @@ function hideMemoryModal() {
     document.getElementById('memory-modal').classList.add('hidden');
 }
 
+// 记忆类型 → URL 路径段 (short_term → short, long_term → long)
+function memTypePath(type) { return type.replace('_term', ''); }
+
 async function saveMemory(e) {
     e.preventDefault();
     if (!currentMemorySessionKey) return;
     const type = document.getElementById('memory-type').value;
     const editId = document.getElementById('memory-edit-id').value;
     const content = document.getElementById('memory-content-input').value.trim();
+    const pinned = type === 'long_term' && document.getElementById('memory-pinned').checked;
     const key = encodeURIComponent(currentMemorySessionKey);
+    const path = memTypePath(type);
 
     try {
         if (editId) {
-            await api('PUT', `/api/memories/${key}/${type}/${editId}`, { content });
+            await api('PUT', `/api/memories/${key}/${path}/${editId}`, { content, pinned });
             toast('记忆已更新');
         } else {
-            await api('POST', `/api/memories/${key}/${type}`, { content });
+            await api('POST', `/api/memories/${key}/${path}`, { content, pinned });
             toast('记忆已添加');
         }
         hideMemoryModal();
@@ -731,8 +740,9 @@ async function deleteMemory(type, id) {
     if (!confirm('确定要删除这条记忆吗？')) return;
     if (!currentMemorySessionKey) return;
     const key = encodeURIComponent(currentMemorySessionKey);
+    const path = memTypePath(type);
     try {
-        await api('DELETE', `/api/memories/${key}/${type}/${id}`);
+        await api('DELETE', `/api/memories/${key}/${path}/${id}`);
         toast('记忆已删除');
         await loadMemories();
     } catch (e) {

@@ -520,11 +520,12 @@ class ChatWebServer:
         session_key = request.match_info["key"]
         data = await request.json()
         content = data.get("content", "").strip()
+        pinned = bool(data.get("pinned", False))
         if not content:
             return web.json_response({"error": "内容不能为空"}, status=400)
         try:
             mid = await mgr.save_memory(
-                session_key, content, "long_term", source="manual"
+                session_key, content, "long_term", source="manual", pinned=pinned,
             )
             return web.json_response({"ok": True, "id": mid})
         except Exception as e:
@@ -560,12 +561,16 @@ class ChatWebServer:
         content = data.get("content", "").strip()
         if not content:
             return web.json_response({"error": "内容不能为空"}, status=400)
+        # pinned: true/false 显式设置，null/缺省表示不修改
+        pinned_raw = data.get("pinned")
+        pinned = bool(pinned_raw) if pinned_raw is not None else None
         try:
-            ok = await mgr.update_memory(session_key, mem_id, content)
+            ok = await mgr.update_memory(
+                session_key, mem_id, content, pinned=pinned,
+            )
             return web.json_response({"ok": ok})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
-
     async def _api_delete_short_term_memory(
         self, request: web.Request
     ) -> web.Response:
