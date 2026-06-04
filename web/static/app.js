@@ -55,6 +55,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
         if (tab === 'personas') loadPersonas();
         if (tab === 'sessions') loadSessions();
         if (tab === 'memories') loadMemorySessionList();
+        if (tab === 'proactive') loadProactiveSessionList();
         if (tab === 'tools') loadTools();
         if (tab === 'config') loadConfig();
     });
@@ -611,13 +612,12 @@ async function onMemorySessionChange() {
     currentMemorySessionKey = select.value;
     if (!currentMemorySessionKey) {
         document.getElementById('memory-content').style.display = 'none';
-        document.getElementById('proactive-settings').style.display = 'none';
         document.getElementById('memory-empty').style.display = '';
         return;
     }
     document.getElementById('memory-content').style.display = '';
     document.getElementById('memory-empty').style.display = 'none';
-    await Promise.all([loadMemories(), loadProactiveSettings()]);
+    await loadMemories();
 }
 
 async function loadMemories() {
@@ -758,9 +758,44 @@ async function deleteMemory(type, id) {
 // 初始化
 
 
-// 主动回复管理
+// 主动回复管理（独立 Tab）
 
 let proactiveSessions = {};
+let currentProactiveSessionKey = null;
+
+async function loadProactiveSessionList() {
+    try {
+        const data = await api('GET', '/api/sessions?page=1&page_size=100');
+        const select = document.getElementById('proactive-session-select');
+        const currentVal = select.value;
+        select.innerHTML = '<option value="">选择会话...</option>';
+        (data.sessions || []).forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s.session_key;
+            const icon = s.session_key.includes(':private:') ? '👤' : '👥';
+            opt.textContent = `${icon} ${s.session_key}`;
+            select.appendChild(opt);
+        });
+        if (currentVal) {
+            select.value = currentVal;
+        }
+    } catch (e) {
+        toast('加载会话列表失败: ' + e.message, 'error');
+    }
+}
+
+async function onProactiveSessionChange() {
+    const select = document.getElementById('proactive-session-select');
+    currentProactiveSessionKey = select.value;
+    if (!currentProactiveSessionKey) {
+        document.getElementById('proactive-settings').style.display = 'none';
+        document.getElementById('proactive-empty').style.display = '';
+        return;
+    }
+    document.getElementById('proactive-settings').style.display = '';
+    document.getElementById('proactive-empty').style.display = 'none';
+    await loadProactiveSettings();
+}
 
 async function loadProactiveSettings() {
     try {
@@ -776,20 +811,21 @@ async function loadProactiveSettings() {
 }
 
 function updateProactiveToggles() {
-    const settings = proactiveSessions[currentMemorySessionKey] || {};
+    const sessionKey = currentProactiveSessionKey;
+    const settings = proactiveSessions[sessionKey] || {};
     document.getElementById('proactive-timeout-toggle').checked = !!settings.timeout_enabled;
     // 轮数触发仅对群聊显示（私聊 session_key 包含 ":private:"）
-    const isGroup = currentMemorySessionKey && !currentMemorySessionKey.includes(':private:');
+    const isGroup = sessionKey && !sessionKey.includes(':private:');
+    const roundLabel = document.getElementById('proactive-round-label');
     const roundToggle = document.getElementById('proactive-round-toggle');
     roundToggle.checked = isGroup && !!settings.round_enabled;
-    roundToggle.parentElement.style.display = isGroup ? '' : 'none';
-    document.getElementById('proactive-settings').style.display = currentMemorySessionKey ? '' : 'none';
+    roundLabel.style.display = isGroup ? '' : 'none';
 }
 
 async function toggleProactiveTimeout() {
-    if (!currentMemorySessionKey) return;
+    if (!currentProactiveSessionKey) return;
     const enabled = document.getElementById('proactive-timeout-toggle').checked;
-    const key = encodeURIComponent(currentMemorySessionKey);
+    const key = encodeURIComponent(currentProactiveSessionKey);
     try {
         await api('PUT', `/api/proactive/${key}/timeout`, { enabled });
         toast(enabled ? '已启用超时主动发言' : '已关闭超时主动发言');
@@ -800,9 +836,9 @@ async function toggleProactiveTimeout() {
 }
 
 async function toggleProactiveRound() {
-    if (!currentMemorySessionKey) return;
+    if (!currentProactiveSessionKey) return;
     const enabled = document.getElementById('proactive-round-toggle').checked;
-    const key = encodeURIComponent(currentMemorySessionKey);
+    const key = encodeURIComponent(currentProactiveSessionKey);
     try {
         await api('PUT', `/api/proactive/${key}/round`, { enabled });
         toast(enabled ? '已启用轮数触发' : '已关闭轮数触发');
