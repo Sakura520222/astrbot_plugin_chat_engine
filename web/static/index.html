@@ -3,32 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat Engine 管理面板</title>
+    <title>Chat Engine</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div id="app">
-        <!-- 侧边栏 -->
+        <!-- Sidebar -->
         <nav class="sidebar">
             <div class="sidebar-header">
-                <h2>⚙️ Chat Engine</h2>
+                <h2>Chat Engine</h2>
             </div>
             <ul class="nav-list">
-                <li class="nav-item active" data-tab="personas">🎭 人格管理</li>
-                <li class="nav-item" data-tab="sessions">💬 会话管理</li>
-                <li class="nav-item" data-tab="memories">🧠 记忆管理</li>
-                <li class="nav-item" data-tab="proactive">⚡ 主动回复</li>
-                <li class="nav-item" data-tab="tools">🔧 工具管理</li>
-                <li class="nav-item" data-tab="config">📝 配置设置</li>
+                <li class="nav-item active" data-tab="personas">人格管理</li>
+                <li class="nav-item" data-tab="sessions">会话管理</li>
+                <li class="nav-item" data-tab="memories">记忆管理</li>
+                <li class="nav-item" data-tab="proactive">主动回复</li>
+                <li class="nav-item" data-tab="tools">工具管理</li>
+                <li class="nav-item" data-tab="config">配置设置</li>
             </ul>
-            <div class="sidebar-footer" id="sidebar-footer" style="display:none;padding:12px 20px;border-top:1px solid var(--border);margin-top:auto;">
-                <button class="btn btn-secondary" onclick="logout()" style="width:100%;">🚪 退出登录</button>
+            <div class="sidebar-footer" id="sidebar-footer" style="display:none">
+                <button class="btn btn-secondary" onclick="logout()" style="width:100%">退出登录</button>
             </div>
         </nav>
 
-        <!-- 主内容区 -->
+        <!-- Main Content -->
         <main class="content">
-            <!-- 人格管理 -->
+            <!-- Personas -->
             <section id="tab-personas" class="tab-panel active">
                 <div class="panel-header">
                     <h3>人格管理</h3>
@@ -37,89 +37,89 @@
                 <div id="persona-list" class="card-list"></div>
             </section>
 
-            <!-- 会话管理 -->
+            <!-- Sessions -->
             <section id="tab-sessions" class="tab-panel">
                 <div class="panel-header">
                     <h3>会话管理</h3>
-                    <button class="btn btn-secondary" onclick="loadSessions()">🔄 刷新</button>
+                    <button class="btn btn-secondary" onclick="loadSessions()">刷新</button>
                 </div>
                 <div id="session-list" class="card-list"></div>
                 <div id="session-pagination" class="pagination"></div>
             </section>
 
-            <!-- 记忆管理 -->
+            <!-- Memories -->
             <section id="tab-memories" class="tab-panel">
                 <div class="panel-header">
                     <h3>记忆管理</h3>
                     <div style="display:flex;gap:8px;align-items:center;">
-                        <select id="memory-session-select" onchange="onMemorySessionChange()" style="max-width:400px;">
+                        <select id="memory-session-select" class="inline-select" onchange="onMemorySessionChange()">
                             <option value="">选择会话...</option>
                         </select>
-                        <button class="btn btn-secondary" onclick="loadMemorySessionList()">🔄 刷新会话</button>
+                        <button class="btn btn-secondary" onclick="loadMemorySessionList()">刷新</button>
                     </div>
                 </div>
                 <div id="memory-content" style="display:none;">
                     <div class="memory-panels">
                         <div class="memory-panel">
                             <div class="memory-panel-header">
-                                <h4>📝 短期记忆</h4>
+                                <h4>短期记忆</h4>
                                 <button class="btn btn-small btn-primary" onclick="showAddMemoryModal('short_term')">+ 添加</button>
                             </div>
                             <div id="short-term-list" class="card-list"></div>
                         </div>
                         <div class="memory-panel">
                             <div class="memory-panel-header">
-                                <h4>💾 长期记忆</h4>
+                                <h4>长期记忆</h4>
                                 <button class="btn btn-small btn-primary" onclick="showAddMemoryModal('long_term')">+ 添加</button>
                             </div>
                             <div id="long-term-list" class="card-list"></div>
                         </div>
                     </div>
                 </div>
-                <div id="memory-empty" class="card">
-                    <div class="card-body">请先选择一个会话以查看记忆。</div>
+                <div id="memory-empty" class="empty-state">
+                    <p>请先选择一个会话以查看记忆</p>
                 </div>
             </section>
 
-            <!-- 主动回复 -->
+            <!-- Proactive -->
             <section id="tab-proactive" class="tab-panel">
                 <div class="panel-header">
                     <h3>主动回复</h3>
                     <div style="display:flex;gap:8px;align-items:center;">
-                        <select id="proactive-session-select" onchange="onProactiveSessionChange()" style="max-width:400px;">
+                        <select id="proactive-session-select" class="inline-select" onchange="onProactiveSessionChange()">
                             <option value="">选择会话...</option>
                         </select>
-                        <button class="btn btn-secondary" onclick="loadProactiveSessionList()">🔄 刷新会话</button>
+                        <button class="btn btn-secondary" onclick="loadProactiveSessionList()">刷新</button>
                     </div>
                 </div>
-                <div id="proactive-settings" class="card" style="display:none;margin-top:8px;padding:8px 12px;">
-                    <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
-                        <span style="font-weight:600;">⚡ 会话级开关</span>
-                        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                <div id="proactive-settings" class="proactive-card" style="display:none;">
+                    <div class="proactive-card-header">会话级开关</div>
+                    <div class="proactive-toggles">
+                        <label class="proactive-toggle-label">
                             <input type="checkbox" id="proactive-timeout-toggle" onchange="toggleProactiveTimeout()">
-                            ⏰ 超时主动发言
+                            超时主动发言
                         </label>
-                        <label id="proactive-round-label" style="display:flex;align-items:center;gap:4px;cursor:pointer;">
+                        <label id="proactive-round-label" class="proactive-toggle-label">
                             <input type="checkbox" id="proactive-round-toggle" onchange="toggleProactiveRound()">
-                            🔄 轮数触发（仅群聊）
+                            轮数触发（仅群聊）
                         </label>
                     </div>
                 </div>
-                <div id="proactive-empty" class="card">
-                    <div class="card-body">请先选择一个会话以配置主动回复设置。全局开关在「配置设置」中。</div>
+                <div id="proactive-empty" class="empty-state">
+                    <p>请先选择一个会话以配置主动回复设置。全局开关在「配置设置」中。</p>
                 </div>
             </section>
 
-            <!-- 工具管理 -->
+            <!-- Tools -->
             <section id="tab-tools" class="tab-panel">
                 <div class="panel-header">
                     <h3>工具管理</h3>
-                    <button class="btn btn-secondary" onclick="refreshTools()">🔄 重新扫描</button>
+                    <button class="btn btn-secondary" onclick="refreshTools()">重新扫描</button>
                 </div>
                 <div id="tool-list" class="card-list"></div>
             </section>
 
-            <!-- 配置设置 -->
+            <!-- Config -->
             <section id="tab-config" class="tab-panel">
                 <div class="panel-header">
                     <h3>配置设置</h3>
@@ -129,7 +129,7 @@
         </main>
     </div>
 
-    <!-- 人格编辑模态框 -->
+    <!-- Persona Modal -->
     <div id="persona-modal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
@@ -159,7 +159,7 @@
         </div>
     </div>
 
-    <!-- 会话详情模态框 -->
+    <!-- Session Detail Modal -->
     <div id="session-modal" class="modal hidden">
         <div class="modal-content modal-wide">
             <div class="modal-header">
@@ -173,7 +173,7 @@
         </div>
     </div>
 
-    <!-- LLM 预览模态框 -->
+    <!-- LLM Preview Modal -->
     <div id="llm-preview-modal" class="modal hidden">
         <div class="modal-content modal-wide">
             <div class="modal-header">
@@ -184,7 +184,7 @@
         </div>
     </div>
 
-    <!-- 记忆编辑模态框 -->
+    <!-- Memory Modal -->
     <div id="memory-modal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
@@ -197,7 +197,7 @@
                 <div class="form-group" id="memory-pinned-group" style="display:none;">
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
                         <input type="checkbox" id="memory-pinned">
-                        📌 置顶（每次对话始终生效，适用于规则、偏好等）
+                        置顶（每次对话始终生效，适用于规则、偏好等）
                     </label>
                 </div>
                 <div class="form-group">

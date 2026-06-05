@@ -1,10 +1,9 @@
+// Chat Engine WebUI — Frontend Application v2
 
-// Chat Engine WebUI — Frontend Application
 
+const API_BASE = '';
 
-const API_BASE = '';  // 同源，无需前缀
-
-//  工具函数 
+// ─── Utility Functions ───
 
 async function api(method, path, body = null) {
     const opts = {
@@ -30,7 +29,12 @@ function toast(msg, type = 'success') {
     el.className = `toast toast-${type}`;
     el.textContent = msg;
     document.body.appendChild(el);
-    setTimeout(() => el.remove(), 3000);
+    setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateY(12px)';
+        el.style.transition = 'all 0.3s ease';
+        setTimeout(() => el.remove(), 300);
+    }, 3000);
 }
 
 function escapeHtml(str) {
@@ -41,14 +45,19 @@ function escapeHtml(str) {
 
 function formatReplyContent(text) {
     if (!text) return text;
-    // 将 [回复 xxx] 替换为 blockquote 样式
     return text.replace(
         /\[回复 ([^\]]+)\]/g,
         '<blockquote class="reply-quote">$1</blockquote>'
     );
 }
 
-//  Tab 切换 
+function sourceLabel(source) {
+    if (source === 'auto') return '<span class="source-label source-auto">[自动]</span>';
+    if (source === 'manual') return '<span class="source-label source-manual">[手动]</span>';
+    return '<span class="source-label source-tool">[工具]</span>';
+}
+
+// ─── Tab Switching ───
 
 document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', () => {
@@ -58,7 +67,6 @@ document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.add('active');
         document.getElementById(`tab-${tab}`).classList.add('active');
 
-        // 加载对应 Tab 数据
         if (tab === 'personas') loadPersonas();
         if (tab === 'sessions') loadSessions();
         if (tab === 'memories') loadMemorySessionList();
@@ -69,7 +77,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
 });
 
 
-// 人格管理
+// ─── Persona Management ───
 
 
 let personas = [];
@@ -87,7 +95,10 @@ async function loadPersonas() {
 function renderPersonas() {
     const container = document.getElementById('persona-list');
     if (!personas.length) {
-        container.innerHTML = '<div class="card"><div class="card-body">暂无人格，请点击右上角新建。</div></div>';
+        container.innerHTML = `
+            <div class="empty-state">
+                <p>暂无人格，请点击右上角新建</p>
+            </div>`;
         return;
     }
     container.innerHTML = personas.map(p => `
@@ -187,7 +198,7 @@ async function setDefaultPersona(id) {
 }
 
 
-// 会话管理
+// ─── Session Management ───
 
 
 let sessionPage = 1;
@@ -205,18 +216,21 @@ async function loadSessions() {
 function renderSessions(sessions, total) {
     const container = document.getElementById('session-list');
     if (!sessions.length) {
-        container.innerHTML = '<div class="card"><div class="card-body">暂无会话记录。</div></div>';
+        container.innerHTML = `
+            <div class="empty-state">
+                <p>暂无会话记录</p>
+            </div>`;
         document.getElementById('session-pagination').innerHTML = '';
         return;
     }
 
     container.innerHTML = sessions.map(s => {
         const isGroup = !s.session_key.includes(':private:');
-        const icon = isGroup ? '👥' : '👤';
+        const tag = isGroup ? '<span class="tag">群</span>' : '<span class="tag">私</span>';
         return `
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">${icon} ${escapeHtml(s.session_key)}</div>
+                    <div class="card-title">${tag} ${escapeHtml(s.session_key)}</div>
                     <div class="card-meta">
                         ${s.message_count} 条消息 · ${s.updated_at ? new Date(s.updated_at).toLocaleString() : ''}
                     </div>
@@ -229,7 +243,7 @@ function renderSessions(sessions, total) {
         `;
     }).join('');
 
-    // 分页
+    // Pagination
     const totalPages = Math.ceil(total / sessionPageSize);
     const pagination = document.getElementById('session-pagination');
     let pagHtml = '';
@@ -268,7 +282,7 @@ async function viewSession(key) {
                         return formatReplyContent(escapeHtml(p.text || ''));
                     }
                     if (p.type === 'image_url' && p.image_url && p.image_url.url) {
-                        return `<img src="${escapeHtml(p.image_url.url)}" style="max-width:200px;max-height:200px;border-radius:6px;margin:4px 0;display:block;" />`;
+                        return `<img src="${escapeHtml(p.image_url.url)}" style="max-width:200px;max-height:200px;border-radius:8px;margin:4px 0;display:block;" alt="image" />`;
                     }
                     return '';
                 }).filter(Boolean).join('\n');
@@ -283,7 +297,10 @@ async function viewSession(key) {
         }).join('');
 
         if (!data.messages || !data.messages.length) {
-            detail.innerHTML = '<div class="card"><div class="card-body">此会话暂无消息记录。</div></div>';
+            detail.innerHTML = `
+                <div class="empty-state">
+                    <p>此会话暂无消息记录</p>
+                </div>`;
         }
 
         modal.classList.remove('hidden');
@@ -296,7 +313,7 @@ function hideSessionModal() {
     document.getElementById('session-modal').classList.add('hidden');
 }
 
-// LLM 预览
+// LLM Preview
 let currentSessionKey = null;
 
 async function showLlmPreview() {
@@ -314,25 +331,27 @@ async function showLlmPreview() {
 
         let html = '';
 
-        // 概览信息
+        // Overview stats
         html += `<div class="preview-stats">
-            <div class="stat-item"><span class="stat-label">Provider</span><span class="stat-value">${data.provider || '-'}</span></div>
-            <div class="stat-item"><span class="stat-label">Modalities</span><span class="stat-value">${(data.modalities || []).join(', ') || '-'}</span></div>
-            <div class="stat-item"><span class="stat-label">上下文条数</span><span class="stat-value">${data.context_count}</span></div>
-            <div class="stat-item"><span class="stat-label">工具数</span><span class="stat-value">${data.tool_count}</span></div>
-            <div class="stat-item"><span class="stat-label">估算 Token</span><span class="stat-value">${data.estimated_tokens}</span></div>
-            ${data.filter_summary ? `<div class="stat-item"><span class="stat-label">模态过滤</span><span class="stat-value">图片=${data.filter_summary.fixed_image_blocks}, 音频=${data.filter_summary.fixed_audio_blocks}</span></div>` : ''}
+            <div class="stat-item"><span class="stat-label">Provider</span><div class="stat-value">${data.provider || '-'}</div></div>
+            <div class="stat-item"><span class="stat-label">Modalities</span><div class="stat-value">${(data.modalities || []).join(', ') || '-'}</div></div>
+            <div class="stat-item"><span class="stat-label">上下文条数</span><div class="stat-value">${data.context_count}</div></div>
+            <div class="stat-item"><span class="stat-label">工具数</span><div class="stat-value">${data.tool_count}</div></div>
+            <div class="stat-item"><span class="stat-label">估算 Token</span><div class="stat-value">${data.estimated_tokens}</div></div>
+            ${data.filter_summary ? `<div class="stat-item"><span class="stat-label">模态过滤</span><div class="stat-value">图片=${data.filter_summary.fixed_image_blocks}, 音频=${data.filter_summary.fixed_audio_blocks}</div></div>` : ''}
         </div>`;
 
         // System Prompt
         if (data.system_prompt) {
             html += `<div class="preview-section">
-                <div class="preview-section-title" onclick="this.nextElementSibling.classList.toggle('collapsed')">System Prompt (${data.system_prompt_length} 字)</div>
+                <div class="preview-section-title" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+                    System Prompt (${data.system_prompt_length} 字)
+                </div>
                 <pre class="preview-code collapsed">${escapeHtml(data.system_prompt)}</pre>
             </div>`;
         }
 
-        // 上下文消息
+        // Context messages
         html += `<div class="preview-section">
             <div class="preview-section-title">上下文消息 (${data.context_count} 条)</div>`;
 
@@ -351,17 +370,19 @@ async function showLlmPreview() {
                     return `<span class="img-tag">[${p.type}]</span>`;
                 }).filter(Boolean).join('\n');
             }
-            html += `<div class="preview-msg">
+            html += `<div class="preview-msg ${role}">
                 <span class="preview-role" style="color:${color}">${role.toUpperCase()}</span>
                 <div class="preview-content">${content || '<em>(空)</em>'}</div>
             </div>`;
         }
         html += '</div>';
 
-        // 工具列表
+        // Tool list
         if (data.tools && data.tools.length > 0) {
             html += `<div class="preview-section">
-                <div class="preview-section-title" onclick="this.nextElementSibling.classList.toggle('collapsed')">工具列表 (${data.tool_count})</div>
+                <div class="preview-section-title" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+                    工具列表 (${data.tool_count})
+                </div>
                 <div class="preview-tools collapsed">${(data.tools || []).map(t => `<span class="tool-tag">${escapeHtml(t)}</span>`).join('')}</div>
             </div>`;
         }
@@ -389,7 +410,7 @@ async function deleteSession(key) {
 }
 
 
-// 工具管理
+// ─── Tool Management ───
 
 
 async function loadTools() {
@@ -404,11 +425,14 @@ async function loadTools() {
 function renderTools(tools) {
     const container = document.getElementById('tool-list');
     if (!tools.length) {
-        container.innerHTML = '<div class="card"><div class="card-body">未发现已注册的工具。</div></div>';
+        container.innerHTML = `
+            <div class="empty-state">
+                <p>未发现已注册的工具</p>
+            </div>`;
         return;
     }
 
-    // 按来源分组
+    // Group by source
     const groups = { builtin: [], plugin: [], mcp: [] };
     tools.forEach(t => {
         const src = t.source || 'builtin';
@@ -417,28 +441,28 @@ function renderTools(tools) {
     });
 
     const sourceLabels = {
-        builtin: '🛠 内置工具',
-        plugin: '🔌 插件工具',
-        mcp: '🌐 MCP 工具',
+        builtin: '内置工具',
+        plugin: '插件工具',
+        mcp: 'MCP 工具',
     };
 
     let html = '';
     for (const [source, items] of Object.entries(groups)) {
         if (!items.length) continue;
-        html += `<h4 style="margin: 16px 0 8px; color: var(--text-dim); font-size: 13px;">${sourceLabels[source] || source} (${items.length})</h4>`;
+        html += `<div class="tool-group-title">${sourceLabels[source] || source} (${items.length})</div>`;
         html += items.map(t => `
-            <div class="card" style="display: flex; align-items: center; gap: 16px;">
+            <div class="card tool-card">
                 <label class="tool-switch">
                     <input type="checkbox" ${t.enabled ? 'checked' : ''} onchange="toggleTool('${escapeHtml(t.name)}', this.checked)">
                     <span class="slider"></span>
                 </label>
-                <div style="flex: 1; min-width: 0;">
-                    <div class="card-title" style="font-size: 14px;">
+                <div class="tool-card-info">
+                    <div class="tool-card-title">
                         ${escapeHtml(t.name)}
                         <span class="badge badge-${t.source}">${t.source}</span>
                         ${!t.enabled ? '<span class="badge badge-disabled">已禁用</span>' : ''}
                     </div>
-                    <div class="card-body" style="max-height: 40px; margin-top: 4px;">${escapeHtml(t.description || '无描述')}</div>
+                    <div class="tool-card-desc">${escapeHtml(t.description || '无描述')}</div>
                 </div>
             </div>
         `).join('');
@@ -453,7 +477,7 @@ async function toggleTool(name, enabled) {
         await api('POST', `/api/tools/${encodeURIComponent(name)}/${action}`);
     } catch (e) {
         toast(`操作失败: ${e.message}`, 'error');
-        loadTools(); // 刷新恢复状态
+        loadTools();
     }
 }
 
@@ -468,7 +492,7 @@ async function refreshTools() {
 }
 
 
-// 配置管理
+// ─── Config Management ───
 
 
 const CONFIG_FIELDS = [
@@ -552,7 +576,7 @@ function renderConfig() {
     html += '<div class="config-actions"><button class="btn btn-primary" onclick="saveConfig()">保存配置</button></div>';
     container.innerHTML = html;
 
-    // checkbox 实时文字更新
+    // Checkbox live text update
     CONFIG_FIELDS.filter(f => f.type === 'checkbox').forEach(f => {
         const el = document.getElementById(`cfg-${f.key}`);
         if (el) {
@@ -586,7 +610,7 @@ async function saveConfig() {
 }
 
 
-// 记忆管理
+// ─── Memory Management ───
 
 
 let currentMemorySessionKey = null;
@@ -602,8 +626,8 @@ async function loadMemorySessionList() {
         (data.sessions || []).forEach(s => {
             const opt = document.createElement('option');
             opt.value = s.session_key;
-            const icon = s.session_key.includes(':private:') ? '👤' : '👥';
-            opt.textContent = `${icon} ${s.session_key}`;
+            const isGroup = !s.session_key.includes(':private:');
+            opt.textContent = `${isGroup ? '[群]' : '[私]'} ${s.session_key}`;
             select.appendChild(opt);
         });
         if (currentVal) {
@@ -651,17 +675,17 @@ function renderMemories() {
 function renderShortTermMemories() {
     const container = document.getElementById('short-term-list');
     if (!shortTermMemories.length) {
-        container.innerHTML = '<div class="card"><div class="card-body" style="color:var(--text-dim)">暂无短期记忆。</div></div>';
+        container.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:8px 0;">暂无短期记忆</div>';
         return;
     }
     container.innerHTML = shortTermMemories.map(m => `
-        <div class="card" style="padding:8px 12px;">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+        <div class="memory-card">
+            <div class="memory-card-header">
                 <div style="flex:1;min-width:0;">
-                    <div style="font-size:12px;color:var(--text-dim);">[${escapeHtml(m.id.substring(0, 8))}] ${m.source === 'auto' ? '🤖' : m.source === 'manual' ? '✋' : '🔧'} ${m.updated_at ? new Date(m.updated_at).toLocaleString() : ''}</div>
-                    <div style="margin-top:2px;">${escapeHtml(m.content)}</div>
+                    <div class="memory-card-meta">[${escapeHtml(m.id.substring(0, 8))}] ${sourceLabel(m.source)} ${m.updated_at ? new Date(m.updated_at).toLocaleString() : ''}</div>
+                    <div class="memory-card-content">${escapeHtml(m.content)}</div>
                 </div>
-                <div style="display:flex;gap:4px;flex-shrink:0;">
+                <div class="memory-card-actions">
                     <button class="btn btn-small btn-secondary" onclick="editMemory('short_term','${escapeHtml(m.id)}')">编辑</button>
                     <button class="btn btn-small btn-danger" onclick="deleteMemory('short_term','${escapeHtml(m.id)}')">删除</button>
                 </div>
@@ -673,17 +697,17 @@ function renderShortTermMemories() {
 function renderLongTermMemories() {
     const container = document.getElementById('long-term-list');
     if (!longTermMemories.length) {
-        container.innerHTML = '<div class="card"><div class="card-body" style="color:var(--text-dim)">暂无长期记忆。</div></div>';
+        container.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:8px 0;">暂无长期记忆</div>';
         return;
     }
     container.innerHTML = longTermMemories.map(m => `
-        <div class="card" style="padding:8px 12px;${m.pinned ? 'border-left:3px solid var(--accent, #e67e22);' : ''}">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+        <div class="memory-card ${m.pinned ? 'memory-card-pinned' : ''}">
+            <div class="memory-card-header">
                 <div style="flex:1;min-width:0;">
-                    <div style="font-size:12px;color:var(--text-dim);">[${escapeHtml(m.id.substring(0, 8))}] ${m.pinned ? '📌 ' : ''}${m.source === 'manual' ? '✋' : '🔧'} ${m.updated_at ? new Date(m.updated_at).toLocaleString() : ''}</div>
-                    <div style="margin-top:2px;">${escapeHtml(m.content)}</div>
+                    <div class="memory-card-meta">[${escapeHtml(m.id.substring(0, 8))}] ${m.pinned ? '<span class="source-label" style="color:var(--warning)">[置顶]</span>' : ''} ${sourceLabel(m.source)} ${m.updated_at ? new Date(m.updated_at).toLocaleString() : ''}</div>
+                    <div class="memory-card-content">${escapeHtml(m.content)}</div>
                 </div>
-                <div style="display:flex;gap:4px;flex-shrink:0;">
+                <div class="memory-card-actions">
                     <button class="btn btn-small btn-secondary" onclick="editMemory('long_term','${escapeHtml(m.id)}')">编辑</button>
                     <button class="btn btn-small btn-danger" onclick="deleteMemory('long_term','${escapeHtml(m.id)}')">删除</button>
                 </div>
@@ -719,7 +743,6 @@ function hideMemoryModal() {
     document.getElementById('memory-modal').classList.add('hidden');
 }
 
-// 记忆类型 → URL 路径段 (short_term → short, long_term → long)
 function memTypePath(type) { return type.replace('_term', ''); }
 
 async function saveMemory(e) {
@@ -762,10 +785,8 @@ async function deleteMemory(type, id) {
 }
 
 
-// 初始化
+// ─── Proactive Management ───
 
-
-// 主动回复管理（独立 Tab）
 
 let proactiveSessions = {};
 let currentProactiveSessionKey = null;
@@ -779,8 +800,8 @@ async function loadProactiveSessionList() {
         (data.sessions || []).forEach(s => {
             const opt = document.createElement('option');
             opt.value = s.session_key;
-            const icon = s.session_key.includes(':private:') ? '👤' : '👥';
-            opt.textContent = `${icon} ${s.session_key}`;
+            const isGroup = !s.session_key.includes(':private:');
+            opt.textContent = `${isGroup ? '[群]' : '[私]'} ${s.session_key}`;
             select.appendChild(opt);
         });
         if (currentVal) {
@@ -813,7 +834,7 @@ async function loadProactiveSettings() {
         });
         updateProactiveToggles();
     } catch (e) {
-        // 主动回复可能未启用，静默失败
+        // Proactive may not be enabled, silent fail
     }
 }
 
@@ -821,7 +842,6 @@ function updateProactiveToggles() {
     const sessionKey = currentProactiveSessionKey;
     const settings = proactiveSessions[sessionKey] || {};
     document.getElementById('proactive-timeout-toggle').checked = !!settings.timeout_enabled;
-    // 轮数触发仅对群聊显示（私聊 session_key 包含 ":private:"）
     const isGroup = sessionKey && !sessionKey.includes(':private:');
     const roundLabel = document.getElementById('proactive-round-label');
     const roundToggle = document.getElementById('proactive-round-toggle');
@@ -855,7 +875,7 @@ async function toggleProactiveRound() {
     }
 }
 
-//  认证管理
+// ─── Auth ───
 
 
 async function checkAuth() {
@@ -868,14 +888,13 @@ async function checkAuth() {
             window.location.href = '/login';
             return false;
         }
-        // 认证已启用时显示退出按钮
         if (data.enabled) {
             const footer = document.getElementById('sidebar-footer');
             if (footer) footer.style.display = '';
         }
         return true;
     } catch (e) {
-        return true; // 网络异常不阻塞
+        return true;
     }
 }
 
@@ -883,13 +902,13 @@ async function logout() {
     try {
         await api('POST', '/api/auth/logout');
     } catch (e) {
-        // 忽略登出请求错误
+        // Ignore logout request errors
     }
     localStorage.removeItem('auth_token');
     window.location.href = '/login';
 }
 
-//  初始化
+// ─── Init ───
 
 document.addEventListener('DOMContentLoaded', async () => {
     const ok = await checkAuth();

@@ -6,49 +6,80 @@
     <title>Chat Engine — 登录</title>
     <style>
         :root {
-            --bg: #0f1117;
-            --bg-card: #1a1d27;
-            --bg-input: #12141c;
-            --border: #2a2d3a;
-            --text: #e4e6eb;
-            --text-dim: #8b8fa3;
-            --primary: #6366f1;
-            --primary-hover: #818cf8;
-            --danger: #ef4444;
-            --radius: 8px;
+            --bg:              #0b0d11;
+            --bg-card:         #161923;
+            --bg-input:        #11131b;
+            --border:          #23273a;
+            --text:            #e2e4ea;
+            --text-dim:        #6b7094;
+            --primary:         #6366f1;
+            --primary-hover:   #818cf8;
+            --primary-soft:    rgba(99, 102, 241, 0.14);
+            --danger:          #ef4444;
+            --radius:          8px;
         }
 
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
 
         body {
             background: var(--bg);
             color: var(--text);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle at 50% 50%, rgba(99, 102, 241, 0.06) 0%, transparent 50%);
+            pointer-events: none;
         }
 
         .login-card {
+            position: relative;
             background: var(--bg-card);
             border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 40px;
+            border-radius: 16px;
+            padding: 44px 40px 36px;
             width: 100%;
             max-width: 400px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+            box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5),
+                        0 0 60px rgba(99, 102, 241, 0.05);
+            animation: cardIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        @keyframes cardIn {
+            from { opacity: 0; transform: translateY(16px) scale(0.97); }
+            to   { opacity: 1; transform: translateY(0) scale(1); }
         }
 
         .login-header {
             text-align: center;
-            margin-bottom: 28px;
+            margin-bottom: 32px;
         }
 
         .login-header h2 {
             font-size: 22px;
-            font-weight: 600;
-            margin-bottom: 6px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hover) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 4px;
         }
 
         .login-header .subtitle {
@@ -57,30 +88,33 @@
         }
 
         .form-group {
-            margin-bottom: 16px;
+            margin-bottom: 18px;
         }
 
         .form-group label {
             display: block;
             margin-bottom: 6px;
             font-size: 13px;
+            font-weight: 500;
             color: var(--text-dim);
         }
 
         .form-group input {
             width: 100%;
-            padding: 10px 14px;
+            padding: 11px 14px;
             border-radius: var(--radius);
             border: 1px solid var(--border);
             background: var(--bg-input);
             color: var(--text);
             font-size: 14px;
+            font-family: inherit;
             outline: none;
-            transition: border-color 0.2s;
+            transition: all 0.2s ease;
         }
 
         .form-group input:focus {
             border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-soft);
         }
 
         .btn-login {
@@ -92,20 +126,36 @@
             color: #fff;
             font-size: 15px;
             font-weight: 600;
+            font-family: inherit;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.2s ease;
             margin-top: 8px;
         }
 
-        .btn-login:hover { background: var(--primary-hover); }
-        .btn-login:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-login:hover {
+            background: var(--primary-hover);
+            box-shadow: 0 0 20px rgba(99, 102, 241, 0.2);
+        }
+
+        .btn-login:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
 
         .error-msg {
             color: var(--danger);
             font-size: 13px;
             text-align: center;
-            margin-top: 12px;
+            margin-top: 14px;
             display: none;
+            animation: shake 0.35s ease;
+        }
+
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            20%, 60% { transform: translateX(-4px); }
+            40%, 80% { transform: translateX(4px); }
         }
     </style>
 </head>
@@ -130,7 +180,6 @@
     </div>
 
     <script>
-        // 检查认证状态 — 已登录则跳转首页
         fetch('/api/auth/status')
             .then(r => r.json())
             .then(data => {
@@ -140,7 +189,6 @@
             })
             .catch(() => {});
 
-        // 处理登录表单
         document.getElementById('login-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = document.getElementById('btn-login');
