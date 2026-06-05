@@ -6,6 +6,7 @@
 - 人格管理 (独立于 AstrBot)
 - Tool Calls (扫描所有工具，原生 function calling)
 - 上下文压缩 (轮数限制 / Token 阈值 LLM 总结)
+- 记忆系统 (短期记忆 / 长期记忆 / LLM 工具主动记忆 / 自动总结)
 - WebUI 管理面板 (独立 aiohttp 服务)
 """
 
@@ -17,24 +18,27 @@ import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Reply
+from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
 
 from .context.manager import ChatContextManager
 from .context.token_counter import TokenEstimator
 from .db.engine import ChatEngineDB
+from .memory.manager import MemoryManager
 from .persona.manager import ChatPersonaManager
+from .proactive.manager import ProactiveManager
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
+from .utils.config import cfg_bool, cfg_float, cfg_int
 from .web.server import ChatWebServer
 
 
 @register(
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
-    "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩和 WebUI 管理面板。",
-    "1.1.1",
+    "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
+    "1.2.0",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -46,46 +50,105 @@ class ChatEnginePlugin(Star):
         self.context_mgr: ChatContextManager = None
         self.persona_mgr: ChatPersonaManager = None
         self.tool_mgr: ChatToolManager = None
+        self.memory_mgr: MemoryManager = None
+        self.proactive_mgr: ProactiveManager = None
         self.web_server: ChatWebServer = None
+        self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
+
+    # 上下文消息 ID 注入
+
+    @staticmethod
+    def _inject_msg_id_tag(msg: dict) -> dict:
+        """为单条消息的 content 前注入 [msg:ID] 标记。
+
+        仅对有 message_id 且 role 为 user/observed 的消息注入。
+        返回修改后的副本，不修改原始消息。
+        """
+        msg_id = msg.get("message_id", "")
+        role = msg.get("role", "")
+        if not msg_id or role not in ("user", "observed"):
+            return msg
+
+        tag = f"[msg:{msg_id}] "
+        content = msg.get("content")
+        new_msg = {**msg}
+
+        if isinstance(content, str):
+            new_msg["content"] = tag + content
+        elif isinstance(content, list):
+            # 在第一个 text 块前插入标记
+            new_parts = []
+            tag_inserted = False
+            for part in content:
+                if (
+                    not tag_inserted
+                    and isinstance(part, dict)
+                    and part.get("type") == "text"
+                ):
+                    new_parts.append(
+                        {"type": "text", "text": tag + part.get("text", "")}
+                    )
+                    tag_inserted = True
+                else:
+                    new_parts.append(part)
+            if not tag_inserted:
+                # 没有 text 块，在最前面插入
+                new_parts.insert(0, {"type": "text", "text": tag.strip()})
+            new_msg["content"] = new_parts
+
+        return new_msg
+
+    @staticmethod
+    def _strip_history_images(messages: list[dict]) -> list[dict]:
+        """移除历史上下文消息中的图片，替换为 [Image] 文本标记。
+
+        仅当前用户消息保留图片，历史消息中的图片替换为纯文本占位符，
+        减少 Token 消耗同时保留"曾经发过图片"的语义信息。
+        """
+        result = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                new_parts = []
+                replaced = False
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        replaced = True
+                    else:
+                        new_parts.append(part)
+                if replaced:
+                    has_text = any(
+                        isinstance(p, dict)
+                        and p.get("type") == "text"
+                        and p.get("text", "").strip()
+                        for p in new_parts
+                    )
+                    if not has_text:
+                        new_parts.insert(0, {"type": "text", "text": "[Image]"})
+                msg = {**msg, "content": new_parts}
+            result.append(msg)
+        return result
+
+    def _enrich_context_with_ids(self, context_messages: list[dict]) -> list[dict]:
+        """为上下文消息列表中的用户/被动消息注入 [msg:ID] 标记。
+
+        返回新列表，不修改原始数据。
+        """
+        return [self._inject_msg_id_tag(msg) for msg in context_messages]
 
     # 配置读取辅助
 
     def _cfg_int(self, key: str, default: int) -> int:
         """安全读取 int 配置项，类型异常时回退到默认值"""
-        try:
-            return int(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        return cfg_int(self.config, key, default)
 
     def _cfg_float(self, key: str, default: float) -> float:
         """安全读取 float 配置项，类型异常时回退到默认值"""
-        try:
-            return float(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        return cfg_float(self.config, key, default)
 
     def _cfg_bool(self, key: str, default: bool) -> bool:
         """安全读取 bool 配置项，支持字符串和数值类型转换"""
-        val = self.config.get(key, default)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, str):
-            lower = val.lower()
-            if lower in ("true", "1", "yes"):
-                return True
-            if lower in ("false", "0", "no"):
-                return False
-            logger.warning(
-                f"[ChatEngine] 配置项 '{key}' 的值 '{val}' 无法解析为布尔值，使用默认值 {default}"
-            )
-            return default
-        if isinstance(val, (int, float)):
-            if isinstance(val, float) and val not in (0.0, 1.0):
-                logger.warning(
-                    f"[ChatEngine] 配置项 '{key}' 的浮点值 {val} 不在 {{0.0, 1.0}} 内，将按 bool() 转换"
-                )
-            return bool(val)
-        return default
+        return cfg_bool(self.config, key, default)
 
     async def initialize(self):
         """插件激活时调用 — 初始化数据库、管理器和 Web 服务"""
@@ -126,6 +189,51 @@ class ChatEnginePlugin(Star):
         tools = await self.tool_mgr.refresh_tools()
         logger.info(f"[ChatEngine] 扫描到 {len(tools)} 个工具")
 
+        # 记忆管理器
+        if self._cfg_bool("enable_memory", True):
+            try:
+                self.memory_mgr = MemoryManager(
+                    config=self.config,
+                    data_dir=data_dir,
+                    # 传入 getter 函数，运行时动态获取 provider（插件加载先于 provider 初始化）
+                    embedding_getter=lambda: self.context.get_all_embedding_providers(),
+                    rerank_getter=lambda: getattr(
+                        self.context.provider_manager, "rerank_provider_insts", []
+                    ),
+                    provider_getter=_get_provider,
+                )
+                await self.memory_mgr.initialize()
+                logger.info("[ChatEngine] 记忆系统已初始化")
+            except Exception as e:
+                logger.warning(
+                    f"[ChatEngine] 记忆系统初始化失败，记忆功能将被禁用: {e}"
+                )
+                self.memory_mgr = None
+        else:
+            logger.info("[ChatEngine] 记忆功能已禁用")
+
+        # 主动回复管理器
+        if self._cfg_bool("enable_proactive", False):
+            try:
+                self.proactive_mgr = ProactiveManager(
+                    config=self.config,
+                    data_dir=data_dir,
+                    context=self.context,
+                    provider_getter=_get_provider,
+                    persona_mgr=self.persona_mgr,
+                    context_mgr=self.context_mgr,
+                    memory_mgr=self.memory_mgr,
+                    clean_fn=self._clean_response,
+                    split_fn=self._split_response,
+                )
+                await self.proactive_mgr.initialize()
+                logger.info("[ChatEngine] 主动回复系统已初始化")
+            except Exception as e:
+                logger.warning(f"[ChatEngine] 主动回复系统初始化失败: {e}")
+                self.proactive_mgr = None
+        else:
+            logger.info("[ChatEngine] 主动回复功能未启用")
+
         # 启动 WebUI
         web_port = self._cfg_int("web_port", 8765)
         self.web_server = ChatWebServer(self, port=web_port)
@@ -138,6 +246,10 @@ class ChatEnginePlugin(Star):
         logger.info("[ChatEngine] 正在关闭...")
         if self.web_server:
             await self.web_server.stop()
+        if self.memory_mgr:
+            await self.memory_mgr.close()
+        if self.proactive_mgr:
+            await self.proactive_mgr.close()
         if self.db:
             await self.db.close()
         logger.info("[ChatEngine] 已关闭")
@@ -268,6 +380,17 @@ class ChatEnginePlugin(Star):
                         except Exception as e:
                             logger.debug(f"[ChatEngine] 被动记录失败: {e}")
 
+                # 主动回复: 注册会话 + 轮数计数
+                if self.proactive_mgr:
+                    try:
+                        passive_umo = event.unified_msg_origin
+                        await self.proactive_mgr.register_session(
+                            passive_key, passive_umo
+                        )
+                        await self.proactive_mgr.on_message(passive_key)
+                    except Exception as e:
+                        logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
+
                 event.should_call_llm(False)  # 恢复默认 LLM
                 return
 
@@ -327,6 +450,18 @@ class ChatEnginePlugin(Star):
                 system_prompt = await self.persona_mgr.get_system_prompt()
                 logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
+                #  注入记忆到 System Prompt
+                if self.memory_mgr:
+                    try:
+                        memory_text = await self.memory_mgr.get_memory_prompt(
+                            session_key, query=user_text
+                        )
+                        if memory_text:
+                            system_prompt += f"\n\n{memory_text}"
+                            logger.info("[ChatEngine] 注入记忆到 System Prompt")
+                    except Exception as e:
+                        logger.warning(f"[ChatEngine] 注入记忆失败: {e}")
+
                 #  构建工具集和工具描述
                 enable_tools = self._cfg_bool("enable_tool_calls", True)
                 tool_set = None
@@ -348,6 +483,10 @@ class ChatEnginePlugin(Star):
                         tool_desc = await self.tool_mgr.build_tool_description_text()
                         if tool_desc:
                             system_prompt += f"\n\n## 可用工具\n\n{tool_desc}"
+
+                        # 记忆工具使用指引
+                        if self.memory_mgr:
+                            system_prompt += self._build_memory_tool_guidance()
                     except Exception as e:
                         logger.warning(
                             f"[ChatEngine] 构建工具集失败: {e}", exc_info=True
@@ -373,8 +512,15 @@ class ChatEnginePlugin(Star):
                     llm_contexts = sanitized[:-1]
                     llm_user_msg = sanitized[-1]
 
+                #  剥离历史上下文中的图片，仅保留当前用户消息的图片
+                llm_contexts = self._strip_history_images(llm_contexts)
+
                 #  Token 安全截断
                 llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
+
+                #  注入 [msg:ID] 标记，让 LLM 可以引用特定消息
+                llm_contexts = self._enrich_context_with_ids(llm_contexts)
+                llm_user_msg = self._inject_msg_id_tag(llm_user_msg)
 
                 #  调用 LLM (含 Tool Call 循环)
                 logger.info(
@@ -415,19 +561,41 @@ class ChatEnginePlugin(Star):
                 # 文本清洗 (在分段发送之前)
                 response_text = self._clean_response(response_text)
 
+                # 检查是否有待发送的引用回复
+                pending_quote_id = self._pending_quotes.pop(session_key, None)
+
                 if response_text:
                     segments = self._split_response(response_text)
                     if len(segments) <= 1:
-                        yield event.plain_result(response_text)
+                        if pending_quote_id:
+                            yield event.chain_result(
+                                [Reply(id=pending_quote_id), Plain(response_text)]
+                            )
+                            logger.info(
+                                f"[ChatEngine] 引用回复已发送: quote_msg_id={pending_quote_id}"
+                            )
+                        else:
+                            yield event.plain_result(response_text)
                     else:
                         logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
                         for seg_idx, segment in enumerate(segments):
-                            yield event.plain_result(segment)
+                            if seg_idx == 0 and pending_quote_id:
+                                yield event.chain_result(
+                                    [Reply(id=pending_quote_id), Plain(segment)]
+                                )
+                                logger.info(
+                                    f"[ChatEngine] 引用回复已发送: quote_msg_id={pending_quote_id}"
+                                )
+                            else:
+                                yield event.plain_result(segment)
                             if seg_idx < len(segments) - 1:
                                 delay_ms = max(
                                     0, min(self._cfg_int("split_delay_ms", 800), 5000)
                                 )
                                 await asyncio.sleep(delay_ms / 1000)
+                elif pending_quote_id:
+                    # LLM 返回空但设置了引用——清除 pending
+                    self._pending_quotes.pop(session_key, None)
 
                 if (
                     hasattr(final_response, "result_chain")
@@ -439,10 +607,45 @@ class ChatEnginePlugin(Star):
 
                 #  保存上下文
                 assistant_msg = {"role": "assistant", "content": response_text}
-                await self.context_mgr.append_and_save(
+                # 记录保存前的消息数，用于检测压缩是否发生
+                pre_save_count = len(context_messages_raw)
+                saved = await self.context_mgr.append_and_save(
                     session_key, user_msg, assistant_msg, provider=provider
                 )
                 logger.info("[ChatEngine] 上下文已保存")
+
+                #  记忆系统: 轮数追踪 + 自动总结
+                if self.memory_mgr:
+                    try:
+                        # 检测压缩是否发生
+                        post_save_count = len(saved) if saved else pre_save_count
+                        compressed = post_save_count < pre_save_count + 2
+
+                        if compressed:
+                            logger.info("[ChatEngine] 检测到上下文压缩，触发记忆总结")
+                            await self.memory_mgr.on_context_compressed(
+                                session_key,
+                                provider,
+                                self.persona_mgr,
+                                self.context_mgr,
+                            )
+
+                        await self.memory_mgr.on_turn_complete(
+                            session_key, provider, self.persona_mgr, self.context_mgr
+                        )
+                    except Exception as e:
+                        logger.warning(f"[ChatEngine] 记忆轮数追踪失败: {e}")
+
+                # 主动回复: 注册会话 + 重置轮数（机器人已回复，从零开始计数）
+                if self.proactive_mgr:
+                    try:
+                        await self.proactive_mgr.register_session(
+                            session_key,
+                            event.unified_msg_origin,
+                        )
+                        await self.proactive_mgr.reset_round_count(session_key)
+                    except Exception as e:
+                        logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
 
         except Exception as e:
             logger.error(f"[ChatEngine] 顶层异常: {e}", exc_info=True)
@@ -725,8 +928,7 @@ class ChatEnginePlugin(Star):
                 quote_chars = """“”‘’「」『』"""
                 # 标点后跟非引号字符 (即行内标点不作为分割点)
                 punct_then_nonquote = (
-                    f"[^{char_class}{quote_chars}]*"
-                    f"[{char_class}](?=[^{quote_chars}]|$)"
+                    f"[^{char_class}{quote_chars}]*[{char_class}](?=[^{quote_chars}]|$)"
                 )
                 segments = []
                 for line in text.split("\n"):
@@ -749,17 +951,13 @@ class ChatEnginePlugin(Star):
                         tail = line[last_end:]
                         if tail.strip():
                             parts.append(tail)
-                        segments.extend(
-                            [p.strip() for p in parts if p.strip()]
-                        )
+                        segments.extend([p.strip() for p in parts if p.strip()])
             else:
                 # sentence 模式: 按标点符号分段 (经典模式)
                 # 单次 finditer 收集片段 + 追踪尾部位置
                 segments = []
                 last_end = 0
-                for m in re.finditer(
-                    f"[^{char_class}]*[{char_class}]", text
-                ):
+                for m in re.finditer(f"[^{char_class}]*[{char_class}]", text):
                     segments.append(m.group())
                     last_end = m.end()
                 # 循环结束后处理尾部文本
@@ -785,42 +983,40 @@ class ChatEnginePlugin(Star):
     # Emoji 正则: 包含 Unicode Emoji 属性的字符
     _EMOJI_RE = re.compile(
         "["
-        "\U0001F600-\U0001F64F"  # Emoticons
-        "\U0001F300-\U0001F5FF"  # Symbols & Pictographs
-        "\U0001F680-\U0001F6FF"  # Transport & Map
-        "\U0001F1E0-\U0001F1FF"  # Flags
-        "\U00002702-\U000027B0"  # Dingbats
-        "\U0000FE00-\U0000FE0F"  # Variation Selectors
-        "\U0001F900-\U0001F9FF"  # Supplemental Symbols
-        "\U0001FA00-\U0001FA6F"  # Chess Symbols
-        "\U0001FA70-\U0001FAFF"  # Symbols Extended-A
-        "\U00002600-\U000026FF"  # Misc Symbols
-        "\U0000200D"             # Zero Width Joiner
-        "\U0000FE0F"             # Variation Selector-16
-        "\U00002B50"             # Star
-        "\U00002B55"             # Circle
-        "\U0000231A-\U0000231B"  # Watch/Hourglass
-        "\U000023E9-\U000023F3"  # Various symbols
-        "\U000023F8-\U000023FA"  # Various symbols
-        "\U000025AA-\U000025AB"  # Squares
-        "\U000025B6"             # Play button
-        "\U000025C0"             # Reverse button
-        "\U000025FB-\U000025FE"  # Squares
+        "\U0001f600-\U0001f64f"  # Emoticons
+        "\U0001f300-\U0001f5ff"  # Symbols & Pictographs
+        "\U0001f680-\U0001f6ff"  # Transport & Map
+        "\U0001f1e0-\U0001f1ff"  # Flags
+        "\U00002702-\U000027b0"  # Dingbats
+        "\U0000fe00-\U0000fe0f"  # Variation Selectors
+        "\U0001f900-\U0001f9ff"  # Supplemental Symbols
+        "\U0001fa00-\U0001fa6f"  # Chess Symbols
+        "\U0001fa70-\U0001faff"  # Symbols Extended-A
+        "\U00002600-\U000026ff"  # Misc Symbols
+        "\U0000200d"  # Zero Width Joiner
+        "\U0000fe0f"  # Variation Selector-16
+        # "\U00002b50"  # Star
+        "\U00002b55"  # Circle
+        "\U0000231a-\U0000231b"  # Watch/Hourglass
+        "\U000023e9-\U000023f3"  # Various symbols
+        "\U000023f8-\U000023fa"  # Various symbols
+        "\U000025aa-\U000025ab"  # Squares
+        "\U000025b6"  # Play button
+        "\U000025c0"  # Reverse button
+        "\U000025fb-\U000025fe"  # Squares
         "\U00002934-\U00002935"  # Arrows
-        "\U00002B05-\U00002B07"  # Arrows
-        "\U00002B1B-\U00002B1C"  # Squares
-        "\U00003030"             # Wavy Dash
-        "\U0000303D"             # Part Alternation Mark
-        "\U00003297"             # Circled Ideograph Congratulation
-        "\U00003299"             # Circled Ideograph Secret
+        "\U00002b05-\U00002b07"  # Arrows
+        "\U00002b1b-\U00002b1c"  # Squares
+        "\U00003030"  # Wavy Dash
+        "\U0000303d"  # Part Alternation Mark
+        "\U00003297"  # Circled Ideograph Congratulation
+        "\U00003299"  # Circled Ideograph Secret
         "]+",
         flags=re.UNICODE,
     )
 
     # 括号及其内容: 中英文括号
-    _BRACKET_RE = re.compile(
-        r"[\(（\[【][^\)）\]】]*?[\)）\]】]"
-    )
+    _BRACKET_RE = re.compile(r"[\(（\[【][^\)）\]】]*?[\)）\]】]")
 
     def _clean_response(self, text: str) -> str:
         """对 LLM 回复进行文本清洗。
@@ -915,3 +1111,186 @@ class ChatEnginePlugin(Star):
         if hasattr(comp, "file") and comp.file:
             return comp.file
         return None
+
+    # 记忆工具 — LLM Tool Call
+
+    @staticmethod
+    def _build_memory_tool_guidance() -> str:
+        """构建记忆工具和主动回复工具的使用指引，注入到 system prompt 中。"""
+        return """
+
+## Tool Usage Guide
+
+You have access to memory tools (save_memory, search_memory, update_memory, delete_memory), proactive reply tools (schedule_reply), and quote reply tool (reply_with_quote). Use them proactively:
+
+- **save_memory**: When the user shares personal preferences, habits, important facts, or explicitly says things like "记住了", "记住", "别忘了", "记住这个". Choose type="long_term" for persistent facts (preferences, identity) or type="short_term" for temporary context (current topic, recent plans).
+  - **pinned="true"**: Use for standing rules or instructions that must ALWAYS be active regardless of topic (e.g. "user wants responses under 30 chars", "always reply in a cute tone"). Pinned memories bypass semantic search and are injected every turn.
+- **search_memory**: Before answering questions about the user's preferences or past discussions, search your long-term memory for relevant context.
+- **update_memory**: When the user corrects or updates previously remembered information.
+- **delete_memory**: When the user explicitly asks to forget something.
+- **schedule_reply**: When the user asks you to remind them later, when you want to follow up on a topic, or when saying things like "一会提醒我", "过XX分钟告诉我". Also use when the conversation naturally suggests a follow-up would be welcome.
+- **reply_with_quote**: When you want to reply to a specific earlier message in the conversation. Each user message is tagged with `[msg:ID]` — call `reply_with_quote(message_id)` first, then generate your reply text. It will be sent as a quoted reply on the platform. Use this when directly addressing a specific past message (e.g. answering an earlier question, confirming something the user said). Do NOT overuse — only when there is a clear reference target.
+
+Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these tools to the user — just use them naturally when appropriate.
+"""
+
+    @filter.llm_tool(name="save_memory")
+    async def tool_save_memory(
+        self,
+        event: AstrMessageEvent,
+        content: str,
+        type: str,
+        pinned="true",
+    ):
+        """Save a memory. Choose type based on persistence value:
+        - short_term: temporary context (current topic, recent plans, dialogue state)
+        - long_term: persistent facts (user preferences, identity, key decisions, recurring patterns)
+
+        Args:
+            content(string): Memory content. One fact per memory, concise, under 200 chars.
+            type(string): Memory type. Must be "short_term" or "long_term".
+            pinned(string): Only for long_term. "true" = always active every turn (rules, preferences, standing instructions). "false" = retrieved by semantic relevance only. Default "true".
+        """
+        if not self.memory_mgr:
+            return "Memory system is not available."
+        session_key = self.context_mgr.build_session_key(event)
+        # 解析 pinned 字符串
+        is_pinned = str(pinned).lower() in ("true", "1", "yes")
+        try:
+            from .memory.tools import save_memory_tool
+
+            return await save_memory_tool(
+                self.memory_mgr,
+                session_key,
+                content,
+                type,
+                source="tool",
+                pinned=is_pinned,
+            )
+        except Exception as e:
+            logger.error(f"[ChatEngine] save_memory 工具失败: {e}")
+            return f"Failed to save memory: {type(e).__name__}"
+
+    @filter.llm_tool(name="search_memory")
+    async def tool_search_memory(self, event: AstrMessageEvent, query: str, top_k="5"):
+        """Semantic search in long-term memory.
+        Short-term memory is always visible in the system prompt and does not need searching.
+
+        Args:
+            query(string): Search query text.
+            top_k(string): Number of results to return. Default 5.
+        """
+        if not self.memory_mgr:
+            return "Memory system is not available."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            from .memory.tools import search_memory_tool
+
+            k = int(top_k) if isinstance(top_k, str) else (top_k or 5)
+            return await search_memory_tool(self.memory_mgr, session_key, query, k)
+        except Exception as e:
+            logger.error(f"[ChatEngine] search_memory 工具失败: {e}")
+            return f"Search failed: {type(e).__name__}"
+
+    @filter.llm_tool(name="update_memory")
+    async def tool_update_memory(self, event: AstrMessageEvent, id: str, content: str):
+        """Update an existing memory. Automatically searches both short-term and long-term
+        storage by ID (short-term first, then long-term).
+
+        Args:
+            id(string): Memory ID (shown in brackets in the system prompt memories section).
+            content(string): New memory content. One fact, under 200 chars.
+        """
+        if not self.memory_mgr:
+            return "Memory system is not available."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            from .memory.tools import update_memory_tool
+
+            return await update_memory_tool(self.memory_mgr, session_key, id, content)
+        except Exception as e:
+            logger.error(f"[ChatEngine] update_memory 工具失败: {e}")
+            return f"Update failed: {type(e).__name__}"
+
+    @filter.llm_tool(name="delete_memory")
+    async def tool_delete_memory(self, event: AstrMessageEvent, id: str, type: str):
+        """Delete a specific memory by ID.
+
+        Args:
+            id(string): Memory ID to delete.
+            type(string): Memory type. Must be "short_term" or "long_term".
+        """
+        if not self.memory_mgr:
+            return "Memory system is not available."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            from .memory.tools import delete_memory_tool
+
+            return await delete_memory_tool(self.memory_mgr, session_key, id, type)
+        except Exception as e:
+            logger.error(f"[ChatEngine] delete_memory 工具失败: {e}")
+            return f"Delete failed: {type(e).__name__}"
+
+    # 主动回复工具 — LLM Tool Call
+
+    @filter.llm_tool(name="schedule_reply")
+    async def tool_schedule_reply(
+        self,
+        event: AstrMessageEvent,
+        delay_minutes: str,
+        reason: str,
+    ):
+        """Schedule a proactive message to be sent to the user after a delay.
+        Use this when you want to follow up, remind, or check in with the user later.
+
+        Args:
+            delay_minutes(string): Minutes to wait before sending. Min 1, max 1440 (24h).
+            reason(string): Why you want to follow up. Helps generate the right message.
+        """
+        if not self.proactive_mgr:
+            return "Proactive replies are not enabled."
+        session_key = self.context_mgr.build_session_key(event)
+        try:
+            mins = int(delay_minutes)
+            return await self.proactive_mgr.schedule_reply(
+                session_key,
+                mins,
+                reason,
+            )
+        except Exception as e:
+            logger.error(f"[ChatEngine] schedule_reply 工具失败: {e}")
+            return f"Schedule failed: {type(e).__name__}"
+
+    # 消息引用回复工具 — LLM Tool Call
+
+    @filter.llm_tool(name="reply_with_quote")
+    async def tool_reply_with_quote(
+        self,
+        event: AstrMessageEvent,
+        message_id: str,
+    ):
+        """Quote (reply to) a specific historical message from the conversation.
+        Use when your response directly addresses or answers a specific earlier message.
+        After calling this tool, generate your reply text as normal — it will be sent as a quoted reply.
+
+        Args:
+            message_id(string): The message ID to quote. Shown as [msg:ID] tag in context messages.
+        """
+        session_key = self.context_mgr.build_session_key(event)
+
+        # 验证 message_id 存在于当前会话上下文中
+        try:
+            messages = await self.context_mgr.load_context(session_key)
+            found = any(msg.get("message_id") == message_id for msg in messages)
+        except Exception:
+            found = False
+
+        if not found:
+            return f"Message ID '{message_id}' not found in current session context. Available IDs can be found in [msg:ID] tags."
+
+        self._pending_quotes[session_key] = message_id
+        logger.info(
+            f"[ChatEngine] 引用回复已准备: session={session_key}, "
+            f"quote_msg_id={message_id}"
+        )
+        return "Quote reply prepared. Now generate your response text — it will be sent as a quoted reply to that message."

@@ -1,0 +1,361 @@
+"""Memory manager — coordinates short-term, long-term, and auto-summarization."""
+
+import asyncio
+
+from astrbot.api import logger
+
+from ..utils.config import cfg_bool, cfg_float, cfg_int
+from .short_term import ShortTermMemoryStore
+from .summarizer import MemorySummarizer
+from .vector_store import LongTermMemoryStore
+
+
+class MemoryManager:
+    """记忆系统统一管理器 — 协调短期记忆、长期记忆和自动总结。"""
+
+    def __init__(
+        self,
+        config: dict,
+        data_dir: str,
+        embedding_getter=None,
+        rerank_getter=None,
+        provider_getter=None,
+    ):
+        self.config = config
+        self.data_dir = data_dir
+
+        # 使用 getter 函数动态获取 provider
+        # AstrBot 的插件加载先于 Provider 初始化，所以初始化时 provider 列表可能为空
+        # 每次实际使用时通过 getter 获取最新的 provider 实例
+        self._embedding_getter = embedding_getter
+        self._rerank_getter = rerank_getter
+        self._provider_getter = provider_getter
+
+        self.short_term: ShortTermMemoryStore = None
+        self.long_term: LongTermMemoryStore = None
+        self.summarizer: MemorySummarizer = None
+        # 每会话一把锁，防止同一会话的总结任务并发执行
+        self._summary_locks: dict[str, asyncio.Lock] = {}
+
+    async def initialize(self):
+        """初始化存储和总结器。"""
+        self.short_term = ShortTermMemoryStore(self.data_dir)
+        self.long_term = LongTermMemoryStore(
+            self.data_dir,
+            embedding_getter=self._embedding_getter,
+            rerank_getter=self._rerank_getter,
+        )
+        self.summarizer = MemorySummarizer(self.config)
+
+        # 注意：此时 AstrBot 的 Provider 可能尚未初始化
+        # 长期记忆的实际可用性在第一次使用时动态检测
+        logger.info("[Memory] 短期记忆: 已启用")
+        logger.info("[Memory] 长期记忆: 延迟检测（首次使用时确认 EmbeddingProvider）")
+
+    # 配置读取辅助
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        return cfg_int(self.config, key, default)
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        return cfg_float(self.config, key, default)
+
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        return cfg_bool(self.config, key, default)
+
+    # System Prompt 注入
+
+    async def get_memory_prompt(self, session_key: str, query: str) -> str:
+        """获取格式化的记忆文本用于注入 system prompt。
+
+        Returns:
+            格式化的记忆文本，无记忆时返回空字符串。
+        """
+        sections = []
+
+        # 短期记忆 — 全量注入
+        short_memories = await self.short_term.list_memories(session_key)
+        if short_memories:
+            lines = []
+            for m in short_memories:
+                lines.append(f"- [id:{m['id']}] {m['content']}")
+            sections.append("### Short-Term Memory\n" + "\n".join(lines))
+            logger.debug(f"[Memory] 注入 {len(short_memories)} 条短期记忆")
+
+        # 长期记忆 — 置顶记忆（始终注入）+ 语义检索
+        if self.long_term.available:
+            pinned_ids: set[str] = set()
+
+            # 置顶记忆：不依赖 query，每次都注入
+            try:
+                pinned = await self.long_term.list_pinned(session_key)
+                if pinned:
+                    lines = []
+                    for m in pinned:
+                        pinned_ids.add(m["id"])
+                        lines.append(f"- [id:{m['id']}] {m['content']}")
+                    sections.append(
+                        "### Pinned Long-Term Memory (Always Active)\n"
+                        + "\n".join(lines)
+                    )
+                    logger.info(f"[Memory] 注入 {len(pinned)} 条置顶长期记忆")
+            except Exception as e:
+                logger.warning(f"[Memory] 获取置顶长期记忆失败: {e}")
+
+            # 语义检索：根据 query 检索相关记忆
+            if query:
+                try:
+                    results = await self.long_term.search(
+                        session_key,
+                        query=query,
+                        top_k=self._cfg_int("long_term_retrieval_top_k", 5),
+                        fetch_k=self._cfg_int("long_term_fetch_k", 20),
+                        enable_rerank=self._cfg_bool("long_term_enable_rerank", True),
+                        similarity_threshold=self._cfg_float(
+                            "long_term_similarity_threshold", 0.3
+                        ),
+                    )
+                    if results:
+                        # 去重：排除已经作为置顶注入的
+                        filtered = [r for r in results if r["id"] not in pinned_ids]
+                        if filtered:
+                            lines = []
+                            for r in filtered:
+                                lines.append(f"- [id:{r['id']}] {r['content']}")
+                            sections.append(
+                                "### Relevant Long-Term Memory\n" + "\n".join(lines)
+                            )
+                            logger.info(
+                                f"[Memory] 检索到 {len(filtered)} 条相关长期记忆"
+                            )
+                    else:
+                        logger.debug("[Memory] 未检索到相关长期记忆")
+                except Exception as e:
+                    logger.warning(f"[Memory] 检索长期记忆失败: {e}")
+
+        if not sections:
+            return ""
+
+        return "## Memories\n\n" + "\n\n".join(sections)
+
+    # CRUD 操作
+
+    async def save_memory(
+        self,
+        session_key: str,
+        content: str,
+        mem_type: str,
+        source: str = "tool",
+        pinned: bool = False,
+    ) -> str | None:
+        """保存记忆，返回 ID。"""
+        if mem_type == "short_term":
+            return await self.short_term.add(session_key, content, source=source)
+        elif mem_type == "long_term":
+            return await self.long_term.save(
+                session_key, content, source=source, pinned=pinned
+            )
+        return None
+
+    async def search_long_term(
+        self, session_key: str, query: str, top_k: int = 5
+    ) -> list[dict]:
+        """搜索长期记忆。"""
+        return await self.long_term.search(
+            session_key,
+            query=query,
+            top_k=top_k,
+            fetch_k=self._cfg_int("long_term_fetch_k", 20),
+            enable_rerank=self._cfg_bool("long_term_enable_rerank", True),
+            similarity_threshold=self._cfg_float("long_term_similarity_threshold", 0.3),
+        )
+
+    async def update_memory(
+        self,
+        session_key: str,
+        mem_id: str,
+        content: str,
+        pinned: bool | None = None,
+    ) -> bool:
+        """更新记忆（自动查找短期/长期）。"""
+        ok = await self.short_term.update(session_key, mem_id, content)
+        if ok:
+            return True
+        return await self.long_term.update(session_key, mem_id, content, pinned=pinned)
+
+    async def delete_memory(self, session_key: str, mem_id: str, mem_type: str) -> bool:
+        """删除指定记忆。"""
+        if mem_type == "short_term":
+            return await self.short_term.delete(session_key, mem_id)
+        elif mem_type == "long_term":
+            return await self.long_term.delete(session_key, mem_id)
+        return False
+
+    # WebUI 列表
+
+    async def list_short_term(self, session_key: str) -> list[dict]:
+        return await self.short_term.list_memories(session_key)
+
+    async def list_long_term(self, session_key: str) -> list[dict]:
+        return await self.long_term.list_all(session_key)
+
+    # 自动总结触发
+
+    def _get_summary_lock(self, session_key: str) -> asyncio.Lock:
+        """获取（或创建）指定会话的总结锁。"""
+        lock = self._summary_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._summary_locks[session_key] = lock
+        return lock
+
+    async def on_turn_complete(
+        self, session_key: str, provider, persona_mgr, context_mgr
+    ) -> None:
+        """轮数 +1，检查是否需要触发自动总结。"""
+        if not self._cfg_bool("enable_auto_summary", True):
+            return
+
+        turn = await self.short_term.increment_turn(session_key)
+        interval = self._cfg_int("memory_summary_interval", 5)
+        if interval <= 0:
+            return
+
+        data = await self.short_term.load(session_key)
+        last = data.get("last_summary_turn", 0)
+        gap = turn - last
+
+        if gap >= interval:
+            logger.info(
+                f"[Memory] 达到总结间隔 (gap={gap}>={interval}), "
+                f"触发自动总结 (turn={turn})"
+            )
+            asyncio.create_task(
+                self._run_summary(session_key, provider, persona_mgr, context_mgr)
+            )
+
+    async def on_context_compressed(
+        self, session_key: str, provider, persona_mgr, context_mgr
+    ) -> None:
+        """上下文压缩触发时执行总结。"""
+        if not self._cfg_bool("enable_auto_summary", True):
+            return
+        logger.info("[Memory] 上下文压缩触发，执行记忆总结")
+        asyncio.create_task(
+            self._run_summary(session_key, provider, persona_mgr, context_mgr)
+        )
+
+    async def _run_summary(
+        self, session_key: str, provider, persona_mgr, context_mgr
+    ) -> None:
+        """执行一次自动总结。
+
+        使用 per-session asyncio.Lock 保证互斥：同一会话同时只有一个总结任务
+        在临界区内执行。如果排队期间另一个任务已完成总结，通过二次检查
+        last_summary_turn 跳过重复工作。
+        """
+        lock = self._get_summary_lock(session_key)
+
+        async with lock:
+            try:
+                data = await self.short_term.load(session_key)
+
+                # 获取锁后二次检查：排队等待期间其他任务可能已完成总结
+                turn = data.get("turn_count", 0)
+                last = data.get("last_summary_turn", 0)
+                gap = turn - last
+                interval = self._cfg_int("memory_summary_interval", 5)
+                if interval > 0 and gap < interval:
+                    logger.debug(
+                        f"[Memory] 总结已由其他任务完成，跳过 "
+                        f"(turn={turn}, gap={gap}<{interval})"
+                    )
+                    return
+
+                memories = data.get("memories", [])
+                recent_text = await self._get_recent_context(session_key, context_mgr)
+                if not memories and not recent_text:
+                    logger.debug("[Memory] 无记忆且无上下文，跳过总结")
+                    return
+
+                persona_prompt = ""
+                if persona_mgr:
+                    try:
+                        persona_prompt = await persona_mgr.get_system_prompt()
+                    except Exception:
+                        pass
+
+                _provider = provider
+                if not _provider and self._provider_getter:
+                    try:
+                        _provider = self._provider_getter()
+                    except Exception:
+                        pass
+
+                result = await self.summarizer.summarize(
+                    short_term_data=data,
+                    recent_context_text=recent_text or "",
+                    persona_prompt=persona_prompt,
+                    provider=_provider,
+                )
+
+                if result:
+                    await self.short_term.replace_memories(
+                        session_key,
+                        keeps=result.get("keep", []),
+                        deletes=result.get("delete", []),
+                        adds=result.get("add", []),
+                        updates=result.get("update", {}),
+                    )
+                    # 更新 last_summary_turn
+                    current_data = await self.short_term.load(session_key)
+                    await self.short_term.set_last_summary_turn(
+                        session_key, current_data.get("turn_count", 0)
+                    )
+
+            except Exception as e:
+                logger.error(f"[Memory] 自动总结失败 [{session_key}]: {e}")
+
+    async def _get_recent_context(self, session_key: str, context_mgr) -> str:
+        """获取最近几轮对话的纯文本。"""
+        if not context_mgr:
+            return ""
+        try:
+            recent_turns = self._cfg_int("memory_summary_recent_turns", 5)
+            messages = await context_mgr.load_context(session_key)
+
+            # 只取最近的 user/assistant 消息
+            recent = []
+            for msg in reversed(messages):
+                role = msg.get("role", "")
+                if role in ("user", "assistant"):
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        )
+                    if content:
+                        recent.append(f"[{role}]: {content}")
+                if len(recent) >= recent_turns * 2:
+                    break
+
+            return "\n".join(reversed(recent))
+        except Exception:
+            return ""
+
+    # 生命周期
+
+    async def on_session_delete(self, session_key: str) -> None:
+        """会话删除时，关闭该 session 的 FaissVecDB 实例（释放内存），但保留记忆数据。"""
+        # 短期记忆：保留文件（不调用 delete_session）
+        # 长期记忆：关闭实例但保留向量数据（不删除目录）
+        await self.long_term.close(session_key)
+        self._summary_locks.pop(session_key, None)
+        logger.info(f"[Memory] 会话 {session_key} 已关闭，记忆数据已保留")
+
+    async def close(self) -> None:
+        """关闭所有资源。"""
+        if self.long_term:
+            await self.long_term.close_all()

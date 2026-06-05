@@ -1,6 +1,8 @@
 """Independent aiohttp Web server for the Chat Engine plugin management UI."""
 
 import json
+import secrets
+import time
 import traceback
 from copy import deepcopy
 from pathlib import Path
@@ -8,6 +10,8 @@ from pathlib import Path
 from aiohttp import web
 
 from astrbot.api import logger
+
+from ..utils.config import cfg_bool
 
 
 class ChatWebServer:
@@ -20,11 +24,13 @@ class ChatWebServer:
         self.runner = None
         self.site = None
         self.static_dir = Path(__file__).parent / "static"
+        self._auth_tokens = {}  # token -> {"username": str, "expires_at": float}
+        self._last_token_cleanup = time.time()  # 上次清理过期 token 的时间
         self._setup_routes()
-        self._setup_cors()
+        self._setup_middlewares()
 
-    def _setup_cors(self):
-        """设置 CORS 中间件"""
+    def _setup_middlewares(self):
+        """设置 CORS 和认证中间件"""
 
         @web.middleware
         async def cors_middleware(request, handler):
@@ -35,17 +41,57 @@ class ChatWebServer:
                     response = await handler(request)
                 except web.HTTPException as ex:
                     response = ex
-            response.headers["Access-Control-Allow-Origin"] = "*"
+            allowed_origin = self.plugin.config.get("web_cors_origin", "*")
+            response.headers["Access-Control-Allow-Origin"] = allowed_origin
             response.headers["Access-Control-Allow-Methods"] = (
                 "GET, POST, PUT, DELETE, OPTIONS"
             )
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, Authorization"
+            )
             return response
 
+        @web.middleware
+        async def auth_middleware(request, handler):
+            # OPTIONS preflight — 直接放行
+            if request.method == "OPTIONS":
+                return await handler(request)
+
+            # 公开路径 — 无需认证
+            public_paths = {
+                "/login",
+                "/login.html",
+                "/api/auth/login",
+                "/api/auth/status",
+            }
+            if request.path in public_paths:
+                return await handler(request)
+
+            # 认证未启用 — 直接放行
+            if not self._is_auth_enabled():
+                return await handler(request)
+
+            # 验证 token
+            if self._check_auth(request):
+                return await handler(request)
+
+            # API 请求返回 401
+            if request.path.startswith("/api/"):
+                return web.json_response({"error": "未授权"}, status=401)
+
+            # 页面请求重定向到登录页
+            raise web.HTTPFound("/login")
+
         self.app.middlewares.append(cors_middleware)
+        self.app.middlewares.append(auth_middleware)
 
     def _setup_routes(self):
         """注册所有 API 路由"""
+        #  认证 API
+        self.app.router.add_post("/api/auth/login", self._api_auth_login)
+        self.app.router.add_get("/api/auth/status", self._api_auth_status)
+        self.app.router.add_post("/api/auth/logout", self._api_auth_logout)
+
         #  人格管理
         self.app.router.add_get("/api/personas", self._api_list_personas)
         self.app.router.add_post("/api/personas", self._api_create_persona)
@@ -73,7 +119,45 @@ class ChatWebServer:
         self.app.router.add_post("/api/tools/{name}/enable", self._api_enable_tool)
         self.app.router.add_post("/api/tools/{name}/disable", self._api_disable_tool)
 
+        #  记忆管理
+        self.app.router.add_get(
+            "/api/memories/{key:.*}/short", self._api_list_short_term_memories
+        )
+        self.app.router.add_get(
+            "/api/memories/{key:.*}/long", self._api_list_long_term_memories
+        )
+        self.app.router.add_post(
+            "/api/memories/{key:.*}/short", self._api_add_short_term_memory
+        )
+        self.app.router.add_post(
+            "/api/memories/{key:.*}/long", self._api_add_long_term_memory
+        )
+        self.app.router.add_put(
+            "/api/memories/{key:.*}/short/{id}", self._api_update_short_term_memory
+        )
+        self.app.router.add_put(
+            "/api/memories/{key:.*}/long/{id}", self._api_update_long_term_memory
+        )
+        self.app.router.add_delete(
+            "/api/memories/{key:.*}/short/{id}", self._api_delete_short_term_memory
+        )
+        self.app.router.add_delete(
+            "/api/memories/{key:.*}/long/{id}", self._api_delete_long_term_memory
+        )
+
+        #  主动回复管理
+        self.app.router.add_get(
+            "/api/proactive/sessions", self._api_list_proactive_sessions
+        )
+        self.app.router.add_put(
+            "/api/proactive/{key:.*}/timeout", self._api_set_proactive_timeout
+        )
+        self.app.router.add_put(
+            "/api/proactive/{key:.*}/round", self._api_set_proactive_round
+        )
+
         #  前端页面
+        self.app.router.add_get("/login", self._serve_login)
         self.app.router.add_get("/", self._serve_index)
         self.app.router.add_get("/{filename}", self._serve_static)
 
@@ -119,7 +203,9 @@ class ChatWebServer:
         )
 
     async def _api_create_persona(self, request: web.Request) -> web.Response:
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         name = data.get("name", "").strip()
         if not name:
             return web.json_response({"error": "名称不能为空"}, status=400)
@@ -146,7 +232,9 @@ class ChatWebServer:
 
     async def _api_update_persona(self, request: web.Request) -> web.Response:
         persona_id = int(request.match_info["id"])
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
 
         kwargs = {}
         if "name" in data:
@@ -217,6 +305,7 @@ class ChatWebServer:
         ok = await self.plugin.context_mgr.repo.delete_session(session_key)
         if not ok:
             return web.json_response({"error": "会话不存在"}, status=404)
+        # 记忆不随会话删除，保留以供后续会话复用
         return web.json_response({"ok": True})
 
     async def _api_llm_preview(self, request: web.Request) -> web.Response:
@@ -345,6 +434,20 @@ class ChatWebServer:
             "clean_brackets",
             "clean_trailing_chars",
             "trailing_chars_pattern",
+            "enable_memory",
+            "short_term_max_count",
+            "short_term_max_chars",
+            "long_term_max_count",
+            "long_term_retrieval_top_k",
+            "long_term_fetch_k",
+            "long_term_enable_rerank",
+            "long_term_similarity_threshold",
+            "memory_summary_interval",
+            "memory_summary_recent_turns",
+            "enable_auto_summary",
+            "enable_proactive",
+            "proactive_timeout_minutes",
+            "proactive_round_interval",
         ]
         config_data = {}
         for key in config_keys:
@@ -352,7 +455,9 @@ class ChatWebServer:
         return web.json_response(config_data)
 
     async def _api_update_config(self, request: web.Request) -> web.Response:
-        data = await request.json()
+        data, err = await self._safe_json(request)
+        if err:
+            return err
         allowed_keys = [
             "compression_mode",
             "max_turns",
@@ -374,6 +479,20 @@ class ChatWebServer:
             "clean_brackets",
             "clean_trailing_chars",
             "trailing_chars_pattern",
+            "enable_memory",
+            "short_term_max_count",
+            "short_term_max_chars",
+            "long_term_max_count",
+            "long_term_retrieval_top_k",
+            "long_term_fetch_k",
+            "long_term_enable_rerank",
+            "long_term_similarity_threshold",
+            "memory_summary_interval",
+            "memory_summary_recent_turns",
+            "enable_auto_summary",
+            "enable_proactive",
+            "proactive_timeout_minutes",
+            "proactive_round_interval",
         ]
         for key in allowed_keys:
             if key in data:
@@ -410,6 +529,313 @@ class ChatWebServer:
         name = request.match_info["name"]
         await self.plugin.tool_mgr.disable_tool(name)
         return web.json_response({"ok": True})
+
+    # 记忆 API
+
+    def _get_memory_mgr(self):
+        """获取记忆管理器，未初始化时返回 None"""
+        return getattr(self.plugin, "memory_mgr", None)
+
+    async def _api_list_short_term_memories(self, request: web.Request) -> web.Response:
+        mgr = self._get_memory_mgr()
+        if not mgr:
+            return web.json_response({"memories": []})
+        session_key = request.match_info["key"]
+        try:
+            memories = await mgr.list_short_term(session_key)
+            return web.json_response({"memories": memories})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_list_long_term_memories(self, request: web.Request) -> web.Response:
+        mgr = self._get_memory_mgr()
+        if not mgr:
+            return web.json_response({"memories": []})
+        session_key = request.match_info["key"]
+        try:
+            memories = await mgr.list_long_term(session_key)
+            return web.json_response({"memories": memories})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_add_short_term_memory(self, request: web.Request) -> web.Response:
+        mgr = self._get_memory_mgr()
+        if not mgr:
+            return web.json_response({"error": "记忆系统未启用"}, status=400)
+        session_key = request.match_info["key"]
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        content = data.get("content", "").strip()
+        if not content:
+            return web.json_response({"error": "内容不能为空"}, status=400)
+        try:
+            mid = await mgr.save_memory(
+                session_key, content, "short_term", source="manual"
+            )
+            return web.json_response({"ok": True, "id": mid})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_add_long_term_memory(self, request: web.Request) -> web.Response:
+        mgr = self._get_memory_mgr()
+        if not mgr:
+            return web.json_response({"error": "记忆系统未启用"}, status=400)
+        session_key = request.match_info["key"]
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        content = data.get("content", "").strip()
+        pinned = bool(data.get("pinned", False))
+        if not content:
+            return web.json_response({"error": "内容不能为空"}, status=400)
+        try:
+            mid = await mgr.save_memory(
+                session_key,
+                content,
+                "long_term",
+                source="manual",
+                pinned=pinned,
+            )
+            return web.json_response({"ok": True, "id": mid})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_update_short_term_memory(self, request: web.Request) -> web.Response:
+        mgr = self._get_memory_mgr()
+        if not mgr:
+            return web.json_response({"error": "记忆系统未启用"}, status=400)
+        session_key = request.match_info["key"]
+        mem_id = request.match_info["id"]
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        content = data.get("content", "").strip()
+        if not content:
+            return web.json_response({"error": "内容不能为空"}, status=400)
+        try:
+            ok = await mgr.update_memory(session_key, mem_id, content)
+            return web.json_response({"ok": ok})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_update_long_term_memory(self, request: web.Request) -> web.Response:
+        mgr = self._get_memory_mgr()
+        if not mgr:
+            return web.json_response({"error": "记忆系统未启用"}, status=400)
+        session_key = request.match_info["key"]
+        mem_id = request.match_info["id"]
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        content = data.get("content", "").strip()
+        if not content:
+            return web.json_response({"error": "内容不能为空"}, status=400)
+        # pinned: true/false 显式设置，null/缺省表示不修改
+        pinned_raw = data.get("pinned")
+        pinned = bool(pinned_raw) if pinned_raw is not None else None
+        try:
+            ok = await mgr.update_memory(
+                session_key,
+                mem_id,
+                content,
+                pinned=pinned,
+            )
+            return web.json_response({"ok": ok})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_delete_short_term_memory(self, request: web.Request) -> web.Response:
+        mgr = self._get_memory_mgr()
+        if not mgr:
+            return web.json_response({"error": "记忆系统未启用"}, status=400)
+        session_key = request.match_info["key"]
+        mem_id = request.match_info["id"]
+        try:
+            ok = await mgr.delete_memory(session_key, mem_id, "short_term")
+            if not ok:
+                return web.json_response({"error": "记忆不存在"}, status=404)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_delete_long_term_memory(self, request: web.Request) -> web.Response:
+        mgr = self._get_memory_mgr()
+        if not mgr:
+            return web.json_response({"error": "记忆系统未启用"}, status=400)
+        session_key = request.match_info["key"]
+        mem_id = request.match_info["id"]
+        try:
+            ok = await mgr.delete_memory(session_key, mem_id, "long_term")
+            if not ok:
+                return web.json_response({"error": "记忆不存在"}, status=404)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    # 主动回复 API
+
+    def _get_proactive_mgr(self):
+        return getattr(self.plugin, "proactive_mgr", None)
+
+    async def _api_list_proactive_sessions(self, request: web.Request) -> web.Response:
+        mgr = self._get_proactive_mgr()
+        if not mgr:
+            return web.json_response({"sessions": []})
+        try:
+            sessions = await mgr.list_sessions()
+            return web.json_response({"sessions": sessions})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_set_proactive_timeout(self, request: web.Request) -> web.Response:
+        mgr = self._get_proactive_mgr()
+        if not mgr:
+            return web.json_response({"error": "主动回复未启用"}, status=400)
+        session_key = request.match_info["key"]
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        enabled = bool(data.get("enabled", False))
+        try:
+            await mgr.set_timeout_enabled(session_key, enabled)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_set_proactive_round(self, request: web.Request) -> web.Response:
+        mgr = self._get_proactive_mgr()
+        if not mgr:
+            return web.json_response({"error": "主动回复未启用"}, status=400)
+        session_key = request.match_info["key"]
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        enabled = bool(data.get("enabled", False))
+        try:
+            await mgr.set_round_enabled(session_key, enabled)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    # 认证
+
+    @staticmethod
+    async def _safe_json(
+        request: web.Request,
+    ) -> tuple[dict | None, web.Response | None]:
+        """安全解析 JSON body。成功返回 (data, None)，失败返回 (None, error_response)。"""
+        try:
+            return await request.json(), None
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return None, web.json_response({"error": "无效的 JSON 格式"}, status=400)
+
+    def _is_auth_enabled(self) -> bool:
+        """检查是否启用了 WebUI 认证"""
+        return cfg_bool(self.plugin.config, "web_auth_enabled", False)
+
+    def _check_auth(self, request: web.Request) -> bool:
+        """验证请求的认证信息（支持 Authorization header 和 Cookie）"""
+        # 1. Authorization header
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if self._validate_token(token):
+                return True
+
+        # 2. Cookie
+        token = request.cookies.get("chatengine_token", "")
+        if token and self._validate_token(token):
+            return True
+
+        return False
+
+    def _validate_token(self, token: str) -> bool:
+        """验证 token 是否有效且未过期，顺便清理过期 token。"""
+        now = time.time()
+        # 每 60 分钟执行一次批量清理，防止过期 token 无限堆积
+        if now - self._last_token_cleanup > 3600:
+            self._last_token_cleanup = now
+            self._cleanup_expired_tokens(now)
+
+        if token in self._auth_tokens:
+            info = self._auth_tokens[token]
+            if info["expires_at"] > now:
+                return True
+            del self._auth_tokens[token]
+        return False
+
+    def _cleanup_expired_tokens(self, now: float | None = None) -> int:
+        """清理所有过期 token，返回清理数量。"""
+        if now is None:
+            now = time.time()
+        expired = [
+            t for t, info in self._auth_tokens.items() if info["expires_at"] <= now
+        ]
+        for t in expired:
+            del self._auth_tokens[t]
+        if expired:
+            logger.debug(f"[WebUI] 清理 {len(expired)} 个过期 token")
+        return len(expired)
+
+    async def _api_auth_login(self, request: web.Request) -> web.Response:
+        """登录接口 — 验证用户名密码，签发 token 并写入 Cookie"""
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        username = data.get("username", "")
+        password = data.get("password", "")
+
+        expected_username = self.plugin.config.get("web_username", "admin")
+        expected_password = self.plugin.config.get("web_password", "")
+
+        if username == expected_username and password == expected_password:
+            token = secrets.token_hex(32)
+            self._auth_tokens[token] = {
+                "username": username,
+                "expires_at": time.time() + 86400,  # 24 小时
+            }
+            resp = web.json_response({"ok": True, "token": token})
+            resp.set_cookie(
+                "chatengine_token",
+                token,
+                max_age=86400,
+                httponly=True,
+                samesite="Lax",
+                path="/",
+            )
+            return resp
+
+        return web.json_response({"error": "用户名或密码错误"}, status=401)
+
+    async def _api_auth_status(self, request: web.Request) -> web.Response:
+        """查询认证状态 — 前端用于判断是否需要跳转登录页"""
+        enabled = self._is_auth_enabled()
+        authenticated = not enabled or self._check_auth(request)
+        return web.json_response(
+            {
+                "enabled": enabled,
+                "authenticated": authenticated,
+            }
+        )
+
+    async def _api_auth_logout(self, request: web.Request) -> web.Response:
+        """登出接口 — 使当前 token 失效并清除 Cookie"""
+        token = ""
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        if not token:
+            token = request.cookies.get("chatengine_token", "")
+        if token:
+            self._auth_tokens.pop(token, None)
+        resp = web.json_response({"ok": True})
+        resp.del_cookie("chatengine_token", path="/")
+        return resp
+
+    async def _serve_login(self, request: web.Request) -> web.Response:
+        """提供登录页面"""
+        return await self._serve_file("login.html")
 
     # 静态文件
 
