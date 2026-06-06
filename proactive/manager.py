@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import random
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -73,7 +74,8 @@ class ProactiveManager:
         self._registry_dir = Path(data_dir) / "proactive"
         self._registry_dir.mkdir(parents=True, exist_ok=True)
         self._registry_path = self._registry_dir / "registry.json"
-        # {session_key: {umo, timeout_enabled, round_enabled, round_count, last_message_at}}
+        # {session_key: {umo, timeout_enabled, round_enabled, round_count,
+        #   last_message_at, consecutive_proactive_count}}
         self._sessions: dict[str, dict] = {}
 
         self._scheduled_tasks: dict[str, asyncio.Task] = {}
@@ -140,6 +142,7 @@ class ProactiveManager:
                 "round_enabled": False,
                 "round_count": 0,
                 "last_message_at": self._utcnow(),
+                "consecutive_proactive_count": 0,
             }
         else:
             if umo:
@@ -155,12 +158,17 @@ class ProactiveManager:
         self._mark_dirty()
 
     async def on_message(self, session_key: str):
-        """收到消息时调用：更新时间戳 + 检查轮数触发。"""
+        """收到消息时调用：更新时间戳 + 重置连续主动计数 + 检查轮数触发。"""
         session = self._sessions.get(session_key)
         if not session:
             return
 
         session["last_message_at"] = self._utcnow()
+
+        # 用户主动发言 → 重置连续主动回复计数
+        if session.get("consecutive_proactive_count", 0) != 0:
+            session["consecutive_proactive_count"] = 0
+            self._mark_dirty()
 
         # 轮数触发 — 仅群聊（私聊每条都触发回复，无需轮数触发）
         is_group = ":private:" not in session_key
@@ -420,7 +428,12 @@ class ProactiveManager:
     # 后台超时监控
 
     async def _timeout_monitor(self):
-        """每 60 秒检查一次超时触发，并顺便 flush 脏数据。"""
+        """每 60 秒检查一次超时触发，并顺便 flush 脏数据。
+
+        改进：不再 100% 触发，而是结合概率和最大连续次数：
+        - proactive_timeout_probability: 每次超时的触发概率 (0.0~1.0, 默认 0.3)
+        - proactive_timeout_max_consecutive: 连续主动回复最大次数 (默认 2，0=不限)
+        """
         while self._running:
             try:
                 await asyncio.sleep(60)
@@ -432,9 +445,24 @@ class ProactiveManager:
                 if timeout_min <= 0:
                     continue
 
+                # 概率触发 (0~100, 默认 30)
+                probability = self._cfg_int("proactive_timeout_probability", 30)
+                probability = max(0, min(probability, 100)) / 100.0
+
+                # 最大连续次数 (默认 2, 0=不限)
+                max_consecutive = self._cfg_int("proactive_timeout_max_consecutive", 2)
+
                 now = datetime.now(timezone.utc)
                 for key, session in list(self._sessions.items()):
                     if not session.get("timeout_enabled"):
+                        continue
+
+                    # 连续次数已达上限 → 跳过，等用户发消息后重置
+                    if (
+                        max_consecutive > 0
+                        and session.get("consecutive_proactive_count", 0)
+                        >= max_consecutive
+                    ):
                         continue
 
                     last_str = session.get("last_message_at", "")
@@ -447,12 +475,22 @@ class ProactiveManager:
                             last = last.replace(tzinfo=timezone.utc)
                         elapsed_min = (now - last).total_seconds() / 60
                         if elapsed_min >= timeout_min:
+                            # 概率判定：未命中则仅更新时间戳，不触发
+                            if random.random() > probability:
+                                session["last_message_at"] = self._utcnow()
+                                self._mark_dirty()
+                                continue
+
                             reason = (
                                 f"用户已 {int(elapsed_min)} 分钟未发消息"
                                 f"（超时阈值 {timeout_min} 分钟）"
                             )
                             # 更新时间戳防止重复触发
                             session["last_message_at"] = self._utcnow()
+                            # 累加连续主动回复计数
+                            session["consecutive_proactive_count"] = (
+                                session.get("consecutive_proactive_count", 0) + 1
+                            )
                             await self._save_registry()
                             asyncio.create_task(self._send_proactive(key, reason))
                     except Exception:

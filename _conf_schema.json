@@ -248,6 +248,18 @@
         "default": 30,
         "hint": "用户未发言超过此分钟数后，AI 主动发起对话。需在会话设置中单独启用。"
     },
+    "proactive_timeout_probability": {
+        "description": "超时主动发言触发概率 (%)",
+        "type": "int",
+        "default": 30,
+        "hint": "每次超时检查命中时，以此概率(0~100)决定是否实际触发。值越低越不活跃，100 则每次必定触发。"
+    },
+    "proactive_timeout_max_consecutive": {
+        "description": "超时主动发言最大连续次数",
+        "type": "int",
+        "default": 2,
+        "hint": "连续主动回复的最大次数，达到后不再触发直到用户再次发言。0 表示不限制。"
+    },
     "proactive_round_interval": {
         "description": "N 轮触发回复（仅群聊）",
         "type": "int",
