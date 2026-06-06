@@ -39,7 +39,7 @@ from .web.server import ChatWebServer
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
     "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
-    "1.2.0",
+    "1.3.0",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""

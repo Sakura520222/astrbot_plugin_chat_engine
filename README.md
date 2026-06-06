@@ -33,12 +33,22 @@
 
 ### 主动回复
 - **超时主动发言**: 用户未发言超过配置分钟数后，AI 主动发起对话
+  - 支持触发概率控制，按概率决定是否实际触发，避免过于频繁
+  - 支持最大连续次数限制，连续主动回复达到上限后暂停直到用户再次发言
 - **N 轮触发回复**: 群聊中每收到 N 条消息（含被动消息）触发一次主动回复
 - **定时回复**: `schedule_reply` LLM Tool，支持 LLM 主动安排延迟回复（提醒、跟进等）
 - **消息引用回复**: `reply_with_quote` LLM Tool，支持引用上下文中特定历史消息进行回复
 - 主动回复支持文本清洗与分段发送
 - 区分私聊和群聊场景的主动消息后缀
 - WebUI 会话级主动回复设置控制
+
+### 命令执行
+- LLM 可通过自然语言调用其他插件注册的命令
+- 自动扫描所有已注册命令并生成结构化指引注入 System Prompt
+- 尊重每个命令自身的权限定义（admin / member / everyone）
+- LLM 工具 `list_plugins`：列出所有提供命令的插件
+- LLM 工具 `list_commands`：按插件名和关键词筛选可用命令
+- LLM 工具 `execute_command`：实际执行指定命令并返回结果
 
 ### 人格管理
 - 完全独立于 AstrBot 自带的人格系统
@@ -124,7 +134,10 @@
 | `enable_auto_summary` | `true` | 启用自动总结 |
 | `enable_proactive` | `false` | 启用主动回复 |
 | `proactive_timeout_minutes` | `30` | 超时主动发言分钟数 |
+| `proactive_timeout_probability` | `30` | 超时主动发言触发概率 (%)，100 必定触发 |
+| `proactive_timeout_max_consecutive` | `2` | 主动回复最大连续次数，0 不限制 |
 | `proactive_round_interval` | `0` | N 轮触发回复（仅群聊，0 禁用） |
+| `enable_command_execution` | `false` | 启用命令执行，LLM 可执行其他插件命令 |
 | `web_port` | `8765` | WebUI 端口 |
 | `web_auth_enabled` | `false` | 启用 WebUI 登录认证 |
 | `web_username` | `admin` | WebUI 登录用户名 |
@@ -161,7 +174,8 @@ astrbot_plugin_chat_engine/
 │   └── manager.py             # CRUD + 活跃人格
 ├── tools/                     # 工具扫描与管理
 │   ├── scanner.py             # 扫描所有已注册工具
-│   └── manager.py             # 启用/禁用状态
+│   ├── manager.py             # 启用/禁用状态
+│   └── command_dispatcher.py  # 命令扫描与分发 (LLM 自然语言执行插件命令)
 └── web/                       # WebUI
     ├── server.py              # aiohttp REST API (含 LLM 预览 + 记忆管理 + 登录认证)
     └── static/                # 前端 HTML/CSS/JS
@@ -184,6 +198,7 @@ astrbot_plugin_chat_engine/
 - **记忆向量检索**: 长期记忆通过 Embedding 向量化存储，支持语义检索和可选 Rerank 重排
 - **记忆并发控制**: 自动总结使用会话级 `asyncio.Lock`，后台异步执行不阻塞消息处理
 - **动态 Provider 获取**: 记忆管理器通过 Getter 函数在运行时动态获取 Provider，解决加载时序问题
+- **命令执行分发**: `CommandDispatcher` 扫描所有已注册命令，生成结构化指引注入 System Prompt，LLM 通过工具调用触发实际执行；自动跳过未激活插件，尊重命令权限定义
 
 ## 兼容性
 
