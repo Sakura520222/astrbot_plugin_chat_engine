@@ -58,7 +58,9 @@ class ChatEnginePlugin(Star):
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
-        self._pending_images: dict[str, list[dict]] = {}  # {session_key: [image content parts]}
+        self._pending_images: dict[
+            str, list[dict]
+        ] = {}  # {session_key: [image content parts]}
         self._group_info_cache: dict[str, tuple[float, str, str]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card), TTL=300s
 
@@ -206,10 +208,7 @@ class ChatEnginePlugin(Star):
                                         cached_bot_card = (
                                             member.card
                                             if getattr(member, "card", None)
-                                            else (
-                                                getattr(member, "nickname", "")
-                                                or ""
-                                            )
+                                            else (getattr(member, "nickname", "") or "")
                                         )
                                         break
                     except Exception:
@@ -865,14 +864,15 @@ class ChatEnginePlugin(Star):
                     img_msg = {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "[系统注入: 以下是你请求查看的图片]"},
+                            {
+                                "type": "text",
+                                "text": "[系统注入: 以下是你请求查看的图片]",
+                            },
                         ]
                         + pending_imgs,
                     }
                     current_contexts.append(img_msg)
-                    logger.info(
-                        f"[ChatEngine] 注入 {len(pending_imgs)} 张图片到上下文"
-                    )
+                    logger.info(f"[ChatEngine] 注入 {len(pending_imgs)} 张图片到上下文")
 
         # 达到最大轮数，做一次无工具的最终调用
         logger.warning("[ChatEngine] 达到最大工具调用轮数，进行最终调用")
@@ -1494,7 +1494,10 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             return "No images found in this message (images may have been lost or expired)."
 
         # 暂存图片，等待 _llm_call_with_tools 注入
-        self._pending_images[session_key] = image_parts
+        # 使用 extend 追加而非覆盖，支持同一轮多次调用 view_image
+        if session_key not in self._pending_images:
+            self._pending_images[session_key] = []
+        self._pending_images[session_key].extend(image_parts)
         logger.info(
             f"[ChatEngine] 图片查看请求: session={session_key}, "
             f"msg_id={message_id}, images={len(image_parts)}"
