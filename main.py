@@ -15,6 +15,8 @@ import copy
 import inspect
 import json
 import re
+import time as _time
+from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -56,6 +58,8 @@ class ChatEnginePlugin(Star):
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
+        self._group_info_cache: dict[str, tuple[float, str, str]] = {}
+        # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card), TTL=300s
 
     # 上下文消息 ID 注入
 
@@ -137,6 +141,97 @@ class ChatEnginePlugin(Star):
         返回新列表，不修改原始数据。
         """
         return [self._inject_msg_id_tag(msg) for msg in context_messages]
+
+    async def _build_system_prompt_prefix(self, event: AstrMessageEvent) -> str:
+        """构建 System Prompt 环境信息前缀（时间、群聊信息等）。
+
+        群聊信息（群名、Bot 群昵称）通过平台 API 获取，按会话缓存 5 分钟。
+        """
+        parts = []
+
+        # 注入当前时间
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        parts.append(f"当前时间: {now}")
+
+        # 群聊额外信息
+        is_group = self.context_mgr.is_group_message(event)
+        if is_group:
+            try:
+                session_key = self.context_mgr.build_session_key(event)
+                self_id = event.get_self_id()
+                cache_ttl = 300  # 5 分钟
+
+                # 清理过期缓存条目，防止无限增长
+                if len(self._group_info_cache) > 500:
+                    now_ts = _time.time()
+                    expired_keys = [
+                        k
+                        for k, (ts, _, _) in self._group_info_cache.items()
+                        if now_ts - ts >= cache_ttl
+                    ]
+                    for k in expired_keys:
+                        del self._group_info_cache[k]
+
+                # 检查缓存
+                cache_hit = False
+                cached_group_name = ""
+                cached_bot_card = ""
+                if session_key in self._group_info_cache:
+                    ts, cached_group_name, cached_bot_card = self._group_info_cache[
+                        session_key
+                    ]
+                    if _time.time() - ts < cache_ttl:
+                        cache_hit = True
+
+                if not cache_hit:
+                    # 优先从事件直接获取群名（无需 API 调用）
+                    group = getattr(event.message_obj, "group", None)
+                    cached_group_name = (
+                        getattr(group, "group_name", "") if group else ""
+                    )
+                    cached_bot_card = ""
+
+                    # 调用平台 API 获取完整群信息（含 Bot 群昵称）
+                    try:
+                        group_info = await event.get_group()
+                        if group_info:
+                            if group_info.group_name:
+                                cached_group_name = group_info.group_name
+                            if group_info.members and self_id:
+                                self_id_str = str(self_id)
+                                for member in group_info.members:
+                                    # str() 统一类型：OneBot API 的 user_id 可能为 int
+                                    if str(member.user_id) == self_id_str:
+                                        cached_bot_card = (
+                                            member.card
+                                            if getattr(member, "card", None)
+                                            else (
+                                                getattr(member, "nickname", "")
+                                                or ""
+                                            )
+                                        )
+                                        break
+                    except Exception:
+                        # API 调用失败时不缓存，下次消息会重试
+                        if cached_group_name:
+                            parts.append(f"群名: {cached_group_name}")
+                        raise
+
+                    # 仅在 API 调用成功后缓存
+                    self._group_info_cache[session_key] = (
+                        _time.time(),
+                        cached_group_name,
+                        cached_bot_card,
+                    )
+
+                if cached_group_name:
+                    parts.append(f"群名: {cached_group_name}")
+                if cached_bot_card:
+                    parts.append(f"你在群里的昵称: {cached_bot_card}")
+            except Exception as e:
+                logger.debug(f"[ChatEngine] 构建群聊环境信息失败: {e}")
+
+        return "\n".join(parts)
 
     # 配置读取辅助
 
@@ -462,6 +557,11 @@ class ChatEnginePlugin(Star):
                 #  获取人格 System Prompt
                 system_prompt = await self.persona_mgr.get_system_prompt()
                 logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
+
+                #  注入环境信息前缀（时间、群名、Bot 名等）
+                context_prefix = await self._build_system_prompt_prefix(event)
+                if context_prefix:
+                    system_prompt = context_prefix + "\n\n" + system_prompt
 
                 #  注入记忆到 System Prompt
                 if self.memory_mgr:

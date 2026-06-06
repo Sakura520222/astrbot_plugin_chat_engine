@@ -291,6 +291,11 @@ class ProactiveManager:
                     system_prompt = await self._persona_mgr.get_system_prompt()
                 except Exception:
                     pass
+
+            # 注入当前时间
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            system_prompt = f"当前时间: {now}\n\n" + system_prompt
+
             is_group = ":private:" not in session_key
             system_prompt += (
                 PROACTIVE_SYSTEM_SUFFIX_GROUP
