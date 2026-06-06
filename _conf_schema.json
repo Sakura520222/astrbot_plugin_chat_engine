@@ -253,5 +253,11 @@
         "type": "int",
         "default": 0,
         "hint": "每收到 N 条消息（含被动消息）触发一次主动回复，仅对群聊生效。0 表示禁用。需在会话设置中单独启用。"
+    },
+    "enable_command_execution": {
+        "description": "启用命令执行",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，用户可通过自然语言让 LLM 代为执行其他插件注册的命令。每个命令自身的权限定义会被尊重（管理员限定命令仅管理员可执行）。"
     }
 }
