@@ -15,6 +15,7 @@ import copy
 import inspect
 import json
 import re
+import time as _time
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -31,6 +32,7 @@ from .proactive.manager import ProactiveManager
 from .tools.command_dispatcher import CommandDispatcher
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
+from .utils import format_current_time
 from .utils.config import cfg_bool, cfg_float, cfg_int
 from .web.server import ChatWebServer
 
@@ -39,7 +41,7 @@ from .web.server import ChatWebServer
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
     "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
-    "1.3.0",
+    "1.3.1",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -56,6 +58,9 @@ class ChatEnginePlugin(Star):
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
+        self._last_tool_images: list[dict] | None = None  # 当前工具调用产生的图片（单次执行生命周期）
+        self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
+        # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
 
     # 上下文消息 ID 注入
 
@@ -137,6 +142,106 @@ class ChatEnginePlugin(Star):
         返回新列表，不修改原始数据。
         """
         return [self._inject_msg_id_tag(msg) for msg in context_messages]
+
+    async def _build_system_prompt_prefix(
+        self, event: AstrMessageEvent, session_key: str = ""
+    ) -> str:
+        """构建 System Prompt 环境信息前缀（时间、群聊信息等）。
+
+        群聊信息（群名、Bot 群昵称）通过平台 API 获取，按会话缓存 5 分钟。
+        API 调用失败时缓存 fallback 值（短 TTL），避免持续重试。
+        """
+        parts = []
+
+        # 注入当前时间
+        parts.append(f"当前时间: {format_current_time()}")
+
+        # 群聊额外信息
+        is_group = self.context_mgr.is_group_message(event)
+        if is_group:
+            try:
+                if not session_key:
+                    session_key = self.context_mgr.build_session_key(event)
+                self_id = event.get_self_id()
+                cache_ttl = 300  # 5 分钟
+
+                # 清理过期缓存条目，防止无限增长
+                if len(self._group_info_cache) > 500:
+                    now_ts = _time.time()
+                    expired_keys = [
+                        k
+                        for k, (ts, _, _, is_fb) in self._group_info_cache.items()
+                        if now_ts - ts >= (60 if is_fb else cache_ttl)
+                    ]
+                    for k in expired_keys:
+                        del self._group_info_cache[k]
+
+                # 检查缓存
+                cache_hit = False
+                cached_group_name = ""
+                cached_bot_card = ""
+                if session_key in self._group_info_cache:
+                    ts, cached_group_name, cached_bot_card, is_fallback = (
+                        self._group_info_cache[session_key]
+                    )
+                    effective_ttl = 60 if is_fallback else cache_ttl
+                    if _time.time() - ts < effective_ttl:
+                        cache_hit = True
+
+                if not cache_hit:
+                    # 优先从事件直接获取群名（无需 API 调用）
+                    group = getattr(event.message_obj, "group", None)
+                    fallback_group_name = (
+                        getattr(group, "group_name", "") if group else ""
+                    )
+                    cached_group_name = fallback_group_name
+                    cached_bot_card = ""
+
+                    # 调用平台 API 获取完整群信息（含 Bot 群昵称）
+                    try:
+                        group_info = await event.get_group()
+                        if group_info:
+                            if group_info.group_name:
+                                cached_group_name = group_info.group_name
+                            if group_info.members and self_id:
+                                self_id_str = str(self_id)
+                                for member in group_info.members:
+                                    # str() 统一类型：OneBot API 的 user_id 可能为 int
+                                    if str(member.user_id) == self_id_str:
+                                        cached_bot_card = (
+                                            member.card
+                                            if getattr(member, "card", None)
+                                            else (getattr(member, "nickname", "") or "")
+                                        )
+                                        break
+                    except Exception:
+                        # API 调用失败：用 fallback 值短 TTL 缓存，避免持续重试
+                        self._group_info_cache[session_key] = (
+                            _time.time(),
+                            fallback_group_name,
+                            "",
+                            True,  # 标记为 fallback 条目（短 TTL）
+                        )
+                        if fallback_group_name:
+                            parts.append(f"群名: {fallback_group_name}")
+                        raise
+
+                    # 仅在 API 调用成功后缓存（完整 TTL）
+                    self._group_info_cache[session_key] = (
+                        _time.time(),
+                        cached_group_name,
+                        cached_bot_card,
+                        False,  # 正常条目
+                    )
+
+                if cached_group_name:
+                    parts.append(f"群名: {cached_group_name}")
+                if cached_bot_card:
+                    parts.append(f"你在群里的昵称: {cached_bot_card}")
+            except Exception as e:
+                logger.warning(f"[ChatEngine] 构建群聊环境信息失败: {e}")
+
+        return "\n".join(parts)
 
     # 配置读取辅助
 
@@ -463,6 +568,13 @@ class ChatEnginePlugin(Star):
                 system_prompt = await self.persona_mgr.get_system_prompt()
                 logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
+                #  注入环境信息前缀（时间、群名、Bot 名等）
+                context_prefix = await self._build_system_prompt_prefix(
+                    event, session_key=session_key
+                )
+                if context_prefix:
+                    system_prompt = context_prefix + "\n\n" + system_prompt
+
                 #  注入记忆到 System Prompt
                 if self.memory_mgr:
                     try:
@@ -736,16 +848,29 @@ class ChatEnginePlugin(Star):
 
                 # tool_args 已经是 dict，无需额外解析
 
+                # 每次工具调用前清空上一次工具的图片数据
+                self._last_tool_images = None
+
                 # 执行工具
                 tool_result_text = await self._execute_tool(
                     tool_name, tool_args, tool_set, event=event
                 )
 
-                # 追加 tool result 消息
+                # 构造 tool result：若工具产生了图片，直接嵌入 content 中
+                if self._last_tool_images:
+                    img_count = len(self._last_tool_images)
+                    tool_content: str | list[dict] = [
+                        {"type": "text", "text": tool_result_text},
+                    ] + self._last_tool_images
+                    self._last_tool_images = None
+                    logger.info(f"[ChatEngine] 注入 {img_count} 张图片到 tool result")
+                else:
+                    tool_content = tool_result_text
+
                 tool_msg = {
                     "role": "tool",
                     "tool_call_id": tool_id,
-                    "content": tool_result_text,
+                    "content": tool_content,
                 }
                 current_contexts.append(tool_msg)
 
@@ -994,7 +1119,7 @@ class ChatEnginePlugin(Star):
         # 超过最大分段数时，合并尾部段落
         if len(segments) > max_segments:
             merged = segments[: max_segments - 1]
-            merged.append("".join(segments[max_segments - 1 :]))
+            merged.append("\n".join(segments[max_segments - 1 :]))
             segments = merged
 
         return segments
@@ -1140,7 +1265,7 @@ class ChatEnginePlugin(Star):
 
 ## Tool Usage Guide
 
-You have access to memory tools (save_memory, search_memory, update_memory, delete_memory), proactive reply tools (schedule_reply), and quote reply tool (reply_with_quote). Use them proactively:
+You have access to memory tools (save_memory, search_memory, update_memory, delete_memory), proactive reply tools (schedule_reply), quote reply tool (reply_with_quote), and image viewing tool (view_image). Use them proactively:
 
 - **save_memory**: When the user shares personal preferences, habits, important facts, or explicitly says things like "记住了", "记住", "别忘了", "记住这个". Choose type="long_term" for persistent facts (preferences, identity) or type="short_term" for temporary context (current topic, recent plans).
   - **pinned="true"**: Use for standing rules or instructions that must ALWAYS be active regardless of topic (e.g. "user wants responses under 30 chars", "always reply in a cute tone"). Pinned memories bypass semantic search and are injected every turn.
@@ -1149,6 +1274,7 @@ You have access to memory tools (save_memory, search_memory, update_memory, dele
 - **delete_memory**: When the user explicitly asks to forget something.
 - **schedule_reply**: When the user asks you to remind them later, when you want to follow up on a topic, or when saying things like "一会提醒我", "过XX分钟告诉我". Also use when the conversation naturally suggests a follow-up would be welcome.
 - **reply_with_quote**: When you want to reply to a specific earlier message in the conversation. Each user message is tagged with `[msg:ID]` — call `reply_with_quote(message_id)` first, then generate your reply text. It will be sent as a quoted reply on the platform. Use this when directly addressing a specific past message (e.g. answering an earlier question, confirming something the user said). Do NOT overuse — only when there is a clear reference target.
+- **view_image**: When you see [Image] placeholders in historical context and need to see the actual image content, call `view_image(message_id)` to load it. The image will be injected into your context. Use this when the image content is relevant to your response (e.g. user asks about an earlier image, or you need visual context to answer a question).
 
 Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these tools to the user — just use them naturally when appropriate.
 """
@@ -1313,6 +1439,75 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             f"quote_msg_id={message_id}"
         )
         return "Quote reply prepared. Now generate your response text — it will be sent as a quoted reply to that message."
+
+    # 图片查看工具 — LLM Tool Call
+
+    @filter.llm_tool(name="view_image")
+    async def tool_view_image(
+        self,
+        event: AstrMessageEvent,
+        message_id: str,
+    ):
+        """View the actual image(s) from a historical message.
+        Historical images appear as [Image] placeholders in context.
+        Call this to load and see the real image content.
+        After calling, the image will be injected into your context for the next response.
+
+        Args:
+            message_id(string): The message ID containing the image. Shown as [msg:ID] tag in context messages.
+        """
+        session_key = self.context_mgr.build_session_key(event)
+
+        # 从数据库加载原始上下文（保留 image_ref 引用）
+        try:
+            raw_messages = await self.context_mgr.repo.get_context(session_key)
+        except Exception as e:
+            return f"Failed to load context: {type(e).__name__}"
+
+        # 查找目标消息
+        target_msg = None
+        for msg in raw_messages:
+            if msg.get("message_id") == message_id:
+                target_msg = msg
+                break
+
+        if not target_msg:
+            return (
+                f"Message ID '{message_id}' not found in current session context. "
+                "Available IDs can be found in [msg:ID] tags."
+            )
+
+        content = target_msg.get("content")
+        if not isinstance(content, list):
+            return "This message does not contain any images."
+
+        # 解析 image_ref 为 data URL
+        image_parts = []
+        image_store = self.context_mgr.image_store
+        if not image_store:
+            return "Image storage is not available."
+
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_ref":
+                resolved = await image_store.resolve_image_ref(part)
+                if resolved and resolved.get("type") == "image_url":
+                    image_parts.append(resolved)
+            elif isinstance(part, dict) and part.get("type") == "image_url":
+                # 已经是 data URL（尚未存储的）
+                image_parts.append(part)
+
+        if not image_parts:
+            return "No images found in this message (images may have been lost or expired)."
+
+        # 暂存图片到实例变量，由 _llm_call_with_tools 直接嵌入当前 tool result
+        self._last_tool_images = image_parts
+        logger.info(
+            f"[ChatEngine] 图片查看请求: msg_id={message_id}, images={len(image_parts)}"
+        )
+        return (
+            f"Loaded {len(image_parts)} image(s) from message [{message_id}]. "
+            "The images have been injected into your context for viewing."
+        )
 
     # 命令执行工具 — LLM Tool Call
 

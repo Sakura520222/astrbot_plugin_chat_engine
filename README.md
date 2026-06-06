@@ -9,6 +9,12 @@
 - 帮助 AI 在上下文中准确区分不同用户
 - 用户标识格式可通过 WebUI 自定义
 
+### 环境信息感知
+- 自动在 System Prompt 前注入当前时间，帮助 LLM 感知时间上下文
+- 群聊场景自动注入群名和 Bot 群昵称
+- 群聊信息按会话缓存（5 分钟 TTL），API 失败时使用短 TTL fallback 策略
+- 主动回复同样注入时间信息
+
 ### 上下文管理
 - **群聊共享**: 同一群内所有人共享上下文
 - **私聊隔离**: 每个用户拥有独立上下文
@@ -38,6 +44,7 @@
 - **N 轮触发回复**: 群聊中每收到 N 条消息（含被动消息）触发一次主动回复
 - **定时回复**: `schedule_reply` LLM Tool，支持 LLM 主动安排延迟回复（提醒、跟进等）
 - **消息引用回复**: `reply_with_quote` LLM Tool，支持引用上下文中特定历史消息进行回复
+- **图片查看**: `view_image` LLM Tool，支持 LLM 主动查看历史上下文中被替换为 `[Image]` 占位符的图片
 - 主动回复支持文本清洗与分段发送
 - 区分私聊和群聊场景的主动消息后缀
 - WebUI 会话级主动回复设置控制
@@ -61,6 +68,7 @@
 - 工具描述写入 System Prompt（增强 AI 理解）
 - 同时使用原生 Function Calling
 - 兼容 async generator 类型的插件 Tool handler
+- 工具调用产生的图片自动以多模态格式嵌入 tool result
 - 通过 WebUI 启用/禁用工具
 
 ### 分段发送
@@ -176,6 +184,8 @@ astrbot_plugin_chat_engine/
 │   ├── scanner.py             # 扫描所有已注册工具
 │   ├── manager.py             # 启用/禁用状态
 │   └── command_dispatcher.py  # 命令扫描与分发 (LLM 自然语言执行插件命令)
+├── utils/                     # 工具函数
+│   └── __init__.py            # 通用工具函数 (时间格式化等)
 └── web/                       # WebUI
     ├── server.py              # aiohttp REST API (含 LLM 预览 + 记忆管理 + 登录认证)
     └── static/                # 前端 HTML/CSS/JS
@@ -188,9 +198,11 @@ astrbot_plugin_chat_engine/
 - **命令透传**: 检测 `activated_handlers` 中的 `CommandFilter`，命令自动交给其他插件或框架处理
 - **独立数据库**: 使用独立 SQLAlchemy MetaData，避免与 AstrBot 全局元数据冲突
 - **Provider 复用**: 复用 AstrBot 已配置的 LLM Provider，也支持自定义配置
+- **环境信息注入**: System Prompt 前自动注入当前时间和群聊环境信息（群名、Bot 昵称），群聊信息按会话缓存并支持 fallback 短 TTL 策略
 - **被动记录**: 未触发回复的群聊消息以 `observed` 角色存储，压缩时归入当前轮次
 - **图片存储**: 图片转为 base64 data URL 发送给 LLM，文件按 sha256 去重存储，上下文中以 `image_ref` 引用节省空间
 - **历史图片剥离**: 历史上下文中的图片替换为 `[Image]` 文本占位符，仅当前用户消息保留图片，减少 Token 消耗
+- **图片查看工具**: LLM 可通过 `view_image` 工具按消息 ID 主动加载历史图片，图片以多模态格式嵌入 tool result
 - **引用回复**: 提取 Reply 组件中的发送者和内容，自动拼接到用户消息前缀
 - **会话锁**: `asyncio.Lock` 按 session_key 索引，确保同一会话的消息串行处理
 - **安全截断**: 调用 LLM 前通过 `TokenEstimator` 检测总量，超出阈值自动裁剪最旧消息

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 
+from ..utils import format_current_time
 from ..utils.config import cfg_bool, cfg_int
 
 PROACTIVE_SYSTEM_SUFFIX_PRIVATE = """
@@ -291,6 +292,11 @@ class ProactiveManager:
                     system_prompt = await self._persona_mgr.get_system_prompt()
                 except Exception:
                     pass
+
+            # 注入当前时间
+            system_prompt = system_prompt or ""
+            system_prompt = f"当前时间: {format_current_time()}\n\n" + system_prompt
+
             is_group = ":private:" not in session_key
             system_prompt += (
                 PROACTIVE_SYSTEM_SUFFIX_GROUP
