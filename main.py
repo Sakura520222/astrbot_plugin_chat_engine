@@ -1113,7 +1113,7 @@ class ChatEnginePlugin(Star):
         # 超过最大分段数时，合并尾部段落
         if len(segments) > max_segments:
             merged = segments[: max_segments - 1]
-            merged.append("".join(segments[max_segments - 1 :]))
+            merged.append("\n".join(segments[max_segments - 1 :]))
             segments = merged
 
         return segments
