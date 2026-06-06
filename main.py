@@ -500,16 +500,6 @@ class ChatEnginePlugin(Star):
                         # 记忆工具使用指引
                         if self.memory_mgr:
                             system_prompt += self._build_memory_tool_guidance()
-
-                            # 命令执行指引（所有用户可见，权限按命令粒度校验）
-                            if self.cmd_dispatcher:
-                                cmd_desc = (
-                                    self.cmd_dispatcher.build_command_description()
-                                )
-                                if cmd_desc:
-                                    system_prompt += self._build_command_execution_guidance(
-                                        cmd_desc
-                                    )
                     except Exception as e:
                         logger.warning(
                             f"[ChatEngine] 构建工具集失败: {e}", exc_info=True
@@ -809,6 +799,8 @@ class ChatEnginePlugin(Star):
                 # 这些 handler 通常接收 event 作为第一个参数
                 # 部分插件 handler 是 async generator (使用 yield)，不能直接 await
                 result = None
+                # 记录 handler 调用前的发送状态，用于检测 handler 是否直接发送了消息
+                had_sent_before = getattr(event, "_has_send_oper", False)
 
                 # 尝试传入 event + tool_args
                 try:
@@ -856,6 +848,10 @@ class ChatEnginePlugin(Star):
                 )
 
             if result is None:
+                # 检查 handler 是否通过 event.send() 直接向用户发送了消息/媒体
+                has_sent_now = getattr(event, "_has_send_oper", False)
+                if has_sent_now and not had_sent_before:
+                    return "工具已直接向用户发送了消息或媒体内容。无需再次回复。"
                 return "工具执行完成（无输出）"
             if isinstance(result, dict):
                 return json.dumps(result, ensure_ascii=False)
@@ -1318,32 +1314,49 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         )
         return "Quote reply prepared. Now generate your response text — it will be sent as a quoted reply to that message."
 
-    # 命令执行工具 — LLM Tool Call（仅管理员）
+    # 命令执行工具 — LLM Tool Call
 
-    @staticmethod
-    def _build_command_execution_guidance(cmd_desc: str) -> str:
-        """构建命令执行工具的使用指引，注入到 system prompt 中。"""
-        return f"""
+    @filter.llm_tool(name="list_plugins")
+    async def tool_list_plugins(
+        self,
+        event: AstrMessageEvent,
+    ):
+        """List all plugins that provide bot commands, along with their command counts.
+        Call this FIRST when the user wants to find or execute a bot command.
 
-## Command Execution
+        Returns:
+            A JSON list of plugins with their command counts.
+        """
+        if not self.cmd_dispatcher:
+            return json.dumps(
+                {"error": "命令执行功能未启用。"}, ensure_ascii=False
+            )
+        plugins = self.cmd_dispatcher.list_plugins()
+        return json.dumps({"count": len(plugins), "plugins": plugins}, ensure_ascii=False)
 
-You have access to the `execute_command` tool, which allows you to execute registered bot commands on behalf of the user.
+    @filter.llm_tool(name="list_commands")
+    async def tool_list_commands(
+        self,
+        event: AstrMessageEvent,
+        plugin: str = "",
+        query: str = "",
+    ):
+        """List available bot commands. Use after list_plugins to see commands from a specific plugin.
+        Returns command names, descriptions, parameters, and permission levels.
 
-**When to use:** When the user's message implicitly requests an action that maps to an existing command (e.g., "查看帮助", "重置对话", "切换模型"). Use it naturally without mentioning the tool's existence.
-
-**Available commands:**
-
-{cmd_desc}
-
-**How to use:** Call `execute_command(command="command_name arg1 arg2")` where `command_name` matches one of the commands above. Include any required arguments after the command name, separated by spaces.
-
-**CRITICAL Rules (MUST follow):**
-- Only use this tool when the user's intent clearly and directly maps to ONE specific command from the list above.
-- **If the command is not found or returns an error, STOP immediately.** Inform the user about the error. Do NOT try other commands as alternatives or workarounds.
-- **NEVER execute commands with side effects (reload, update, reset, stop, etc.) unless the user EXPLICITLY asks for that specific action.**
-- Commands marked with [管理员限定] require admin privileges. If the tool returns a permission error, inform the user.
-- Report the command's result back to the user in a natural, conversational way.
-"""
+        Args:
+            plugin(string): Filter by exact plugin name (from list_plugins result).
+            query(string): Optional keyword to further filter by command name or description.
+        """
+        if not self.cmd_dispatcher:
+            return json.dumps(
+                {"error": "命令执行功能未启用。"}, ensure_ascii=False
+            )
+        result = self.cmd_dispatcher.list_commands(plugin=plugin, query=query)
+        return json.dumps(
+            {"count": len(result), "commands": result},
+            ensure_ascii=False,
+        )
 
     @filter.llm_tool(name="execute_command")
     async def tool_execute_command(

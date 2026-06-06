@@ -114,34 +114,64 @@ class CommandDispatcher:
         """清除缓存，强制下次重新扫描"""
         self._commands_cache = None
 
-    def build_command_description(self) -> str:
-        """构建命令描述文本，用于注入 system prompt。
-
-        所有用户都能看到命令列表，管理员限定命令会标注 [管理员限定]，
-        实际权限在 dispatch() 中按命令粒度校验。
+    def list_plugins(self) -> list[dict]:
+        """列出所有提供命令的插件（含框架内置）。
 
         Returns:
-            str: 命令描述文本
+            list[dict]: 插件信息列表，每项包含 name, command_count
         """
         commands = self.scan_commands()
-        if not commands:
-            return ""
-
-        lines = []
+        plugin_map: dict[str, int] = {}
         for cmd in commands:
-            parts = [f"- **{cmd['name']}**"]
-            if cmd["aliases"]:
-                parts.append(f" (别名: {', '.join(cmd['aliases'])})")
-            if cmd["description"]:
-                parts.append(f": {cmd['description']}")
-            # 标注管理员限定命令
-            if cmd["permission"] == "admin":
-                parts.append(" [管理员限定]")
-            if cmd["parameters"]:
-                parts.append(f"\n  参数: {cmd['parameters']}")
-            lines.append("".join(parts))
+            name = cmd["plugin_name"]
+            plugin_map[name] = plugin_map.get(name, 0) + 1
 
-        return "\n".join(lines)
+        return [
+            {"name": name, "command_count": count}
+            for name, count in sorted(plugin_map.items())
+        ]
+
+    def list_commands(
+        self, plugin: str = "", query: str = ""
+    ) -> list[dict]:
+        """查询命令列表，支持按插件名或关键词过滤。
+
+        Args:
+            plugin: 按插件名过滤（精确匹配）。
+            query: 按关键词过滤（模糊匹配命令名、描述、别名）。
+
+        Returns:
+            list[dict]: 命令信息列表
+        """
+        commands = self.scan_commands()
+
+        if plugin:
+            commands = [c for c in commands if c["plugin_name"] == plugin]
+
+        if query:
+            q = query.lower()
+            commands = [
+                c
+                for c in commands
+                if q in c["name"].lower()
+                or q in c["description"].lower()
+                or any(q in a.lower() for a in c["aliases"])
+            ]
+
+        result = []
+        for cmd in commands:
+            item = {"name": cmd["name"]}
+            if cmd["aliases"]:
+                item["aliases"] = cmd["aliases"]
+            if cmd["description"]:
+                item["description"] = cmd["description"]
+            if cmd["parameters"]:
+                item["parameters"] = cmd["parameters"]
+            if cmd["permission"] == "admin":
+                item["admin_only"] = True
+            result.append(item)
+
+        return result
 
     def find_handler(self, command_str: str):
         """根据命令字符串查找匹配的 handler。
