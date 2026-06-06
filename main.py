@@ -58,6 +58,7 @@ class ChatEnginePlugin(Star):
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
+        self._pending_images: dict[str, list[dict]] = {}  # {session_key: [image content parts]}
         self._group_info_cache: dict[str, tuple[float, str, str]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card), TTL=300s
 
@@ -648,6 +649,7 @@ class ChatEnginePlugin(Star):
                         user_msg=llm_user_msg,
                         tool_set=tool_set,
                         event=event,
+                        session_key=session_key,
                     )
                 except Exception as e:
                     logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
@@ -778,6 +780,7 @@ class ChatEnginePlugin(Star):
         tool_set=None,
         max_tool_rounds: int | None = None,
         event: AstrMessageEvent = None,
+        session_key: str = "",
     ) -> object | None:
         """调用 LLM，支持 Tool Call 循环。
 
@@ -854,6 +857,22 @@ class ChatEnginePlugin(Star):
                 f"[ChatEngine] Tool Call 轮次 {round_idx + 1}: "
                 f"调用了 {len(tool_calls_name)} 个工具"
             )
+
+            # 检查是否有待注入的图片（view_image 工具产生）
+            if session_key:
+                pending_imgs = self._pending_images.pop(session_key, None)
+                if pending_imgs:
+                    img_msg = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "[系统注入: 以下是你请求查看的图片]"},
+                        ]
+                        + pending_imgs,
+                    }
+                    current_contexts.append(img_msg)
+                    logger.info(
+                        f"[ChatEngine] 注入 {len(pending_imgs)} 张图片到上下文"
+                    )
 
         # 达到最大轮数，做一次无工具的最终调用
         logger.warning("[ChatEngine] 达到最大工具调用轮数，进行最终调用")
@@ -1240,7 +1259,7 @@ class ChatEnginePlugin(Star):
 
 ## Tool Usage Guide
 
-You have access to memory tools (save_memory, search_memory, update_memory, delete_memory), proactive reply tools (schedule_reply), and quote reply tool (reply_with_quote). Use them proactively:
+You have access to memory tools (save_memory, search_memory, update_memory, delete_memory), proactive reply tools (schedule_reply), quote reply tool (reply_with_quote), and image viewing tool (view_image). Use them proactively:
 
 - **save_memory**: When the user shares personal preferences, habits, important facts, or explicitly says things like "记住了", "记住", "别忘了", "记住这个". Choose type="long_term" for persistent facts (preferences, identity) or type="short_term" for temporary context (current topic, recent plans).
   - **pinned="true"**: Use for standing rules or instructions that must ALWAYS be active regardless of topic (e.g. "user wants responses under 30 chars", "always reply in a cute tone"). Pinned memories bypass semantic search and are injected every turn.
@@ -1249,6 +1268,7 @@ You have access to memory tools (save_memory, search_memory, update_memory, dele
 - **delete_memory**: When the user explicitly asks to forget something.
 - **schedule_reply**: When the user asks you to remind them later, when you want to follow up on a topic, or when saying things like "一会提醒我", "过XX分钟告诉我". Also use when the conversation naturally suggests a follow-up would be welcome.
 - **reply_with_quote**: When you want to reply to a specific earlier message in the conversation. Each user message is tagged with `[msg:ID]` — call `reply_with_quote(message_id)` first, then generate your reply text. It will be sent as a quoted reply on the platform. Use this when directly addressing a specific past message (e.g. answering an earlier question, confirming something the user said). Do NOT overuse — only when there is a clear reference target.
+- **view_image**: When you see [Image] placeholders in historical context and need to see the actual image content, call `view_image(message_id)` to load it. The image will be injected into your context. Use this when the image content is relevant to your response (e.g. user asks about an earlier image, or you need visual context to answer a question).
 
 Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these tools to the user — just use them naturally when appropriate.
 """
@@ -1413,6 +1433,76 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             f"quote_msg_id={message_id}"
         )
         return "Quote reply prepared. Now generate your response text — it will be sent as a quoted reply to that message."
+
+    # 图片查看工具 — LLM Tool Call
+
+    @filter.llm_tool(name="view_image")
+    async def tool_view_image(
+        self,
+        event: AstrMessageEvent,
+        message_id: str,
+    ):
+        """View the actual image(s) from a historical message.
+        Historical images appear as [Image] placeholders in context.
+        Call this to load and see the real image content.
+        After calling, the image will be injected into your context for the next response.
+
+        Args:
+            message_id(string): The message ID containing the image. Shown as [msg:ID] tag in context messages.
+        """
+        session_key = self.context_mgr.build_session_key(event)
+
+        # 从数据库加载原始上下文（保留 image_ref 引用）
+        try:
+            raw_messages = await self.context_mgr.repo.get_context(session_key)
+        except Exception as e:
+            return f"Failed to load context: {type(e).__name__}"
+
+        # 查找目标消息
+        target_msg = None
+        for msg in raw_messages:
+            if msg.get("message_id") == message_id:
+                target_msg = msg
+                break
+
+        if not target_msg:
+            return (
+                f"Message ID '{message_id}' not found in current session context. "
+                "Available IDs can be found in [msg:ID] tags."
+            )
+
+        content = target_msg.get("content")
+        if not isinstance(content, list):
+            return "This message does not contain any images."
+
+        # 解析 image_ref 为 data URL
+        image_parts = []
+        image_store = self.context_mgr.image_store
+        if not image_store:
+            return "Image storage is not available."
+
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_ref":
+                resolved = await image_store.resolve_image_ref(part)
+                if resolved and resolved.get("type") == "image_url":
+                    image_parts.append(resolved)
+            elif isinstance(part, dict) and part.get("type") == "image_url":
+                # 已经是 data URL（尚未存储的）
+                image_parts.append(part)
+
+        if not image_parts:
+            return "No images found in this message (images may have been lost or expired)."
+
+        # 暂存图片，等待 _llm_call_with_tools 注入
+        self._pending_images[session_key] = image_parts
+        logger.info(
+            f"[ChatEngine] 图片查看请求: session={session_key}, "
+            f"msg_id={message_id}, images={len(image_parts)}"
+        )
+        return (
+            f"Loaded {len(image_parts)} image(s) from message [{message_id}]. "
+            "The images have been injected into your context for viewing."
+        )
 
     # 命令执行工具 — LLM Tool Call
 
