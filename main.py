@@ -16,7 +16,6 @@ import inspect
 import json
 import re
 import time as _time
-from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -33,6 +32,7 @@ from .proactive.manager import ProactiveManager
 from .tools.command_dispatcher import CommandDispatcher
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
+from .utils import format_current_time
 from .utils.config import cfg_bool, cfg_float, cfg_int
 from .web.server import ChatWebServer
 
@@ -58,11 +58,9 @@ class ChatEnginePlugin(Star):
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
-        self._pending_images: dict[
-            str, list[dict]
-        ] = {}  # {session_key: [image content parts]}
-        self._group_info_cache: dict[str, tuple[float, str, str]] = {}
-        # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card), TTL=300s
+        self._last_tool_images: list[dict] | None = None  # 当前工具调用产生的图片（单次执行生命周期）
+        self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
+        # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
 
     # 上下文消息 ID 注入
 
@@ -145,22 +143,25 @@ class ChatEnginePlugin(Star):
         """
         return [self._inject_msg_id_tag(msg) for msg in context_messages]
 
-    async def _build_system_prompt_prefix(self, event: AstrMessageEvent) -> str:
+    async def _build_system_prompt_prefix(
+        self, event: AstrMessageEvent, session_key: str = ""
+    ) -> str:
         """构建 System Prompt 环境信息前缀（时间、群聊信息等）。
 
         群聊信息（群名、Bot 群昵称）通过平台 API 获取，按会话缓存 5 分钟。
+        API 调用失败时缓存 fallback 值（短 TTL），避免持续重试。
         """
         parts = []
 
         # 注入当前时间
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        parts.append(f"当前时间: {now}")
+        parts.append(f"当前时间: {format_current_time()}")
 
         # 群聊额外信息
         is_group = self.context_mgr.is_group_message(event)
         if is_group:
             try:
-                session_key = self.context_mgr.build_session_key(event)
+                if not session_key:
+                    session_key = self.context_mgr.build_session_key(event)
                 self_id = event.get_self_id()
                 cache_ttl = 300  # 5 分钟
 
@@ -169,8 +170,8 @@ class ChatEnginePlugin(Star):
                     now_ts = _time.time()
                     expired_keys = [
                         k
-                        for k, (ts, _, _) in self._group_info_cache.items()
-                        if now_ts - ts >= cache_ttl
+                        for k, (ts, _, _, is_fb) in self._group_info_cache.items()
+                        if now_ts - ts >= (60 if is_fb else cache_ttl)
                     ]
                     for k in expired_keys:
                         del self._group_info_cache[k]
@@ -180,18 +181,20 @@ class ChatEnginePlugin(Star):
                 cached_group_name = ""
                 cached_bot_card = ""
                 if session_key in self._group_info_cache:
-                    ts, cached_group_name, cached_bot_card = self._group_info_cache[
-                        session_key
-                    ]
-                    if _time.time() - ts < cache_ttl:
+                    ts, cached_group_name, cached_bot_card, is_fallback = (
+                        self._group_info_cache[session_key]
+                    )
+                    effective_ttl = 60 if is_fallback else cache_ttl
+                    if _time.time() - ts < effective_ttl:
                         cache_hit = True
 
                 if not cache_hit:
                     # 优先从事件直接获取群名（无需 API 调用）
                     group = getattr(event.message_obj, "group", None)
-                    cached_group_name = (
+                    fallback_group_name = (
                         getattr(group, "group_name", "") if group else ""
                     )
+                    cached_group_name = fallback_group_name
                     cached_bot_card = ""
 
                     # 调用平台 API 获取完整群信息（含 Bot 群昵称）
@@ -212,16 +215,23 @@ class ChatEnginePlugin(Star):
                                         )
                                         break
                     except Exception:
-                        # API 调用失败时不缓存，下次消息会重试
-                        if cached_group_name:
-                            parts.append(f"群名: {cached_group_name}")
+                        # API 调用失败：用 fallback 值短 TTL 缓存，避免持续重试
+                        self._group_info_cache[session_key] = (
+                            _time.time(),
+                            fallback_group_name,
+                            "",
+                            True,  # 标记为 fallback 条目（短 TTL）
+                        )
+                        if fallback_group_name:
+                            parts.append(f"群名: {fallback_group_name}")
                         raise
 
-                    # 仅在 API 调用成功后缓存
+                    # 仅在 API 调用成功后缓存（完整 TTL）
                     self._group_info_cache[session_key] = (
                         _time.time(),
                         cached_group_name,
                         cached_bot_card,
+                        False,  # 正常条目
                     )
 
                 if cached_group_name:
@@ -229,7 +239,7 @@ class ChatEnginePlugin(Star):
                 if cached_bot_card:
                     parts.append(f"你在群里的昵称: {cached_bot_card}")
             except Exception as e:
-                logger.debug(f"[ChatEngine] 构建群聊环境信息失败: {e}")
+                logger.warning(f"[ChatEngine] 构建群聊环境信息失败: {e}")
 
         return "\n".join(parts)
 
@@ -559,7 +569,9 @@ class ChatEnginePlugin(Star):
                 logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
 
                 #  注入环境信息前缀（时间、群名、Bot 名等）
-                context_prefix = await self._build_system_prompt_prefix(event)
+                context_prefix = await self._build_system_prompt_prefix(
+                    event, session_key=session_key
+                )
                 if context_prefix:
                     system_prompt = context_prefix + "\n\n" + system_prompt
 
@@ -648,7 +660,6 @@ class ChatEnginePlugin(Star):
                         user_msg=llm_user_msg,
                         tool_set=tool_set,
                         event=event,
-                        session_key=session_key,
                     )
                 except Exception as e:
                     logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
@@ -779,7 +790,6 @@ class ChatEnginePlugin(Star):
         tool_set=None,
         max_tool_rounds: int | None = None,
         event: AstrMessageEvent = None,
-        session_key: str = "",
     ) -> object | None:
         """调用 LLM，支持 Tool Call 循环。
 
@@ -838,16 +848,29 @@ class ChatEnginePlugin(Star):
 
                 # tool_args 已经是 dict，无需额外解析
 
+                # 每次工具调用前清空上一次工具的图片数据
+                self._last_tool_images = None
+
                 # 执行工具
                 tool_result_text = await self._execute_tool(
                     tool_name, tool_args, tool_set, event=event
                 )
 
-                # 追加 tool result 消息
+                # 构造 tool result：若工具产生了图片，直接嵌入 content 中
+                if self._last_tool_images:
+                    img_count = len(self._last_tool_images)
+                    tool_content: str | list[dict] = [
+                        {"type": "text", "text": tool_result_text},
+                    ] + self._last_tool_images
+                    self._last_tool_images = None
+                    logger.info(f"[ChatEngine] 注入 {img_count} 张图片到 tool result")
+                else:
+                    tool_content = tool_result_text
+
                 tool_msg = {
                     "role": "tool",
                     "tool_call_id": tool_id,
-                    "content": tool_result_text,
+                    "content": tool_content,
                 }
                 current_contexts.append(tool_msg)
 
@@ -856,23 +879,6 @@ class ChatEnginePlugin(Star):
                 f"[ChatEngine] Tool Call 轮次 {round_idx + 1}: "
                 f"调用了 {len(tool_calls_name)} 个工具"
             )
-
-            # 检查是否有待注入的图片（view_image 工具产生）
-            if session_key:
-                pending_imgs = self._pending_images.pop(session_key, None)
-                if pending_imgs:
-                    img_msg = {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "[系统注入: 以下是你请求查看的图片]",
-                            },
-                        ]
-                        + pending_imgs,
-                    }
-                    current_contexts.append(img_msg)
-                    logger.info(f"[ChatEngine] 注入 {len(pending_imgs)} 张图片到上下文")
 
         # 达到最大轮数，做一次无工具的最终调用
         logger.warning("[ChatEngine] 达到最大工具调用轮数，进行最终调用")
@@ -1493,14 +1499,10 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         if not image_parts:
             return "No images found in this message (images may have been lost or expired)."
 
-        # 暂存图片，等待 _llm_call_with_tools 注入
-        # 使用 extend 追加而非覆盖，支持同一轮多次调用 view_image
-        if session_key not in self._pending_images:
-            self._pending_images[session_key] = []
-        self._pending_images[session_key].extend(image_parts)
+        # 暂存图片到实例变量，由 _llm_call_with_tools 直接嵌入当前 tool result
+        self._last_tool_images = image_parts
         logger.info(
-            f"[ChatEngine] 图片查看请求: session={session_key}, "
-            f"msg_id={message_id}, images={len(image_parts)}"
+            f"[ChatEngine] 图片查看请求: msg_id={message_id}, images={len(image_parts)}"
         )
         return (
             f"Loaded {len(image_parts)} image(s) from message [{message_id}]. "
