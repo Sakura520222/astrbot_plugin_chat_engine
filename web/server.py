@@ -447,6 +447,8 @@ class ChatWebServer:
             "enable_auto_summary",
             "enable_proactive",
             "proactive_timeout_minutes",
+            "proactive_timeout_probability",
+            "proactive_timeout_max_consecutive",
             "proactive_round_interval",
         ]
         config_data = {}
@@ -492,6 +494,8 @@ class ChatWebServer:
             "enable_auto_summary",
             "enable_proactive",
             "proactive_timeout_minutes",
+            "proactive_timeout_probability",
+            "proactive_timeout_max_consecutive",
             "proactive_round_interval",
         ]
         for key in allowed_keys:

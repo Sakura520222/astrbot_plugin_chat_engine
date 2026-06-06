@@ -529,6 +529,8 @@ const CONFIG_FIELDS = [
     { key: 'enable_auto_summary', label: '启用自动总结', type: 'checkbox', hint: '开启后，按配置轮数和上下文压缩时自动总结短期记忆。' },
     { key: 'enable_proactive', label: '启用主动回复', type: 'checkbox', hint: '开启后，支持 LLM 定时回复、超时主动发言、N 轮触发回复等功能。' },
     { key: 'proactive_timeout_minutes', label: '超时主动发言分钟数', type: 'number', hint: '用户未发言超过此分钟数后，AI 主动发起对话。需在会话设置中单独启用。' },
+    { key: 'proactive_timeout_probability', label: '超时触发概率 (%)', type: 'number', hint: '每次超时命中时以此概率(0~100)决定是否实际触发。30 表示约三成概率触发，100 则每次必触发。' },
+    { key: 'proactive_timeout_max_consecutive', label: '最大连续主动次数', type: 'number', hint: '连续主动回复的最大次数，达到后不再触发直到用户再次发言。0 表示不限制。' },
     { key: 'proactive_round_interval', label: 'N 轮触发回复（仅群聊）', type: 'number', hint: '每收到 N 条消息触发一次主动回复，仅对群聊生效。0 表示禁用。需在会话设置中单独启用。' },
 ];
 

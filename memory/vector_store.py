@@ -167,9 +167,16 @@ class LongTermMemoryStore:
                 if r.similarity < similarity_threshold:
                     continue
                 data = r.data
+                # metadata 在 DocumentStorage 中可能是 JSON 字符串
+                raw_meta = data.get("metadata", "{}")
+                meta = (
+                    json.loads(raw_meta)
+                    if isinstance(raw_meta, str)
+                    else (raw_meta or {})
+                )
                 filtered.append(
                     {
-                        "id": data.get("metadata", {}).get("id", data.get("id", "")),
+                        "id": meta.get("id", data.get("id", "")),
                         "content": data.get("text", ""),
                         "similarity": round(r.similarity, 4),
                     }

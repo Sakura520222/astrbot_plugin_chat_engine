@@ -28,6 +28,7 @@ from .db.engine import ChatEngineDB
 from .memory.manager import MemoryManager
 from .persona.manager import ChatPersonaManager
 from .proactive.manager import ProactiveManager
+from .tools.command_dispatcher import CommandDispatcher
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
 from .utils.config import cfg_bool, cfg_float, cfg_int
@@ -38,7 +39,7 @@ from .web.server import ChatWebServer
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
     "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
-    "1.2.0",
+    "1.3.0",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -52,6 +53,7 @@ class ChatEnginePlugin(Star):
         self.tool_mgr: ChatToolManager = None
         self.memory_mgr: MemoryManager = None
         self.proactive_mgr: ProactiveManager = None
+        self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
 
@@ -188,6 +190,17 @@ class ChatEnginePlugin(Star):
         # 同步工具列表
         tools = await self.tool_mgr.refresh_tools()
         logger.info(f"[ChatEngine] 扫描到 {len(tools)} 个工具")
+
+        # 命令分发器（管理员通过自然语言执行其他插件命令）
+        if self._cfg_bool("enable_command_execution", False):
+            self.cmd_dispatcher = CommandDispatcher()
+            cmds = self.cmd_dispatcher.scan_commands()
+            logger.info(
+                f"[ChatEngine] 命令分发器已初始化, 扫描到 {len(cmds)} 个可执行命令"
+            )
+        else:
+            self.cmd_dispatcher = None
+            logger.info("[ChatEngine] 命令分发功能未启用")
 
         # 记忆管理器
         if self._cfg_bool("enable_memory", True):
@@ -786,6 +799,8 @@ class ChatEnginePlugin(Star):
                 # 这些 handler 通常接收 event 作为第一个参数
                 # 部分插件 handler 是 async generator (使用 yield)，不能直接 await
                 result = None
+                # 记录 handler 调用前的发送状态，用于检测 handler 是否直接发送了消息
+                had_sent_before = getattr(event, "_has_send_oper", False)
 
                 # 尝试传入 event + tool_args
                 try:
@@ -833,6 +848,10 @@ class ChatEnginePlugin(Star):
                 )
 
             if result is None:
+                # 检查 handler 是否通过 event.send() 直接向用户发送了消息/媒体
+                has_sent_now = getattr(event, "_has_send_oper", False)
+                if has_sent_now and not had_sent_before:
+                    return "工具已直接向用户发送了消息或媒体内容。无需再次回复。"
                 return "工具执行完成（无输出）"
             if isinstance(result, dict):
                 return json.dumps(result, ensure_ascii=False)
@@ -1294,3 +1313,64 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             f"quote_msg_id={message_id}"
         )
         return "Quote reply prepared. Now generate your response text — it will be sent as a quoted reply to that message."
+
+    # 命令执行工具 — LLM Tool Call
+
+    @filter.llm_tool(name="list_plugins")
+    async def tool_list_plugins(
+        self,
+        event: AstrMessageEvent,
+    ):
+        """List all plugins that provide bot commands, along with their command counts.
+        Call this FIRST when the user wants to find or execute a bot command.
+
+        Returns:
+            A JSON list of plugins with their command counts.
+        """
+        if not self.cmd_dispatcher:
+            return json.dumps({"error": "命令执行功能未启用。"}, ensure_ascii=False)
+        plugins = self.cmd_dispatcher.list_plugins()
+        return json.dumps(
+            {"count": len(plugins), "plugins": plugins}, ensure_ascii=False
+        )
+
+    @filter.llm_tool(name="list_commands")
+    async def tool_list_commands(
+        self,
+        event: AstrMessageEvent,
+        plugin: str = "",
+        query: str = "",
+    ):
+        """List available bot commands. Use after list_plugins to see commands from a specific plugin.
+        Returns command names, descriptions, parameters, and permission levels.
+
+        Args:
+            plugin(string): Filter by exact plugin name (from list_plugins result).
+            query(string): Optional keyword to further filter by command name or description.
+        """
+        if not self.cmd_dispatcher:
+            return json.dumps({"error": "命令执行功能未启用。"}, ensure_ascii=False)
+        result = self.cmd_dispatcher.list_commands(plugin=plugin, query=query)
+        return json.dumps(
+            {"count": len(result), "commands": result},
+            ensure_ascii=False,
+        )
+
+    @filter.llm_tool(name="execute_command")
+    async def tool_execute_command(
+        self,
+        event: AstrMessageEvent,
+        command: str,
+    ):
+        """Execute a registered bot command by name.
+        IMPORTANT: Only call this when the user's intent directly maps to a specific command.
+        If the command is not found, STOP and inform the user. Do NOT try alternative commands.
+
+        Args:
+            command(string): The full command string to execute (without the wake prefix). e.g. "help", "provider 1", "sid".
+        """
+        if not self.cmd_dispatcher:
+            return json.dumps({"error": "命令执行功能未启用。"}, ensure_ascii=False)
+
+        result = await self.cmd_dispatcher.dispatch(event, command)
+        return json.dumps(result, ensure_ascii=False)
