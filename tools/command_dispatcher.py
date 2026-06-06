@@ -40,6 +40,11 @@ class CommandDispatcher:
             if "chat_engine" in str(getattr(handler, "handler_module_path", "")):
                 continue
 
+            # 跳过未激活的插件
+            plugin_meta = star_map.get(handler.handler_module_path)
+            if not plugin_meta or not getattr(plugin_meta, "activated", False):
+                continue
+
             # 跳过已禁用的 handler
             if not getattr(handler, "enabled", True):
                 continue
@@ -191,6 +196,10 @@ class CommandDispatcher:
 
         for handler in star_handlers_registry:
             if "chat_engine" in str(getattr(handler, "handler_module_path", "")):
+                continue
+            # 跳过未激活的插件
+            plugin_meta = star_map.get(handler.handler_module_path)
+            if not plugin_meta or not getattr(plugin_meta, "activated", False):
                 continue
             if not getattr(handler, "enabled", True):
                 continue
