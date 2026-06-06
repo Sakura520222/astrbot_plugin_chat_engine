@@ -1328,11 +1328,11 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             A JSON list of plugins with their command counts.
         """
         if not self.cmd_dispatcher:
-            return json.dumps(
-                {"error": "命令执行功能未启用。"}, ensure_ascii=False
-            )
+            return json.dumps({"error": "命令执行功能未启用。"}, ensure_ascii=False)
         plugins = self.cmd_dispatcher.list_plugins()
-        return json.dumps({"count": len(plugins), "plugins": plugins}, ensure_ascii=False)
+        return json.dumps(
+            {"count": len(plugins), "plugins": plugins}, ensure_ascii=False
+        )
 
     @filter.llm_tool(name="list_commands")
     async def tool_list_commands(
@@ -1349,9 +1349,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             query(string): Optional keyword to further filter by command name or description.
         """
         if not self.cmd_dispatcher:
-            return json.dumps(
-                {"error": "命令执行功能未启用。"}, ensure_ascii=False
-            )
+            return json.dumps({"error": "命令执行功能未启用。"}, ensure_ascii=False)
         result = self.cmd_dispatcher.list_commands(plugin=plugin, query=query)
         return json.dumps(
             {"count": len(result), "commands": result},
@@ -1372,9 +1370,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             command(string): The full command string to execute (without the wake prefix). e.g. "help", "provider 1", "sid".
         """
         if not self.cmd_dispatcher:
-            return json.dumps(
-                {"error": "命令执行功能未启用。"}, ensure_ascii=False
-            )
+            return json.dumps({"error": "命令执行功能未启用。"}, ensure_ascii=False)
 
         result = await self.cmd_dispatcher.dispatch(event, command)
         return json.dumps(result, ensure_ascii=False)

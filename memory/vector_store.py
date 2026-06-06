@@ -169,7 +169,11 @@ class LongTermMemoryStore:
                 data = r.data
                 # metadata 在 DocumentStorage 中可能是 JSON 字符串
                 raw_meta = data.get("metadata", "{}")
-                meta = json.loads(raw_meta) if isinstance(raw_meta, str) else (raw_meta or {})
+                meta = (
+                    json.loads(raw_meta)
+                    if isinstance(raw_meta, str)
+                    else (raw_meta or {})
+                )
                 filtered.append(
                     {
                         "id": meta.get("id", data.get("id", "")),

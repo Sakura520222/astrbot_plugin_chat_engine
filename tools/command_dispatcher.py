@@ -136,9 +136,7 @@ class CommandDispatcher:
             for name, count in sorted(plugin_map.items())
         ]
 
-    def list_commands(
-        self, plugin: str = "", query: str = ""
-    ) -> list[dict]:
+    def list_commands(self, plugin: str = "", query: str = "") -> list[dict]:
         """查询命令列表，支持按插件名或关键词过滤。
 
         Args:
@@ -340,9 +338,7 @@ class CommandDispatcher:
             }
 
         except Exception as e:
-            logger.error(
-                f"[ChatEngine] 命令分发执行失败: {e}", exc_info=True
-            )
+            logger.error(f"[ChatEngine] 命令分发执行失败: {e}", exc_info=True)
             return {
                 "success": False,
                 "result": f"命令执行失败: {type(e).__name__}: {e}",
