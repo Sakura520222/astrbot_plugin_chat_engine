@@ -68,8 +68,9 @@ class ChatEnginePlugin(Star):
             None  # 当前工具调用产生的图片（单次执行生命周期）
         )
         self._pending_sends: list[tuple[str, object]] | None = (
-            None  # 工具调用期间的中间发送队列: [("text", str) | ("chain", list[comp])]
+            None  # 供 tool_execute_command 使用的直接发送队列
         )
+        self._llm_final_response = None  # _llm_call_with_tools 异步生成器存储的最终响应
         self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
 
@@ -676,14 +677,22 @@ class ChatEnginePlugin(Star):
                     f"工具: {tool_count} 个, 传递原生FC: {tool_set is not None and not tool_set.empty()}"
                 )
                 try:
-                    final_response = await self._llm_call_with_tools(
+                    async for (
+                        _send_type,
+                        _send_data,
+                    ) in self._llm_call_with_tools(
                         provider=provider,
                         system_prompt=system_prompt,
                         contexts=llm_contexts,
                         user_msg=llm_user_msg,
                         tool_set=tool_set,
                         event=event,
-                    )
+                    ):
+                        if _send_type == "text":
+                            yield event.plain_result(_send_data)
+                        elif _send_type == "chain":
+                            yield event.chain_result(_send_data)
+                    final_response = self._llm_final_response
                 except Exception as e:
                     logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
                     self._pending_sends = None
@@ -691,17 +700,6 @@ class ChatEnginePlugin(Star):
                         f"❌ LLM 调用失败: {type(e).__name__}: {e}"
                     )
                     return
-
-                # 发送中间结果（工具调用期间的文本 + 命令直接发送的结果）
-                if self._pending_sends:
-                    for _st, _sd in self._pending_sends:
-                        if _st == "text":
-                            _t = self._clean_response(_sd)
-                            if _t:
-                                yield event.plain_result(_t)
-                        elif _st == "chain":
-                            yield event.chain_result(_sd)
-                    self._pending_sends = None
 
                 if final_response is None:
                     logger.warning("[ChatEngine] LLM 返回 None")
@@ -825,19 +823,23 @@ class ChatEnginePlugin(Star):
         tool_set=None,
         max_tool_rounds: int | None = None,
         event: AstrMessageEvent = None,
-    ) -> object | None:
+    ):
         """调用 LLM，支持 Tool Call 循环。
 
-        如果 LLM 返回 tool_calls，执行工具并将结果追加上下文后再次调用。
-        循环直到 LLM 返回纯文本响应或达到最大轮数。
+        异步生成器：在工具调用期间立即 yield 中间结果给用户。
+        最终 LLM 响应存储在 self._llm_final_response 中。
+
+        yield: ("text", str) | ("chain", list[component])
         """
         if max_tool_rounds is None:
             max_tool_rounds = self._cfg_int("max_tool_rounds", 10)
 
+        self._llm_final_response = None
+        self._pending_sends = []  # 供 tool_execute_command 使用
+
         # 构建完整上下文
         current_contexts = list(contexts) + [user_msg]
         final_response = None
-        self._pending_sends = []  # 初始化中间发送队列
 
         for round_idx in range(max_tool_rounds):
             # 调用 LLM
@@ -854,23 +856,47 @@ class ChatEnginePlugin(Star):
             response = await provider.text_chat(**kwargs)
 
             if response is None:
-                return final_response
+                self._llm_final_response = final_response
+                return
 
             if hasattr(response, "role") and response.role == "err":
-                return response
+                self._llm_final_response = response
+                return
 
             # 检查是否有工具调用
             tool_calls_name = getattr(response, "tools_call_name", None)
             if not tool_calls_name:
-                # 纯文本响应，返回
-                return response
+                # 纯文本响应，存储并返回
+                self._llm_final_response = response
+                return
 
             # 有工具调用 — 追加 assistant 消息 (含 tool_calls)
             assistant_content = response.completion_text or ""
 
-            # 收集中间文本，稍后发送给用户
+            # 立即发送中间文本（经清洗和分段处理）
             if assistant_content.strip():
-                self._pending_sends.append(("text", assistant_content))
+                _t = self._clean_response(assistant_content)
+                if _t:
+                    _segs = self._split_response(_t)
+                    if len(_segs) <= 1:
+                        yield ("text", _t)
+                    else:
+                        logger.info(
+                            f"[ChatEngine] 中间文本分段发送: {len(_segs)} 段"
+                        )
+                        for _si, _seg in enumerate(_segs):
+                            yield ("text", _seg)
+                            if _si < len(_segs) - 1:
+                                await asyncio.sleep(
+                                    max(
+                                        0,
+                                        min(
+                                            self._cfg_int("split_delay_ms", 800),
+                                            5000,
+                                        ),
+                                    )
+                                    / 1000
+                                )
 
             assistant_msg = {
                 "role": "assistant",
@@ -915,6 +941,12 @@ class ChatEnginePlugin(Star):
                 }
                 current_contexts.append(tool_msg)
 
+            # 立即发送工具产生的直接发送结果（如 execute_command 的命令输出）
+            if self._pending_sends:
+                for _ps in self._pending_sends:
+                    yield _ps
+                self._pending_sends = []
+
             final_response = response
             logger.info(
                 f"[ChatEngine] Tool Call 轮次 {round_idx + 1}: "
@@ -928,7 +960,7 @@ class ChatEnginePlugin(Star):
             contexts=current_contexts,
             system_prompt=system_prompt,
         )
-        return response
+        self._llm_final_response = response
 
     async def _execute_tool(
         self,
