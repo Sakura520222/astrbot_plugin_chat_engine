@@ -237,9 +237,9 @@ function renderSessions(sessions, total) {
                     </div>
                 </div>
                 <div class="card-actions">
-                    <button class="btn btn-small btn-secondary" onclick="viewSession('${escapeHtml(s.session_key)}')">查看上下文</button>
-                    <button class="btn btn-small btn-secondary" onclick="viewArchives('${escapeHtml(s.session_key)}')">归档列表</button>
-                    <button class="btn btn-small btn-danger" onclick="deleteSession('${escapeHtml(s.session_key)}')">删除</button>
+                    <button class="btn btn-small btn-secondary" data-session-key="${escapeHtml(s.session_key)}" onclick="viewSession(this.dataset.sessionKey)">查看上下文</button>
+                    <button class="btn btn-small btn-secondary" data-session-key="${escapeHtml(s.session_key)}" onclick="viewArchives(this.dataset.sessionKey)">归档列表</button>
+                    <button class="btn btn-small btn-danger" data-session-key="${escapeHtml(s.session_key)}" onclick="deleteSession(this.dataset.sessionKey)">删除</button>
                 </div>
             </div>
         `;
@@ -450,9 +450,9 @@ function renderArchives(sessionKey, archives) {
                     </div>
                 </div>
                 <div class="archive-card-actions">
-                    <button class="btn btn-small btn-secondary" onclick="viewArchiveDetail(${a.id})">查看</button>
-                    <button class="btn btn-small btn-primary" onclick="restoreArchive(${a.id}, '${escapeHtml(a.title)}')">恢复</button>
-                    <button class="btn btn-small btn-danger" onclick="deleteArchive(${a.id}, '${escapeHtml(a.title)}')">删除</button>
+                    <button class="btn btn-small btn-secondary" data-archive-id="${a.id}" onclick="viewArchiveDetail(this.dataset.archiveId)">查看</button>
+                    <button class="btn btn-small btn-primary" data-archive-id="${a.id}" data-archive-title="${escapeHtml(a.title)}" onclick="restoreArchive(this.dataset.archiveId, this.dataset.archiveTitle)">恢复</button>
+                    <button class="btn btn-small btn-danger" data-archive-id="${a.id}" data-archive-title="${escapeHtml(a.title)}" onclick="deleteArchive(this.dataset.archiveId, this.dataset.archiveTitle)">删除</button>
                 </div>
             </div>
         </div>

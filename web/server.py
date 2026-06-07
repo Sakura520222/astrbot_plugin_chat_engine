@@ -464,14 +464,22 @@ class ChatWebServer:
     async def _api_get_archive(self, request: web.Request) -> web.Response:
         """查看归档会话的完整上下文"""
         session_key = request.match_info["key"]
-        archive_id = int(request.match_info["id"])
+        try:
+            archive_id = int(request.match_info["id"])
+        except (ValueError, KeyError):
+            return web.json_response({"error": "无效的归档 ID"}, status=400)
         archive = await self.plugin.db.archived_session_repo.get_by_id(archive_id)
         if not archive:
             return web.json_response({"error": "归档不存在"}, status=404)
         if archive.session_key != session_key:
             return web.json_response({"error": "归档不属于此会话"}, status=403)
 
-        messages = json.loads(archive.messages_json)
+        try:
+            messages = json.loads(archive.messages_json)
+        except (json.JSONDecodeError, TypeError):
+            return web.json_response(
+                {"error": "归档消息数据损坏，无法解析"}, status=500
+            )
         # 解析 image_ref 为 data URL 以便前端显示
         if self.plugin.context_mgr.image_store:
             messages = await self.plugin.context_mgr._resolve_images_for_messages(
@@ -497,7 +505,10 @@ class ChatWebServer:
     async def _api_restore_archive(self, request: web.Request) -> web.Response:
         """恢复归档会话到活跃状态（WebUI 版本，不走 LLM 标题生成）"""
         session_key = request.match_info["key"]
-        archive_id = int(request.match_info["id"])
+        try:
+            archive_id = int(request.match_info["id"])
+        except (ValueError, KeyError):
+            return web.json_response({"error": "无效的归档 ID"}, status=400)
 
         async with self.plugin.context_mgr.get_session_lock(session_key):
             archive = await self.plugin.db.archived_session_repo.get_by_id(archive_id)
@@ -505,6 +516,14 @@ class ChatWebServer:
                 return web.json_response({"error": "归档不存在"}, status=404)
             if archive.session_key != session_key:
                 return web.json_response({"error": "归档不属于此会话"}, status=403)
+
+            # 先验证归档 JSON 完整性，再做不可逆操作
+            try:
+                target_messages = json.loads(archive.messages_json)
+            except (json.JSONDecodeError, TypeError):
+                return web.json_response(
+                    {"error": "归档消息数据损坏，无法恢复"}, status=500
+                )
 
             # 归档当前上下文（使用时间戳标题，不调用 LLM）
             raw_current = await self.plugin.context_mgr.repo.get_context(session_key)
@@ -519,7 +538,6 @@ class ChatWebServer:
                 )
 
             # 恢复归档上下文
-            target_messages = json.loads(archive.messages_json)
             target_messages = await self.plugin.context_mgr._store_images_for_messages(
                 target_messages
             )
@@ -535,16 +553,21 @@ class ChatWebServer:
     async def _api_delete_archive(self, request: web.Request) -> web.Response:
         """删除归档会话"""
         session_key = request.match_info["key"]
-        archive_id = int(request.match_info["id"])
-        archive = await self.plugin.db.archived_session_repo.get_by_id(archive_id)
-        if not archive:
-            return web.json_response({"error": "归档不存在"}, status=404)
-        if archive.session_key != session_key:
-            return web.json_response({"error": "归档不属于此会话"}, status=403)
-        ok = await self.plugin.db.archived_session_repo.delete(archive_id)
-        if not ok:
-            return web.json_response({"error": "归档不存在"}, status=404)
-        return web.json_response({"ok": True})
+        try:
+            archive_id = int(request.match_info["id"])
+        except (ValueError, KeyError):
+            return web.json_response({"error": "无效的归档 ID"}, status=400)
+
+        async with self.plugin.context_mgr.get_session_lock(session_key):
+            archive = await self.plugin.db.archived_session_repo.get_by_id(archive_id)
+            if not archive:
+                return web.json_response({"error": "归档不存在"}, status=404)
+            if archive.session_key != session_key:
+                return web.json_response({"error": "归档不属于此会话"}, status=403)
+            ok = await self.plugin.db.archived_session_repo.delete(archive_id)
+            if not ok:
+                return web.json_response({"error": "归档不存在"}, status=404)
+            return web.json_response({"ok": True})
 
     # 配置 API
 

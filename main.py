@@ -1286,10 +1286,12 @@ class ChatEnginePlugin(Star):
                             for p in content
                             if isinstance(p, dict) and p.get("type") == "text"
                         ]
-                        content = " ".join(parts)
-                    if isinstance(content, str) and content.strip():
+                        text_content = " ".join(parts)
+                    else:
+                        text_content = content
+                    if isinstance(text_content, str) and text_content.strip():
                         prefix = "用户" if role == "user" else "助手"
-                        recent_texts.insert(0, f"{prefix}: {content.strip()[:200]}")
+                        recent_texts.insert(0, f"{prefix}: {text_content.strip()[:200]}")
                 if len(recent_texts) >= 10:
                     break
 
@@ -1407,10 +1409,8 @@ class ChatEnginePlugin(Star):
     async def _cmd_switch(self, event: AstrMessageEvent, index: int) -> str:
         """处理 /switch <N> 命令 — 切换到指定归档会话。
 
-        锁策略: 全部操作在锁内完成，防止竞态（两个管理员同时 switch）。
-        归档列表的获取和目标选定也在锁内，确保一致性。
-        恢复时通过 _store_images_for_messages 处理图片，
-        避免绕过 image_store 导致存储膨胀。
+        锁策略: 先锁内快照+验证，锁外生成标题，再锁内重新读取并执行归档+恢复。
+        与 _cmd_new 保持一致的两阶段锁模式，避免锁内网络调用阻塞并发消息。
         """
         # 权限检查
         perm_err = self._check_session_cmd_permission(event)
@@ -1419,36 +1419,49 @@ class ChatEnginePlugin(Star):
 
         session_key = self.context_mgr.build_session_key(event)
 
-        # 锁内: 加载原始上下文 + 获取归档列表（防止竞态）
+        # 第一阶段: 锁内快照 + 获取归档列表（验证有效性）
         async with self.context_mgr.get_session_lock(session_key):
             raw_current = await self.context_mgr.repo.get_context(session_key)
-
             archives = await self.db.archived_session_repo.list_by_session_key(
                 session_key
             )
             if not archives:
                 return "❌ 没有可切换的归档会话。使用 /list 查看。"
-
             if index < 1 or index > len(archives):
                 return f"❌ 无效序号 {index}，有效范围: 1-{len(archives)}"
-
             target = archives[index - 1]
+            # 快照目标 ID 和标题（锁外不依赖归档列表对象）
+            target_id = target.id
+            target_title = target.title or "未命名"
 
-            # 归档当前上下文（保留 image_ref，不膨胀）
-            if raw_current:
-                # 在锁内生成标题 — 锁外生成的话需二次获取归档列表，
-                # 增加竞态复杂度。switch 通常是管理员低频操作，可接受。
-                current_archive_title = await self._generate_session_title(
-                    event, raw_current
-                )
+        # 锁外: LLM 标题生成（网络调用，不阻塞并发消息）
+        current_archive_title = None
+        if raw_current:
+            current_archive_title = await self._generate_session_title(
+                event, raw_current
+            )
+
+        # 第二阶段: 锁内重新读取并执行归档+恢复
+        async with self.context_mgr.get_session_lock(session_key):
+            # 重新获取目标归档（防止锁外期间被并发删除）
+            target = await self.db.archived_session_repo.get_by_id(target_id)
+            if not target:
+                return "❌ 目标归档已不存在（可能被其他操作删除）。"
+            if target.session_key != session_key:
+                return "❌ 归档不属于此会话。"
+
+            # 重新读取当前上下文（避免锁外期间新增的消息被丢失）
+            latest_current = await self.context_mgr.repo.get_context(
+                session_key
+            )
+
+            # 归档当前上下文
+            if latest_current:
                 await self.db.archived_session_repo.archive(
-                    session_key, current_archive_title, raw_current
+                    session_key, current_archive_title, latest_current
                 )
-            else:
-                current_archive_title = None
 
             # 恢复目标归档的上下文到当前会话
-            # 先将 messages 中的 data URL 转换为 image_ref（如有）
             target_messages = json.loads(target.messages_json)
             target_messages = await self.context_mgr._store_images_for_messages(
                 target_messages
@@ -1456,13 +1469,12 @@ class ChatEnginePlugin(Star):
             await self.context_mgr.repo.save_context(session_key, target_messages)
 
             # 删除已恢复的归档记录
-            deleted = await self.db.archived_session_repo.delete(target.id)
+            deleted = await self.db.archived_session_repo.delete(target_id)
             if not deleted:
                 logger.warning(
-                    f"[ChatEngine] 归档记录 {target.id} 删除失败（可能已被并发操作）"
+                    f"[ChatEngine] 归档记录 {target_id} 删除失败（可能已被并发操作）"
                 )
 
-        target_title = target.title or "未命名"
         parts = [f"✅ 已切换到会话: {target_title}"]
         if current_archive_title:
             parts.append(f"当前会话已归档: {current_archive_title}")
