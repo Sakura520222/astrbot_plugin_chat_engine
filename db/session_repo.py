@@ -5,7 +5,8 @@ import json
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .models import ChatSession, _shanghai_now
+from ..utils import shanghai_now as _shanghai_now
+from .models import ChatSession
 
 
 class SessionRepository:

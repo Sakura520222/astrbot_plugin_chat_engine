@@ -122,9 +122,7 @@ class ChatWebServer:
         )
         # 通配路由放最后
         self.app.router.add_get("/api/sessions/{key:.*}", self._api_get_session)
-        self.app.router.add_delete(
-            "/api/sessions/{key:.*}", self._api_delete_session
-        )
+        self.app.router.add_delete("/api/sessions/{key:.*}", self._api_delete_session)
 
         #  配置管理
         self.app.router.add_get("/api/config", self._api_get_config)
@@ -298,17 +296,18 @@ class ChatWebServer:
         sessions, total = await self.plugin.context_mgr.repo.list_sessions(
             page, page_size
         )
-        # 为每个会话附加归档数量
-        for s in sessions:
-            try:
-                archives = (
-                    await self.plugin.db.archived_session_repo.list_by_session_key(
-                        s["session_key"]
-                    )
+        # 批量查询归档数量（单次 GROUP BY 查询，避免 N+1）
+        session_keys = [s["session_key"] for s in sessions]
+        try:
+            archive_counts = (
+                await self.plugin.db.archived_session_repo.count_by_session_keys(
+                    session_keys
                 )
-                s["archive_count"] = len(archives)
-            except Exception:
-                s["archive_count"] = 0
+            )
+        except Exception:
+            archive_counts = {}
+        for s in sessions:
+            s["archive_count"] = archive_counts.get(s["session_key"], 0)
         return web.json_response(
             {
                 "sessions": sessions,
@@ -464,10 +463,13 @@ class ChatWebServer:
 
     async def _api_get_archive(self, request: web.Request) -> web.Response:
         """查看归档会话的完整上下文"""
+        session_key = request.match_info["key"]
         archive_id = int(request.match_info["id"])
         archive = await self.plugin.db.archived_session_repo.get_by_id(archive_id)
         if not archive:
             return web.json_response({"error": "归档不存在"}, status=404)
+        if archive.session_key != session_key:
+            return web.json_response({"error": "归档不属于此会话"}, status=403)
 
         messages = json.loads(archive.messages_json)
         # 解析 image_ref 为 data URL 以便前端显示
@@ -507,10 +509,10 @@ class ChatWebServer:
             # 归档当前上下文（使用时间戳标题，不调用 LLM）
             raw_current = await self.plugin.context_mgr.repo.get_context(session_key)
             if raw_current:
-                from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                from ..utils import shanghai_now_iso
 
                 fallback_title = (
-                    f"自动归档 ({_dt.now(_tz(_td(hours=8))).strftime('%m-%d %H:%M')})"
+                    f"自动归档 ({shanghai_now_iso()[:16].replace('T', ' ')})"
                 )
                 await self.plugin.db.archived_session_repo.archive(
                     session_key, fallback_title, raw_current
@@ -521,18 +523,24 @@ class ChatWebServer:
             target_messages = await self.plugin.context_mgr._store_images_for_messages(
                 target_messages
             )
-            await self.plugin.context_mgr.repo.save_context(session_key, target_messages)
+            await self.plugin.context_mgr.repo.save_context(
+                session_key, target_messages
+            )
 
             # 删除已恢复的归档
             await self.plugin.db.archived_session_repo.delete(archive_id)
 
-        return web.json_response(
-            {"ok": True, "title": archive.title or "未命名"}
-        )
+        return web.json_response({"ok": True, "title": archive.title or "未命名"})
 
     async def _api_delete_archive(self, request: web.Request) -> web.Response:
         """删除归档会话"""
+        session_key = request.match_info["key"]
         archive_id = int(request.match_info["id"])
+        archive = await self.plugin.db.archived_session_repo.get_by_id(archive_id)
+        if not archive:
+            return web.json_response({"error": "归档不存在"}, status=404)
+        if archive.session_key != session_key:
+            return web.json_response({"error": "归档不属于此会话"}, status=403)
         ok = await self.plugin.db.archived_session_repo.delete(archive_id)
         if not ok:
             return web.json_response({"error": "归档不存在"}, status=404)

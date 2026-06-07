@@ -3,7 +3,8 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .models import ToolConfig, _shanghai_now
+from ..utils import shanghai_now as _shanghai_now
+from .models import ToolConfig
 
 
 class ToolConfigRepository:

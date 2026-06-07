@@ -5,18 +5,11 @@ import hashlib
 import json
 import os
 import uuid
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from astrbot.api import logger
 
-# 上海时区 (UTC+8)
-_SHANGHAI_TZ = timezone(timedelta(hours=8))
-
-
-def _shanghai_now_iso() -> str:
-    """返回当前上海时区时间的 ISO 格式字符串。"""
-    return datetime.now(_SHANGHAI_TZ).isoformat()
+from ..utils import shanghai_now_iso as _shanghai_now_iso
 
 
 class ShortTermMemoryStore:

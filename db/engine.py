@@ -40,12 +40,11 @@ class ChatEngineDB:
         async with self.engine.begin() as conn:
             await conn.run_sync(chat_engine_metadata.create_all)
 
+        from .archived_session_repo import ArchivedSessionRepository
         from .image_repo import ImageRepository
         from .persona_repo import PersonaRepository
         from .session_repo import SessionRepository
         from .tool_config_repo import ToolConfigRepository
-
-        from .archived_session_repo import ArchivedSessionRepository
 
         self.session_repo = SessionRepository(self.session_factory)
         self.archived_session_repo = ArchivedSessionRepository(self.session_factory)

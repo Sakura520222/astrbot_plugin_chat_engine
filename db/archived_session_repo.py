@@ -2,10 +2,11 @@
 
 import json
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .models import CEArchivedSession, _shanghai_now
+from ..utils import shanghai_now as _shanghai_now
+from .models import CEArchivedSession
 
 
 class ArchivedSessionRepository:
@@ -42,6 +43,21 @@ class ArchivedSessionRepository:
                 .order_by(CEArchivedSession.updated_at.desc())
             )
             return list(result.scalars().all())
+
+    async def count_by_session_keys(self, session_keys: list[str]) -> dict[str, int]:
+        """批量查询多个 session_key 的归档数量，返回 {session_key: count}。"""
+        if not session_keys:
+            return {}
+        async with self._factory() as session:
+            result = await session.execute(
+                select(
+                    CEArchivedSession.session_key,
+                    func.count(CEArchivedSession.id),
+                )
+                .where(CEArchivedSession.session_key.in_(session_keys))
+                .group_by(CEArchivedSession.session_key)
+            )
+            return dict(result.all())
 
     async def get_by_id(self, archive_id: int) -> CEArchivedSession | None:
         """按主键获取归档记录。"""

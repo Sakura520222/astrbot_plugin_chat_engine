@@ -5,22 +5,15 @@ import json
 import random
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from astrbot.api import logger
 
+from ..utils import SHANGHAI_TZ as _SHANGHAI_TZ
 from ..utils import format_current_time
+from ..utils import shanghai_now_iso as _shanghai_now_iso
 from ..utils.config import cfg_bool, cfg_int
-
-# 上海时区 (UTC+8)
-_SHANGHAI_TZ = timezone(timedelta(hours=8))
-
-
-def _shanghai_now_iso() -> str:
-    """返回当前上海时区时间的 ISO 格式字符串。"""
-    return datetime.now(_SHANGHAI_TZ).isoformat()
-
 
 PROACTIVE_SYSTEM_SUFFIX_PRIVATE = """
 

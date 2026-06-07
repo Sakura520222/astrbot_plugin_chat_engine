@@ -16,7 +16,6 @@ import inspect
 import json
 import re
 import time as _time
-from datetime import datetime, timezone, timedelta
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -33,7 +32,7 @@ from .proactive.manager import ProactiveManager
 from .tools.command_dispatcher import CommandDispatcher
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
-from .utils import format_current_time
+from .utils import format_current_time, shanghai_now_iso
 from .utils.config import cfg_bool, cfg_float, cfg_int
 from .web.server import ChatWebServer
 
@@ -65,7 +64,9 @@ class ChatEnginePlugin(Star):
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
-        self._last_tool_images: list[dict] | None = None  # 当前工具调用产生的图片（单次执行生命周期）
+        self._last_tool_images: list[dict] | None = (
+            None  # 当前工具调用产生的图片（单次执行生命周期）
+        )
         self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
 
@@ -1293,7 +1294,7 @@ class ChatEnginePlugin(Star):
                     break
 
             if not recent_texts:
-                return f"未命名会话 ({datetime.now(timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')})"
+                return f"未命名会话 ({shanghai_now_iso()[:16].replace('T', ' ')})"
 
             # 构建命名 prompt — 使用激活人格的 system prompt
             persona_prompt = await self.persona_mgr.get_system_prompt()
@@ -1310,53 +1311,72 @@ class ChatEnginePlugin(Star):
             )
 
             if response and response.completion_text:
-                title = response.completion_text.strip().strip("\"'""''")
+                title = response.completion_text.strip().strip("\"'''")
                 if title and len(title) <= 50:
                     return title
 
-            return f"未命名会话 ({datetime.now(timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')})"
+            return f"未命名会话 ({shanghai_now_iso()[:16].replace('T', ' ')})"
 
         except Exception as e:
             logger.warning(f"[ChatEngine] 生成会话标题失败: {e}")
-            return f"未命名会话 ({datetime.now(timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')})"
+            return f"未命名会话 ({shanghai_now_iso()[:16].replace('T', ' ')})"
 
     async def _cmd_new(self, event: AstrMessageEvent) -> str:
         """处理 /new 命令 — 归档当前会话并开启新会话。
 
-        锁策略: 锁内仅做快速读写（加载原始数据、归档、清空），
-        LLM 标题生成在锁外完成，避免阻塞同一会话的并发消息。
+
+
+        锁策略: 先锁内快照，锁外生成标题，再锁内重新读取并归档。
+
+        第二次加锁时重新读取最新消息，避免锁外 LLM 调用期间新增消息被丢失。
+
         """
+
         # 权限检查
+
         perm_err = self._check_session_cmd_permission(event)
+
         if perm_err:
             return f"❌ {perm_err}"
 
         session_key = self.context_mgr.build_session_key(event)
 
         # 锁内: 快速加载原始上下文（保留 image_ref，不膨胀）
+
         async with self.context_mgr.get_session_lock(session_key):
             raw_messages = await self.context_mgr.repo.get_context(session_key)
 
         # 锁外: LLM 标题生成（网络调用，不阻塞并发消息）
+
         archive_title = None
+
         if raw_messages:
             archive_title = await self._generate_session_title(event, raw_messages)
 
-        # 锁内: 归档 + 清空
-        if raw_messages:
-            async with self.context_mgr.get_session_lock(session_key):
-                await self.db.archived_session_repo.archive(
-                    session_key, archive_title, raw_messages
-                )
-                # 清空当前上下文
-                await self.context_mgr.repo.save_context(session_key, [])
-            logger.info(
-                f"[ChatEngine] 会话已归档: {session_key}, "
-                f"标题: {archive_title}, 消息数: {len(raw_messages)}"
-            )
+        # 锁内: 重新读取最新消息 + 归档 + 清空
 
-        if archive_title:
+        # 重新读取确保 LLM 标题生成期间新增的消息不会丢失
+
+        async with self.context_mgr.get_session_lock(session_key):
+            latest_messages = await self.context_mgr.repo.get_context(session_key)
+
+            if latest_messages:
+                await self.db.archived_session_repo.archive(
+                    session_key, archive_title, latest_messages
+                )
+
+                # 清空当前上下文
+
+                await self.context_mgr.repo.save_context(session_key, [])
+
+                logger.info(
+                    f"[ChatEngine] 会话已归档: {session_key}, "
+                    f"标题: {archive_title}, 消息数: {len(latest_messages)}"
+                )
+
+        if archive_title and raw_messages:
             return f"✅ 已开启新会话\n上一话题已归档: {archive_title}"
+
         return "✅ 已开启新会话"
 
     async def _cmd_list(self, event: AstrMessageEvent) -> str:
@@ -1376,7 +1396,9 @@ class ChatEnginePlugin(Star):
         for idx, archive in enumerate(archives, 1):
             title = archive.title or "未命名"
             count = archive.message_count
-            updated = archive.updated_at.strftime("%m-%d %H:%M") if archive.updated_at else ""
+            updated = (
+                archive.updated_at.strftime("%m-%d %H:%M") if archive.updated_at else ""
+            )
             lines.append(f"{idx}. {title} ({count}条, {updated})")
 
         lines.append("\n使用 /switch <序号> 切换到指定会话")

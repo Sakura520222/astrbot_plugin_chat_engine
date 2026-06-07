@@ -4,21 +4,15 @@ Uses a SEPARATE MetaData instance to avoid any interference with AstrBot's
 global SQLModel metadata. This prevents the CancelledError crash.
 """
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, MetaData, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ..utils import shanghai_now as _shanghai_now
+
 # 独立的 MetaData 实例 — 与 AstrBot 的 SQLModel.metadata 完全隔离
 chat_engine_metadata = MetaData()
-
-# 上海时区 (UTC+8)
-_SHANGHAI_TZ = timezone(timedelta(hours=8))
-
-
-def _shanghai_now() -> datetime:
-    """返回当前上海时区的 naive datetime（去除 tzinfo，与旧数据兼容）。"""
-    return datetime.now(_SHANGHAI_TZ).replace(tzinfo=None)
 
 
 class ChatEngineBase(DeclarativeBase):
