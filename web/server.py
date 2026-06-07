@@ -103,11 +103,28 @@ class ChatWebServer:
 
         #  会话管理
         self.app.router.add_get("/api/sessions", self._api_list_sessions)
+        # 归档路由必须注册在 {key:.*} 通配路由之前，否则通配符会吞掉归档路径
         self.app.router.add_get(
             "/api/sessions/{key:.*}/llm-preview", self._api_llm_preview
         )
+        self.app.router.add_get(
+            "/api/sessions/{key:.*}/archives", self._api_list_archives
+        )
+        self.app.router.add_get(
+            "/api/sessions/{key:.*}/archives/{id}", self._api_get_archive
+        )
+        self.app.router.add_post(
+            "/api/sessions/{key:.*}/archives/{id}/restore",
+            self._api_restore_archive,
+        )
+        self.app.router.add_delete(
+            "/api/sessions/{key:.*}/archives/{id}", self._api_delete_archive
+        )
+        # 通配路由放最后
         self.app.router.add_get("/api/sessions/{key:.*}", self._api_get_session)
-        self.app.router.add_delete("/api/sessions/{key:.*}", self._api_delete_session)
+        self.app.router.add_delete(
+            "/api/sessions/{key:.*}", self._api_delete_session
+        )
 
         #  配置管理
         self.app.router.add_get("/api/config", self._api_get_config)
@@ -281,6 +298,17 @@ class ChatWebServer:
         sessions, total = await self.plugin.context_mgr.repo.list_sessions(
             page, page_size
         )
+        # 为每个会话附加归档数量
+        for s in sessions:
+            try:
+                archives = (
+                    await self.plugin.db.archived_session_repo.list_by_session_key(
+                        s["session_key"]
+                    )
+                )
+                s["archive_count"] = len(archives)
+            except Exception:
+                s["archive_count"] = 0
         return web.json_response(
             {
                 "sessions": sessions,
@@ -406,6 +434,109 @@ class ChatWebServer:
                 content_type="application/json",
                 status=500,
             )
+
+    # 归档会话 API
+
+    async def _api_list_archives(self, request: web.Request) -> web.Response:
+        """列出指定会话的所有归档"""
+        session_key = request.match_info["key"]
+        archives = await self.plugin.db.archived_session_repo.list_by_session_key(
+            session_key
+        )
+        return web.json_response(
+            {
+                "archives": [
+                    {
+                        "id": a.id,
+                        "title": a.title or "未命名",
+                        "message_count": a.message_count,
+                        "created_at": a.created_at.isoformat()
+                        if a.created_at
+                        else None,
+                        "updated_at": a.updated_at.isoformat()
+                        if a.updated_at
+                        else None,
+                    }
+                    for a in archives
+                ]
+            }
+        )
+
+    async def _api_get_archive(self, request: web.Request) -> web.Response:
+        """查看归档会话的完整上下文"""
+        archive_id = int(request.match_info["id"])
+        archive = await self.plugin.db.archived_session_repo.get_by_id(archive_id)
+        if not archive:
+            return web.json_response({"error": "归档不存在"}, status=404)
+
+        messages = json.loads(archive.messages_json)
+        # 解析 image_ref 为 data URL 以便前端显示
+        if self.plugin.context_mgr.image_store:
+            messages = await self.plugin.context_mgr._resolve_images_for_messages(
+                messages
+            )
+
+        return web.json_response(
+            {
+                "id": archive.id,
+                "session_key": archive.session_key,
+                "title": archive.title or "未命名",
+                "message_count": archive.message_count,
+                "messages": messages,
+                "created_at": archive.created_at.isoformat()
+                if archive.created_at
+                else None,
+                "updated_at": archive.updated_at.isoformat()
+                if archive.updated_at
+                else None,
+            }
+        )
+
+    async def _api_restore_archive(self, request: web.Request) -> web.Response:
+        """恢复归档会话到活跃状态（WebUI 版本，不走 LLM 标题生成）"""
+        session_key = request.match_info["key"]
+        archive_id = int(request.match_info["id"])
+
+        async with self.plugin.context_mgr.get_session_lock(session_key):
+            archive = await self.plugin.db.archived_session_repo.get_by_id(archive_id)
+            if not archive:
+                return web.json_response({"error": "归档不存在"}, status=404)
+            if archive.session_key != session_key:
+                return web.json_response({"error": "归档不属于此会话"}, status=403)
+
+            # 归档当前上下文（使用时间戳标题，不调用 LLM）
+            raw_current = await self.plugin.context_mgr.repo.get_context(session_key)
+            if raw_current:
+                from datetime import datetime as _dt
+
+                fallback_title = (
+                    f"自动归档 ({_dt.now().strftime('%m-%d %H:%M')})"
+                )
+                await self.plugin.db.archived_session_repo.archive(
+                    session_key, fallback_title, raw_current
+                )
+
+            # 恢复归档上下文
+            target_messages = json.loads(archive.messages_json)
+            target_messages = await self.plugin.context_mgr._store_images_for_messages(
+                target_messages
+            )
+            await self.plugin.context_mgr.repo.save_context(session_key, target_messages)
+
+            # 删除已恢复的归档
+            await self.plugin.db.archived_session_repo.delete(archive_id)
+
+        return web.json_response(
+            {"ok": True, "title": archive.title or "未命名"}
+        )
+
+    async def _api_delete_archive(self, request: web.Request) -> web.Response:
+        """删除归档会话"""
+        archive_id = int(request.match_info["id"])
+        ok = await self.plugin.db.archived_session_repo.delete(archive_id)
+        if not ok:
+            return web.json_response({"error": "归档不存在"}, status=404)
+        return web.json_response({"ok": True})
 
     # 配置 API
 

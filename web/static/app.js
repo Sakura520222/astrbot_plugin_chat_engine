@@ -3,7 +3,7 @@
 
 const API_BASE = '';
 
-// ─── Utility Functions ───
+// Utility Functions
 
 async function api(method, path, body = null) {
     const opts = {
@@ -57,7 +57,7 @@ function sourceLabel(source) {
     return '<span class="source-label source-tool">[工具]</span>';
 }
 
-// ─── Tab Switching ───
+// Tab Switching
 
 document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', () => {
@@ -77,7 +77,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
 });
 
 
-// ─── Persona Management ───
+// Persona Management
 
 
 let personas = [];
@@ -198,7 +198,7 @@ async function setDefaultPersona(id) {
 }
 
 
-// ─── Session Management ───
+// Session Management
 
 
 let sessionPage = 1;
@@ -227,16 +227,18 @@ function renderSessions(sessions, total) {
     container.innerHTML = sessions.map(s => {
         const isGroup = !s.session_key.includes(':private:');
         const tag = isGroup ? '<span class="tag">群</span>' : '<span class="tag">私</span>';
+        const archiveBadge = s.archive_count ? `<span class="badge-archive">${s.archive_count} 个归档</span>` : '';
         return `
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">${tag} ${escapeHtml(s.session_key)}</div>
+                    <div class="card-title">${tag} ${escapeHtml(s.session_key)} ${archiveBadge}</div>
                     <div class="card-meta">
                         ${s.message_count} 条消息 · ${s.updated_at ? new Date(s.updated_at).toLocaleString() : ''}
                     </div>
                 </div>
                 <div class="card-actions">
                     <button class="btn btn-small btn-secondary" onclick="viewSession('${escapeHtml(s.session_key)}')">查看上下文</button>
+                    <button class="btn btn-small btn-secondary" onclick="viewArchives('${escapeHtml(s.session_key)}')">归档列表</button>
                     <button class="btn btn-small btn-danger" onclick="deleteSession('${escapeHtml(s.session_key)}')">删除</button>
                 </div>
             </div>
@@ -410,7 +412,132 @@ async function deleteSession(key) {
 }
 
 
-// ─── Tool Management ───
+// Archive Management
+
+
+let currentArchiveSessionKey = null;
+
+async function viewArchives(key) {
+    currentArchiveSessionKey = key;
+    try {
+        const data = await api('GET', `/api/sessions/${encodeURIComponent(key)}/archives`);
+        renderArchives(key, data.archives || []);
+    } catch (e) {
+        toast('加载归档失败: ' + e.message, 'error');
+    }
+}
+
+function renderArchives(sessionKey, archives) {
+    const container = document.getElementById('archives-list');
+    document.getElementById('archives-modal-title').textContent = `归档会话 — ${sessionKey}`;
+
+    if (!archives.length) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <p>暂无归档会话。使用 /new 命令可归档当前会话。</p>
+            </div>`;
+        document.getElementById('archives-modal').classList.remove('hidden');
+        return;
+    }
+
+    container.innerHTML = archives.map((a, idx) => `
+        <div class="archive-card" style="margin-bottom:10px;">
+            <div class="archive-card-header">
+                <div style="flex:1;min-width:0;">
+                    <div class="archive-card-title">${idx + 1}. ${escapeHtml(a.title)}</div>
+                    <div class="archive-card-meta">
+                        ${a.message_count} 条消息 · 更新于 ${a.updated_at ? new Date(a.updated_at).toLocaleString() : ''}
+                    </div>
+                </div>
+                <div class="archive-card-actions">
+                    <button class="btn btn-small btn-secondary" onclick="viewArchiveDetail(${a.id})">查看</button>
+                    <button class="btn btn-small btn-primary" onclick="restoreArchive(${a.id}, '${escapeHtml(a.title)}')">恢复</button>
+                    <button class="btn btn-small btn-danger" onclick="deleteArchive(${a.id}, '${escapeHtml(a.title)}')">删除</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+
+    document.getElementById('archives-modal').classList.remove('hidden');
+}
+
+function hideArchivesModal() {
+    document.getElementById('archives-modal').classList.add('hidden');
+}
+
+async function viewArchiveDetail(archiveId) {
+    try {
+        const data = await api('GET', `/api/sessions/${encodeURIComponent(currentArchiveSessionKey)}/archives/${archiveId}`);
+        const detail = document.getElementById('archive-detail-content');
+        document.getElementById('archive-detail-title').textContent = `归档: ${data.title}`;
+
+        detail.innerHTML = (data.messages || []).map(msg => {
+            const role = msg.role || 'unknown';
+            let content = '';
+            if (typeof msg.content === 'string') {
+                content = formatReplyContent(escapeHtml(msg.content));
+            } else if (Array.isArray(msg.content)) {
+                content = msg.content.map(p => {
+                    if (p.type === 'text') {
+                        return formatReplyContent(escapeHtml(p.text || ''));
+                    }
+                    if (p.type === 'image_url' && p.image_url && p.image_url.url) {
+                        return `<img src="${escapeHtml(p.image_url.url)}" style="max-width:200px;max-height:200px;border-radius:8px;margin:4px 0;display:block;" alt="image" />`;
+                    }
+                    return '';
+                }).filter(Boolean).join('\n');
+            }
+            const roleLabel = { user: 'USER', assistant: 'ASSISTANT', system: 'SYSTEM', tool: 'TOOL', observed: 'OBSERVED' }[role] || role.toUpperCase();
+            return `
+                <div class="msg-bubble msg-${role}">
+                    <div class="msg-role">${roleLabel}</div>
+                    ${content || '<em>(无文本内容)</em>'}
+                </div>
+            `;
+        }).join('');
+
+        if (!data.messages || !data.messages.length) {
+            detail.innerHTML = `
+                <div class="empty-state">
+                    <p>此归档暂无消息记录</p>
+                </div>`;
+        }
+
+        document.getElementById('archive-detail-modal').classList.remove('hidden');
+    } catch (e) {
+        toast('加载归档详情失败: ' + e.message, 'error');
+    }
+}
+
+function hideArchiveDetail() {
+    document.getElementById('archive-detail-modal').classList.add('hidden');
+}
+
+async function restoreArchive(archiveId, title) {
+    if (!confirm(`确定要恢复归档「${title}」吗？当前活跃会话将被自动归档。`)) return;
+    try {
+        const data = await api('POST', `/api/sessions/${encodeURIComponent(currentArchiveSessionKey)}/archives/${archiveId}/restore`);
+        toast(`已恢复会话: ${data.title}`);
+        hideArchivesModal();
+        loadSessions();
+    } catch (e) {
+        toast('恢复失败: ' + e.message, 'error');
+    }
+}
+
+async function deleteArchive(archiveId, title) {
+    if (!confirm(`确定要删除归档「${title}」吗？此操作不可撤销。`)) return;
+    try {
+        await api('DELETE', `/api/sessions/${encodeURIComponent(currentArchiveSessionKey)}/archives/${archiveId}`);
+        toast('归档已删除');
+        viewArchives(currentArchiveSessionKey);
+    } catch (e) {
+        toast('删除失败: ' + e.message, 'error');
+    }
+}
+
+
+// Tool Management
 
 
 async function loadTools() {
@@ -492,7 +619,7 @@ async function refreshTools() {
 }
 
 
-// ─── Config Management ───
+// Config Management
 
 
 const CONFIG_FIELDS = [
@@ -612,7 +739,7 @@ async function saveConfig() {
 }
 
 
-// ─── Memory Management ───
+// Memory Management
 
 
 let currentMemorySessionKey = null;
@@ -787,7 +914,7 @@ async function deleteMemory(type, id) {
 }
 
 
-// ─── Proactive Management ───
+// Proactive Management
 
 
 let proactiveSessions = {};
@@ -877,7 +1004,7 @@ async function toggleProactiveRound() {
     }
 }
 
-// ─── Auth ───
+// Auth
 
 
 async function checkAuth() {
@@ -910,7 +1037,7 @@ async function logout() {
     window.location.href = '/login';
 }
 
-// ─── Init ───
+// Init
 
 document.addEventListener('DOMContentLoaded', async () => {
     const ok = await checkAuth();

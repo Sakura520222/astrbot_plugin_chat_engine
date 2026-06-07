@@ -9,6 +9,7 @@ import os
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .models import (  # noqa: F401
+    CEArchivedSession,
     CEImage,
     CEPersona,
     ChatSession,
@@ -27,6 +28,7 @@ class ChatEngineDB:
             self.engine, class_=AsyncSession, expire_on_commit=False
         )
         self.session_repo = None
+        self.archived_session_repo = None
         self.persona_repo = None
         self.tool_config_repo = None
         self.image_repo = None
@@ -43,7 +45,10 @@ class ChatEngineDB:
         from .session_repo import SessionRepository
         from .tool_config_repo import ToolConfigRepository
 
+        from .archived_session_repo import ArchivedSessionRepository
+
         self.session_repo = SessionRepository(self.session_factory)
+        self.archived_session_repo = ArchivedSessionRepository(self.session_factory)
         self.persona_repo = PersonaRepository(self.session_factory)
         self.tool_config_repo = ToolConfigRepository(self.session_factory)
         self.image_repo = ImageRepository(self.session_factory)

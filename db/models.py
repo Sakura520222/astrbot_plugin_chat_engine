@@ -57,6 +57,20 @@ class CEPersona(ChatEngineBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class CEArchivedSession(ChatEngineBase):
+    """归档会话 — 多会话支持，存储非活跃的历史会话"""
+
+    __tablename__ = "ce_archived_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_key: Mapped[str] = mapped_column(String(512), index=True)
+    title: Mapped[str] = mapped_column(String(256), default="")
+    messages_json: Mapped[str] = mapped_column(Text, default="[]")
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class ToolConfig(ChatEngineBase):
     """工具启用/禁用配置"""
 
