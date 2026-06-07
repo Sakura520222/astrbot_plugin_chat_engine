@@ -32,7 +32,7 @@ from .proactive.manager import ProactiveManager
 from .tools.command_dispatcher import CommandDispatcher
 from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
-from .utils import format_current_time
+from .utils import format_current_time, shanghai_now_iso
 from .utils.config import cfg_bool, cfg_float, cfg_int
 from .web.server import ChatWebServer
 
@@ -40,11 +40,17 @@ from .web.server import ChatWebServer
 @register(
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
-    "完全替代 AstrBot 自带聊天功能。独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
-    "1.3.1",
+    "完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、多会话管理、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
+    "1.3.2",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
+
+    # 会话管理命令正则（在唤醒前缀已去除后的消息文本上匹配）
+    # 框架会剥离唤醒前缀(如"/")，所以需同时匹配有/无前缀的情况
+    _SESSION_CMD_NEW = re.compile(r"^/?new$", re.IGNORECASE)
+    _SESSION_CMD_LIST = re.compile(r"^/?list$", re.IGNORECASE)
+    _SESSION_CMD_SWITCH = re.compile(r"^/?switch\s+(\d+)$", re.IGNORECASE)
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -58,7 +64,9 @@ class ChatEnginePlugin(Star):
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
-        self._last_tool_images: list[dict] | None = None  # 当前工具调用产生的图片（单次执行生命周期）
+        self._last_tool_images: list[dict] | None = (
+            None  # 当前工具调用产生的图片（单次执行生命周期）
+        )
         self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
 
@@ -431,6 +439,18 @@ class ChatEnginePlugin(Star):
                     logger.info("[ChatEngine] 空消息，跳过")
                 event.should_call_llm(False)
                 return
+
+            # 会话管理命令拦截: /new, /list, /switch N
+            # 在框架命令检测之前处理，拦截框架原有的 /new 等命令
+            if is_at or not is_group:
+                session_cmd_result = await self._try_handle_session_cmd(
+                    event, message_text
+                )
+                if session_cmd_result is not None:
+                    event.should_call_llm(False)
+                    yield event.plain_result(session_cmd_result)
+                    event.stop_event()
+                    return
 
             #  命令检测: 如果有其他插件的命令处理器匹配了此消息，交给它们处理
             # 只检查 CommandFilter 类型的处理器，忽略 event_message_type(ALL) 广播处理器
@@ -1202,6 +1222,263 @@ class ChatEnginePlugin(Star):
         cleaned = cleaned.strip()
 
         return cleaned
+
+    # 多会话管理 — 命令拦截与处理
+
+    async def _try_handle_session_cmd(
+        self, event: AstrMessageEvent, message_text: str
+    ) -> str | None:
+        """尝试拦截会话管理命令。返回响应文本，不匹配返回 None。
+
+        支持的命令:
+        - /new: 归档当前会话，开启新会话
+        - /list: 查看所有归档会话
+        - /switch <N>: 切换到指定归档会话
+        """
+        text = message_text.strip()
+
+        # /new
+        if self._SESSION_CMD_NEW.match(text):
+            return await self._cmd_new(event)
+
+        # /list
+        if self._SESSION_CMD_LIST.match(text):
+            return await self._cmd_list(event)
+
+        # /switch <N>
+        switch_match = self._SESSION_CMD_SWITCH.match(text)
+        if switch_match:
+            index = int(switch_match.group(1))
+            return await self._cmd_switch(event, index)
+
+        return None
+
+    def _check_session_cmd_permission(self, event: AstrMessageEvent) -> str | None:
+        """检查会话命令权限。返回 None 表示通过，返回字符串为拒绝原因。"""
+        if self.context_mgr.is_group_message(event):
+            if not event.is_admin():
+                return "此操作仅限群管理员。"
+        return None
+
+    async def _generate_session_title(
+        self, event: AstrMessageEvent, messages: list[dict]
+    ) -> str:
+        """调用 LLM 为会话生成话题标题。
+
+        使用当前激活人格的 system prompt 作为基础，追加命名指令。
+        失败时回退到 "未命名会话 (时间戳)" 格式。
+        """
+        try:
+            provider = self.context.get_using_provider(event.unified_msg_origin)
+            if not provider:
+                raise ValueError("未找到 Provider")
+
+            # 提取最近对话文本用于命名（最多取最后 10 条 user+assistant 消息）
+            recent_texts = []
+            for msg in reversed(messages):
+                role = msg.get("role", "")
+                if role in ("user", "assistant"):
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        # 提取 text 部分
+                        parts = [
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        ]
+                        text_content = " ".join(parts)
+                    else:
+                        text_content = content
+                    if isinstance(text_content, str) and text_content.strip():
+                        prefix = "用户" if role == "user" else "助手"
+                        recent_texts.insert(0, f"{prefix}: {text_content.strip()[:200]}")
+                if len(recent_texts) >= 10:
+                    break
+
+            if not recent_texts:
+                return f"未命名会话 ({shanghai_now_iso()[:16].replace('T', ' ')})"
+
+            # 构建命名 prompt — 使用激活人格的 system prompt
+            persona_prompt = await self.persona_mgr.get_system_prompt()
+            naming_prompt = (
+                f"{persona_prompt}\n\n"
+                "请根据以下对话内容，生成一个简短的话题标题（不超过20个字）。"
+                "只输出标题本身，不要加引号、标点或其他内容。"
+            )
+            conversation_summary = "\n".join(recent_texts)
+
+            response = await provider.text_chat(
+                system_prompt=naming_prompt,
+                prompt=conversation_summary,
+            )
+
+            if response and response.completion_text:
+                title = response.completion_text.strip().strip("\"'''")
+                if title and len(title) <= 50:
+                    return title
+
+            return f"未命名会话 ({shanghai_now_iso()[:16].replace('T', ' ')})"
+
+        except Exception as e:
+            logger.warning(f"[ChatEngine] 生成会话标题失败: {e}")
+            return f"未命名会话 ({shanghai_now_iso()[:16].replace('T', ' ')})"
+
+    async def _cmd_new(self, event: AstrMessageEvent) -> str:
+        """处理 /new 命令 — 归档当前会话并开启新会话。
+
+
+
+        锁策略: 先锁内快照，锁外生成标题，再锁内重新读取并归档。
+
+        第二次加锁时重新读取最新消息，避免锁外 LLM 调用期间新增消息被丢失。
+
+        """
+
+        # 权限检查
+
+        perm_err = self._check_session_cmd_permission(event)
+
+        if perm_err:
+            return f"❌ {perm_err}"
+
+        session_key = self.context_mgr.build_session_key(event)
+
+        # 锁内: 快速加载原始上下文（保留 image_ref，不膨胀）
+
+        async with self.context_mgr.get_session_lock(session_key):
+            raw_messages = await self.context_mgr.repo.get_context(session_key)
+
+        # 锁外: LLM 标题生成（网络调用，不阻塞并发消息）
+
+        archive_title = None
+
+        if raw_messages:
+            archive_title = await self._generate_session_title(event, raw_messages)
+
+        # 锁内: 重新读取最新消息 + 归档 + 清空
+
+        # 重新读取确保 LLM 标题生成期间新增的消息不会丢失
+
+        async with self.context_mgr.get_session_lock(session_key):
+            latest_messages = await self.context_mgr.repo.get_context(session_key)
+
+            if latest_messages:
+                await self.db.archived_session_repo.archive(
+                    session_key, archive_title, latest_messages
+                )
+
+                # 清空当前上下文
+
+                await self.context_mgr.repo.save_context(session_key, [])
+
+                logger.info(
+                    f"[ChatEngine] 会话已归档: {session_key}, "
+                    f"标题: {archive_title}, 消息数: {len(latest_messages)}"
+                )
+
+        if archive_title and raw_messages:
+            return f"✅ 已开启新会话\n上一话题已归档: {archive_title}"
+
+        return "✅ 已开启新会话"
+
+    async def _cmd_list(self, event: AstrMessageEvent) -> str:
+        """处理 /list 命令 — 查看所有归档会话。"""
+        # 权限检查
+        perm_err = self._check_session_cmd_permission(event)
+        if perm_err:
+            return f"❌ {perm_err}"
+
+        session_key = self.context_mgr.build_session_key(event)
+        archives = await self.db.archived_session_repo.list_by_session_key(session_key)
+
+        if not archives:
+            return "📋 暂无归档会话。"
+
+        lines = ["📋 归档会话列表："]
+        for idx, archive in enumerate(archives, 1):
+            title = archive.title or "未命名"
+            count = archive.message_count
+            updated = (
+                archive.updated_at.strftime("%m-%d %H:%M") if archive.updated_at else ""
+            )
+            lines.append(f"{idx}. {title} ({count}条, {updated})")
+
+        lines.append("\n使用 /switch <序号> 切换到指定会话")
+        return "\n".join(lines)
+
+    async def _cmd_switch(self, event: AstrMessageEvent, index: int) -> str:
+        """处理 /switch <N> 命令 — 切换到指定归档会话。
+
+        锁策略: 先锁内快照+验证，锁外生成标题，再锁内重新读取并执行归档+恢复。
+        与 _cmd_new 保持一致的两阶段锁模式，避免锁内网络调用阻塞并发消息。
+        """
+        # 权限检查
+        perm_err = self._check_session_cmd_permission(event)
+        if perm_err:
+            return f"❌ {perm_err}"
+
+        session_key = self.context_mgr.build_session_key(event)
+
+        # 第一阶段: 锁内快照 + 获取归档列表（验证有效性）
+        async with self.context_mgr.get_session_lock(session_key):
+            raw_current = await self.context_mgr.repo.get_context(session_key)
+            archives = await self.db.archived_session_repo.list_by_session_key(
+                session_key
+            )
+            if not archives:
+                return "❌ 没有可切换的归档会话。使用 /list 查看。"
+            if index < 1 or index > len(archives):
+                return f"❌ 无效序号 {index}，有效范围: 1-{len(archives)}"
+            target = archives[index - 1]
+            # 快照目标 ID 和标题（锁外不依赖归档列表对象）
+            target_id = target.id
+            target_title = target.title or "未命名"
+
+        # 锁外: LLM 标题生成（网络调用，不阻塞并发消息）
+        current_archive_title = None
+        if raw_current:
+            current_archive_title = await self._generate_session_title(
+                event, raw_current
+            )
+
+        # 第二阶段: 锁内重新读取并执行归档+恢复
+        async with self.context_mgr.get_session_lock(session_key):
+            # 重新获取目标归档（防止锁外期间被并发删除）
+            target = await self.db.archived_session_repo.get_by_id(target_id)
+            if not target:
+                return "❌ 目标归档已不存在（可能被其他操作删除）。"
+            if target.session_key != session_key:
+                return "❌ 归档不属于此会话。"
+
+            # 重新读取当前上下文（避免锁外期间新增的消息被丢失）
+            latest_current = await self.context_mgr.repo.get_context(
+                session_key
+            )
+
+            # 归档当前上下文
+            if latest_current:
+                await self.db.archived_session_repo.archive(
+                    session_key, current_archive_title, latest_current
+                )
+
+            # 恢复目标归档的上下文到当前会话
+            target_messages = json.loads(target.messages_json)
+            target_messages = await self.context_mgr._store_images_for_messages(
+                target_messages
+            )
+            await self.context_mgr.repo.save_context(session_key, target_messages)
+
+            # 删除已恢复的归档记录
+            deleted = await self.db.archived_session_repo.delete(target_id)
+            if not deleted:
+                logger.warning(
+                    f"[ChatEngine] 归档记录 {target_id} 删除失败（可能已被并发操作）"
+                )
+
+        parts = [f"✅ 已切换到会话: {target_title}"]
+        if current_archive_title:
+            parts.append(f"当前会话已归档: {current_archive_title}")
+        return "\n".join(parts)
 
     async def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
         """从消息事件中提取图片并转换为 base64 data URL 列表。

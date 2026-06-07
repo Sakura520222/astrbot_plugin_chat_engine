@@ -184,6 +184,28 @@
         </div>
     </div>
 
+    <!-- Archives Modal -->
+    <div id="archives-modal" class="modal hidden">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3 id="archives-modal-title">归档会话</h3>
+                <button class="btn-close" onclick="hideArchivesModal()">&times;</button>
+            </div>
+            <div id="archives-list" class="card-list"></div>
+        </div>
+    </div>
+
+    <!-- Archive Detail Modal -->
+    <div id="archive-detail-modal" class="modal hidden">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3 id="archive-detail-title">归档上下文</h3>
+                <button class="btn-close" onclick="hideArchiveDetail()">&times;</button>
+            </div>
+            <div id="archive-detail-content" class="session-detail"></div>
+        </div>
+    </div>
+
     <!-- Memory Modal -->
     <div id="memory-modal" class="modal hidden">
         <div class="modal-content">

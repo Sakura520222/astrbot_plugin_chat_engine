@@ -5,10 +5,11 @@ import hashlib
 import json
 import os
 import uuid
-from datetime import datetime
 from pathlib import Path
 
 from astrbot.api import logger
+
+from ..utils import shanghai_now_iso as _shanghai_now_iso
 
 
 class ShortTermMemoryStore:
@@ -68,7 +69,7 @@ class ShortTermMemoryStore:
         """新增一条短期记忆，返回记忆 ID。"""
         async with self._get_lock(session_key):
             data = await self.load(session_key)
-            now = datetime.utcnow().isoformat()
+            now = _shanghai_now_iso()
             mid = uuid.uuid4().hex
             data["memories"].append(
                 {
@@ -89,7 +90,7 @@ class ShortTermMemoryStore:
             for m in data["memories"]:
                 if m["id"] == mem_id:
                     m["content"] = content
-                    m["updated_at"] = datetime.utcnow().isoformat()
+                    m["updated_at"] = _shanghai_now_iso()
                     await self.save_data(session_key, data)
                     return True
             return False
@@ -139,7 +140,7 @@ class ShortTermMemoryStore:
         """根据总结结果批量更新短期记忆。"""
         async with self._get_lock(session_key):
             data = await self.load(session_key)
-            now = datetime.utcnow().isoformat()
+            now = _shanghai_now_iso()
             delete_set = set(deletes)
             new_memories = []
             for m in data["memories"]:

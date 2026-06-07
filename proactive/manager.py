@@ -5,12 +5,14 @@ import json
 import random
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from astrbot.api import logger
 
+from ..utils import SHANGHAI_TZ as _SHANGHAI_TZ
 from ..utils import format_current_time
+from ..utils import shanghai_now_iso as _shanghai_now_iso
 from ..utils.config import cfg_bool, cfg_int
 
 PROACTIVE_SYSTEM_SUFFIX_PRIVATE = """
@@ -92,10 +94,6 @@ class ProactiveManager:
     def _cfg_bool(self, key: str, default: bool) -> bool:
         return cfg_bool(self.config, key, default)
 
-    @staticmethod
-    def _utcnow() -> str:
-        return datetime.now(timezone.utc).isoformat()
-
     # 初始化与持久化
 
     async def initialize(self):
@@ -142,7 +140,7 @@ class ProactiveManager:
                 "timeout_enabled": False,
                 "round_enabled": False,
                 "round_count": 0,
-                "last_message_at": self._utcnow(),
+                "last_message_at": _shanghai_now_iso(),
                 "consecutive_proactive_count": 0,
             }
         else:
@@ -155,7 +153,7 @@ class ProactiveManager:
     async def register_session(self, session_key: str, umo: str):
         """注册/更新会话（每次收到消息时调用）。"""
         self._get_or_create_session(session_key, umo)
-        self._sessions[session_key]["last_message_at"] = self._utcnow()
+        self._sessions[session_key]["last_message_at"] = _shanghai_now_iso()
         self._mark_dirty()
 
     async def on_message(self, session_key: str):
@@ -164,7 +162,7 @@ class ProactiveManager:
         if not session:
             return
 
-        session["last_message_at"] = self._utcnow()
+        session["last_message_at"] = _shanghai_now_iso()
 
         # 用户主动发言 → 重置连续主动回复计数
         if session.get("consecutive_proactive_count", 0) != 0:
@@ -458,7 +456,7 @@ class ProactiveManager:
                 # 最大连续次数 (默认 2, 0=不限)
                 max_consecutive = self._cfg_int("proactive_timeout_max_consecutive", 2)
 
-                now = datetime.now(timezone.utc)
+                now = datetime.now(_SHANGHAI_TZ)
                 for key, session in list(self._sessions.items()):
                     if not session.get("timeout_enabled"):
                         continue
@@ -478,12 +476,12 @@ class ProactiveManager:
                     try:
                         last = datetime.fromisoformat(last_str)
                         if last.tzinfo is None:
-                            last = last.replace(tzinfo=timezone.utc)
+                            last = last.replace(tzinfo=_SHANGHAI_TZ)
                         elapsed_min = (now - last).total_seconds() / 60
                         if elapsed_min >= timeout_min:
                             # 概率判定：未命中则仅更新时间戳，不触发
                             if random.random() > probability:
-                                session["last_message_at"] = self._utcnow()
+                                session["last_message_at"] = _shanghai_now_iso()
                                 self._mark_dirty()
                                 continue
 
@@ -492,7 +490,7 @@ class ProactiveManager:
                                 f"（超时阈值 {timeout_min} 分钟）"
                             )
                             # 更新时间戳防止重复触发
-                            session["last_message_at"] = self._utcnow()
+                            session["last_message_at"] = _shanghai_now_iso()
                             # 累加连续主动回复计数
                             session["consecutive_proactive_count"] = (
                                 session.get("consecutive_proactive_count", 0) + 1

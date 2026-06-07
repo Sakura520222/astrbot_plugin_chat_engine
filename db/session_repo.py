@@ -1,11 +1,11 @@
 """Session/Context CRUD operations"""
 
 import json
-from datetime import datetime
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from ..utils import shanghai_now as _shanghai_now
 from .models import ChatSession
 
 
@@ -39,13 +39,13 @@ class SessionRepository:
                 row = ChatSession(
                     session_key=session_key,
                     messages_json=messages_json,
-                    updated_at=datetime.utcnow(),
-                    created_at=datetime.utcnow(),
+                    updated_at=_shanghai_now(),
+                    created_at=_shanghai_now(),
                 )
                 session.add(row)
             else:
                 row.messages_json = messages_json
-                row.updated_at = datetime.utcnow()
+                row.updated_at = _shanghai_now()
 
             await session.commit()
 
