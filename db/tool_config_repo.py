@@ -1,11 +1,9 @@
 """Tool config CRUD operations"""
 
-from datetime import datetime
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .models import ToolConfig
+from .models import ToolConfig, _shanghai_now
 
 
 class ToolConfigRepository:
@@ -56,13 +54,13 @@ class ToolConfigRepository:
                     tool_name=tool_name,
                     enabled=enabled,
                     source=source,
-                    updated_at=datetime.utcnow(),
+                    updated_at=_shanghai_now(),
                 )
                 session.add(row)
             else:
                 row.enabled = enabled
                 row.source = source
-                row.updated_at = datetime.utcnow()
+                row.updated_at = _shanghai_now()
 
             await session.commit()
 
@@ -87,7 +85,7 @@ class ToolConfigRepository:
                             tool_name=name,
                             enabled=True,
                             source=source,
-                            updated_at=datetime.utcnow(),
+                            updated_at=_shanghai_now(),
                         )
                     )
 

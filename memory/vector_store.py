@@ -5,7 +5,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +13,14 @@ from astrbot.api import logger
 
 if TYPE_CHECKING:
     from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
+
+# 上海时区 (UTC+8)
+_SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def _shanghai_now_iso() -> str:
+    """返回当前上海时区时间的 ISO 格式字符串。"""
+    return datetime.now(_SHANGHAI_TZ).isoformat()
 
 
 class LongTermMemoryStore:
@@ -72,10 +80,6 @@ class LongTermMemoryStore:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    @staticmethod
-    def _utcnow() -> str:
-        return datetime.now(timezone.utc).isoformat()
-
     async def get_or_create(self, session_key: str):
         """获取或创建该 session 的 FaissVecDB 实例（懒加载）。"""
         ep = self._get_embedding_provider()
@@ -125,8 +129,8 @@ class LongTermMemoryStore:
                     "source": source,
                     "session_key": session_key,
                     "pinned": pinned,
-                    "created_at": self._utcnow(),
-                    "updated_at": self._utcnow(),
+                    "created_at": _shanghai_now_iso(),
+                    "updated_at": _shanghai_now_iso(),
                 }
                 await vec_db.insert(content=content, metadata=metadata, id=mid)
                 return mid
@@ -215,8 +219,8 @@ class LongTermMemoryStore:
                     "source": source,
                     "session_key": session_key,
                     "pinned": pinned if pinned is not None else old_pinned,
-                    "created_at": old_meta.get("created_at", self._utcnow()),
-                    "updated_at": self._utcnow(),
+                    "created_at": old_meta.get("created_at", _shanghai_now_iso()),
+                    "updated_at": _shanghai_now_iso(),
                 }
                 await vec_db.insert(content=content, metadata=metadata, id=doc_id)
                 return True

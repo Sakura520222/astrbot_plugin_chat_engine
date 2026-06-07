@@ -507,10 +507,10 @@ class ChatWebServer:
             # 归档当前上下文（使用时间戳标题，不调用 LLM）
             raw_current = await self.plugin.context_mgr.repo.get_context(session_key)
             if raw_current:
-                from datetime import datetime as _dt
+                from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
                 fallback_title = (
-                    f"自动归档 ({_dt.now().strftime('%m-%d %H:%M')})"
+                    f"自动归档 ({_dt.now(_tz(_td(hours=8))).strftime('%m-%d %H:%M')})"
                 )
                 await self.plugin.db.archived_session_repo.archive(
                     session_key, fallback_title, raw_current

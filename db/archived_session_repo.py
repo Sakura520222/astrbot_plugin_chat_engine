@@ -1,12 +1,11 @@
 """Archived session CRUD operations — multi-session support."""
 
 import json
-from datetime import datetime
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .models import CEArchivedSession
+from .models import CEArchivedSession, _shanghai_now
 
 
 class ArchivedSessionRepository:
@@ -26,8 +25,8 @@ class ArchivedSessionRepository:
                 title=title,
                 messages_json=messages_json,
                 message_count=len(messages),
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=_shanghai_now(),
+                updated_at=_shanghai_now(),
             )
             session.add(row)
             await session.commit()
@@ -71,6 +70,6 @@ class ArchivedSessionRepository:
             if row is None:
                 return False
             row.title = title
-            row.updated_at = datetime.utcnow()
+            row.updated_at = _shanghai_now()
             await session.commit()
             return True

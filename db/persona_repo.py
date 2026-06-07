@@ -1,11 +1,9 @@
 """CEPersona CRUD operations"""
 
-from datetime import datetime
-
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .models import CEPersona
+from .models import CEPersona, _shanghai_now
 
 
 class PersonaRepository:
@@ -58,8 +56,8 @@ class PersonaRepository:
                 name=name,
                 system_prompt=system_prompt,
                 is_default=is_default,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=_shanghai_now(),
+                updated_at=_shanghai_now(),
             )
             session.add(persona)
             await session.commit()
@@ -83,7 +81,7 @@ class PersonaRepository:
                 if hasattr(persona, key) and key not in ("id", "created_at"):
                     setattr(persona, key, value)
 
-            persona.updated_at = datetime.utcnow()
+            persona.updated_at = _shanghai_now()
             await session.commit()
             await session.refresh(persona)
             return persona
@@ -116,6 +114,6 @@ class PersonaRepository:
                 return False
 
             persona.is_default = True
-            persona.updated_at = datetime.utcnow()
+            persona.updated_at = _shanghai_now()
             await session.commit()
             return True

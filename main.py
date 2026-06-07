@@ -16,7 +16,7 @@ import inspect
 import json
 import re
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -1293,7 +1293,7 @@ class ChatEnginePlugin(Star):
                     break
 
             if not recent_texts:
-                return f"未命名会话 ({datetime.now().strftime('%m-%d %H:%M')})"
+                return f"未命名会话 ({datetime.now(timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')})"
 
             # 构建命名 prompt — 使用激活人格的 system prompt
             persona_prompt = await self.persona_mgr.get_system_prompt()
@@ -1314,11 +1314,11 @@ class ChatEnginePlugin(Star):
                 if title and len(title) <= 50:
                     return title
 
-            return f"未命名会话 ({datetime.now().strftime('%m-%d %H:%M')})"
+            return f"未命名会话 ({datetime.now(timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')})"
 
         except Exception as e:
             logger.warning(f"[ChatEngine] 生成会话标题失败: {e}")
-            return f"未命名会话 ({datetime.now().strftime('%m-%d %H:%M')})"
+            return f"未命名会话 ({datetime.now(timezone(timedelta(hours=8))).strftime('%m-%d %H:%M')})"
 
     async def _cmd_new(self, event: AstrMessageEvent) -> str:
         """处理 /new 命令 — 归档当前会话并开启新会话。
