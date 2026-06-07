@@ -1,6 +1,6 @@
 # Chat Engine - AstrBot 聊天增强插件
 
-完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。
+完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、多会话管理、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。
 
 ## 功能特性
 
@@ -9,8 +9,17 @@
 - 帮助 AI 在上下文中准确区分不同用户
 - 用户标识格式可通过 WebUI 自定义
 
+### 多会话管理
+- 支持在同一会话中创建、切换和浏览多个独立对话
+- `/new` 命令: 归档当前会话，开启空白新会话
+- `/list` 命令: 查看所有归档会话列表
+- `/switch <N>` 命令: 切换到指定归档会话
+- 归档时自动调用 LLM 生成话题标题（失败回退时间戳格式）
+- 群聊中仅管理员可操作，私聊无限制
+- WebUI 支持归档列表查看、详情预览、恢复和删除
+
 ### 环境信息感知
-- 自动在 System Prompt 前注入当前时间，帮助 LLM 感知时间上下文
+- 自动在 System Prompt 前注入当前时间（上海时区 UTC+8），帮助 LLM 感知时间上下文
 - 群聊场景自动注入群名和 Bot 群昵称
 - 群聊信息按会话缓存（5 分钟 TTL），API 失败时使用短 TTL fallback 策略
 - 主动回复同样注入时间信息
@@ -88,6 +97,7 @@
 - 登录认证: 支持配置用户名和密码，保护管理面板访问
 - 人格管理 (CRUD)
 - 会话管理 (查看、删除)
+- 归档管理 (查看归档列表、预览上下文、恢复、删除)
 - LLM 预览（查看发送给 LLM 的完整上下文、System Prompt、工具列表和 Token 估算）
 - 压缩配置
 - 用户标识格式配置
@@ -157,11 +167,12 @@
 
 ```
 astrbot_plugin_chat_engine/
-├── main.py                    # 消息拦截 + LLM 调用编排 + 文本清洗 + 记忆/主动回复工具
+├── main.py                    # 消息拦截 + LLM 调用编排 + 文本清洗 + 记忆/主动回复工具 + 多会话命令
 ├── db/                        # 独立数据库层 (SQLAlchemy)
 │   ├── models.py              # 数据模型 (独立 MetaData)
 │   ├── engine.py              # 数据库引擎
 │   ├── session_repo.py        # 会话 CRUD
+│   ├── archived_session_repo.py # 归档会话 CRUD (多会话支持)
 │   ├── persona_repo.py        # 人格 CRUD
 │   ├── tool_config_repo.py    # 工具配置
 │   ├── image_repo.py          # 图片 CRUD (sha256 去重)
@@ -185,9 +196,9 @@ astrbot_plugin_chat_engine/
 │   ├── manager.py             # 启用/禁用状态
 │   └── command_dispatcher.py  # 命令扫描与分发 (LLM 自然语言执行插件命令)
 ├── utils/                     # 工具函数
-│   └── __init__.py            # 通用工具函数 (时间格式化等)
+│   └── __init__.py            # 通用工具函数 (上海时区时间格式化等)
 └── web/                       # WebUI
-    ├── server.py              # aiohttp REST API (含 LLM 预览 + 记忆管理 + 登录认证)
+    ├── server.py              # aiohttp REST API (含 LLM 预览 + 记忆管理 + 归档管理 + 登录认证)
     └── static/                # 前端 HTML/CSS/JS
 ```
 
@@ -198,7 +209,7 @@ astrbot_plugin_chat_engine/
 - **命令透传**: 检测 `activated_handlers` 中的 `CommandFilter`，命令自动交给其他插件或框架处理
 - **独立数据库**: 使用独立 SQLAlchemy MetaData，避免与 AstrBot 全局元数据冲突
 - **Provider 复用**: 复用 AstrBot 已配置的 LLM Provider，也支持自定义配置
-- **环境信息注入**: System Prompt 前自动注入当前时间和群聊环境信息（群名、Bot 昵称），群聊信息按会话缓存并支持 fallback 短 TTL 策略
+- **环境信息注入**: System Prompt 前自动注入当前时间（上海时区 UTC+8）和群聊环境信息（群名、Bot 昵称），群聊信息按会话缓存并支持 fallback 短 TTL 策略
 - **被动记录**: 未触发回复的群聊消息以 `observed` 角色存储，压缩时归入当前轮次
 - **图片存储**: 图片转为 base64 data URL 发送给 LLM，文件按 sha256 去重存储，上下文中以 `image_ref` 引用节省空间
 - **历史图片剥离**: 历史上下文中的图片替换为 `[Image]` 文本占位符，仅当前用户消息保留图片，减少 Token 消耗
@@ -211,6 +222,8 @@ astrbot_plugin_chat_engine/
 - **记忆并发控制**: 自动总结使用会话级 `asyncio.Lock`，后台异步执行不阻塞消息处理
 - **动态 Provider 获取**: 记忆管理器通过 Getter 函数在运行时动态获取 Provider，解决加载时序问题
 - **命令执行分发**: `CommandDispatcher` 扫描所有已注册命令，生成结构化指引注入 System Prompt，LLM 通过工具调用触发实际执行；自动跳过未激活插件，尊重命令权限定义
+- **多会话管理**: 归档会话持久化存储，支持 `/new`、`/list`、`/switch` 命令操作；归档时通过 LLM 自动生成话题标题；群聊管理员权限控制；`/new` 命令采用「锁内快照 → 锁外标题生成 → 锁内归档」策略避免 LLM 调用阻塞并发消息
+- **上海时区时间**: 全局统一使用上海时区 (UTC+8) 记录所有时间戳，替代原有的 UTC 时间，确保时间信息对中文用户友好
 
 ## 兼容性
 
