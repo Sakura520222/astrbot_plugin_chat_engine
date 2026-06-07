@@ -10,6 +10,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from astrbot.core.message.message_event_result import MessageEventResult
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
@@ -313,11 +314,22 @@ class CommandDispatcher:
                 parts = []
                 async for item in ret:
                     if item is not None:
+                        # handler yield 的可能是 MessageEventResult（标准 AstrBot 模式）
+                        if isinstance(item, MessageEventResult):
+                            chain = getattr(item, "chain", [])
+                            if chain:
+                                # 提取文本用于返回
+                                text_parts = []
+                                for comp in chain:
+                                    if hasattr(comp, "text"):
+                                        text_parts.append(comp.text)
+                                if text_parts:
+                                    parts.append("".join(text_parts))
+                                # 捕获完整链用于直接发送
+                                if capture_result:
+                                    captured_components.extend(chain)
+                                continue
                         parts.append(str(item))
-                        # 捕获每次 yield 的结果链
-                        if capture_result and hasattr(item, "_result") and item._result:
-                            chain = getattr(item._result, "chain", [])
-                            captured_components.extend(chain)
                 result_text = parts[-1] if parts else None
             elif inspect.isawaitable(ret):
                 result = await ret
