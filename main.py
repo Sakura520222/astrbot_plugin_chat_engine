@@ -763,12 +763,20 @@ class ChatEnginePlugin(Star):
                         if isinstance(comp, Image):
                             yield event.chain_result([comp])
 
-                #  保存上下文
-                assistant_msg = {"role": "assistant", "content": response_text}
+                #  保存上下文（包含中间助手消息）
+                all_new_msgs = [user_msg]
+                for _inter_text in self._intermediate_assistant_contents:
+                    all_new_msgs.append(
+                        {"role": "assistant", "content": _inter_text}
+                    )
+                self._intermediate_assistant_contents = []
+                all_new_msgs.append(
+                    {"role": "assistant", "content": response_text}
+                )
                 # 记录保存前的消息数，用于检测压缩是否发生
                 pre_save_count = len(context_messages_raw)
-                saved = await self.context_mgr.append_and_save(
-                    session_key, user_msg, assistant_msg, provider=provider
+                saved = await self.context_mgr._load_compress_save(
+                    session_key, all_new_msgs, provider=provider
                 )
                 logger.info("[ChatEngine] 上下文已保存")
 
@@ -836,6 +844,7 @@ class ChatEnginePlugin(Star):
 
         self._llm_final_response = None
         self._pending_sends = []  # 供 tool_execute_command 使用
+        self._intermediate_assistant_contents = []  # 中间助手文本，用于保存上下文
 
         # 构建完整上下文
         current_contexts = list(contexts) + [user_msg]
@@ -875,6 +884,7 @@ class ChatEnginePlugin(Star):
 
             # 立即发送中间文本（经清洗和分段处理）
             if assistant_content.strip():
+                self._intermediate_assistant_contents.append(assistant_content)
                 _t = self._clean_response(assistant_content)
                 if _t:
                     _segs = self._split_response(_t)
