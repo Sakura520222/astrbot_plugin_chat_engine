@@ -221,16 +221,18 @@ class CommandDispatcher:
         return best_match
 
     async def dispatch(
-        self, event: AstrMessageEvent, command_str: str
+        self, event: AstrMessageEvent, command_str: str, capture_result: bool = False
     ) -> dict[str, Any]:
         """分发命令并返回执行结果。
 
         Args:
             event: 消息事件
             command_str: 命令字符串
+            capture_result: 是否捕获结果链（用于直接发送给用户）
 
         Returns:
-            dict: 包含 success (bool) 和 result (str) 的结果字典
+            dict: 包含 success (bool) 和 result (str) 的结果字典。
+                  当 capture_result=True 时，额外包含 result_chain (list)。
         """
         command_str = re.sub(r"\s+", " ", command_str.strip())
 
@@ -296,6 +298,8 @@ class CommandDispatcher:
             saved_result = event._result
             saved_stopped = event._force_stopped
 
+            captured_components: list = []
+
             try:
                 ret = handler.handler(event, **params)
             except TypeError:
@@ -310,6 +314,10 @@ class CommandDispatcher:
                 async for item in ret:
                     if item is not None:
                         parts.append(str(item))
+                        # 捕获每次 yield 的结果链
+                        if capture_result and hasattr(item, "_result") and item._result:
+                            chain = getattr(item._result, "chain", [])
+                            captured_components.extend(chain)
                 result_text = parts[-1] if parts else None
             elif inspect.isawaitable(ret):
                 result = await ret
@@ -317,6 +325,11 @@ class CommandDispatcher:
                     result_text = str(result)
             elif ret is not None:
                 result_text = str(ret)
+
+            # 捕获 event._result（适用于非 async gen 或 async gen 未 yield 的情况）
+            if capture_result and not captured_components and event._result is not None:
+                chain = getattr(event._result, "chain", [])
+                captured_components.extend(chain)
 
             # 检查 handler 是否通过 event.set_result 设置了结果
             if result_text is None and event._result is not None:
@@ -332,10 +345,15 @@ class CommandDispatcher:
             event._result = saved_result
             event._force_stopped = saved_stopped
 
-            return {
+            result = {
                 "success": True,
                 "result": result_text or "命令执行完成（无输出）",
             }
+
+            if capture_result and captured_components:
+                result["result_chain"] = captured_components
+
+            return result
 
         except Exception as e:
             logger.error(f"[ChatEngine] 命令分发执行失败: {e}", exc_info=True)

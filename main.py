@@ -67,6 +67,9 @@ class ChatEnginePlugin(Star):
         self._last_tool_images: list[dict] | None = (
             None  # 当前工具调用产生的图片（单次执行生命周期）
         )
+        self._pending_sends: list[tuple[str, object]] | None = (
+            None  # 工具调用期间的中间发送队列: [("text", str) | ("chain", list[comp])]
+        )
         self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
 
@@ -683,10 +686,22 @@ class ChatEnginePlugin(Star):
                     )
                 except Exception as e:
                     logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
+                    self._pending_sends = None
                     yield event.plain_result(
                         f"❌ LLM 调用失败: {type(e).__name__}: {e}"
                     )
                     return
+
+                # 发送中间结果（工具调用期间的文本 + 命令直接发送的结果）
+                if self._pending_sends:
+                    for _st, _sd in self._pending_sends:
+                        if _st == "text":
+                            _t = self._clean_response(_sd)
+                            if _t:
+                                yield event.plain_result(_t)
+                        elif _st == "chain":
+                            yield event.chain_result(_sd)
+                    self._pending_sends = None
 
                 if final_response is None:
                     logger.warning("[ChatEngine] LLM 返回 None")
@@ -822,6 +837,7 @@ class ChatEnginePlugin(Star):
         # 构建完整上下文
         current_contexts = list(contexts) + [user_msg]
         final_response = None
+        self._pending_sends = []  # 初始化中间发送队列
 
         for round_idx in range(max_tool_rounds):
             # 调用 LLM
@@ -851,6 +867,11 @@ class ChatEnginePlugin(Star):
 
             # 有工具调用 — 追加 assistant 消息 (含 tool_calls)
             assistant_content = response.completion_text or ""
+
+            # 收集中间文本，稍后发送给用户
+            if assistant_content.strip():
+                self._pending_sends.append(("text", assistant_content))
+
             assistant_msg = {
                 "role": "assistant",
                 "content": assistant_content,
@@ -1833,16 +1854,42 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         self,
         event: AstrMessageEvent,
         command: str,
+        return_to_llm: str = "false",
     ):
         """Execute a registered bot command by name.
+        By default, the command output is sent directly to the user. Set return_to_llm="true" to receive the output yourself for further processing.
         IMPORTANT: Only call this when the user's intent directly maps to a specific command.
         If the command is not found, STOP and inform the user. Do NOT try alternative commands.
 
         Args:
             command(string): The full command string to execute (without the wake prefix). e.g. "help", "provider 1", "sid".
+            return_to_llm(string): Set to "true" to return the command output to the LLM for further processing. Default "false" — results are sent directly to the user.
         """
         if not self.cmd_dispatcher:
             return json.dumps({"error": "命令执行功能未启用。"}, ensure_ascii=False)
 
-        result = await self.cmd_dispatcher.dispatch(event, command)
+        send_directly = return_to_llm.lower() not in ("true", "1", "yes")
+        result = await self.cmd_dispatcher.dispatch(
+            event, command, capture_result=send_directly
+        )
+
+        if send_directly:
+            if not result.get("success", False):
+                # 命令执行失败，返回错误信息给 LLM
+                return json.dumps(result, ensure_ascii=False)
+
+            # 命令执行成功，结果直接发送给用户
+            result_chain = result.get("result_chain", [])
+            result_text = result.get("result", "")
+
+            if result_chain:
+                self._pending_sends.append(("chain", result_chain))
+            elif result_text and result_text != "命令执行完成（无输出）":
+                self._pending_sends.append(("text", result_text))
+
+            return json.dumps(
+                {"success": True, "result": "命令已执行，结果已直接发送给用户。"},
+                ensure_ascii=False,
+            )
+
         return json.dumps(result, ensure_ascii=False)
