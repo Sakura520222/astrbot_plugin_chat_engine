@@ -10,6 +10,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from astrbot.core.message.message_event_result import MessageEventResult
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
@@ -221,16 +222,18 @@ class CommandDispatcher:
         return best_match
 
     async def dispatch(
-        self, event: AstrMessageEvent, command_str: str
+        self, event: AstrMessageEvent, command_str: str, capture_result: bool = False
     ) -> dict[str, Any]:
         """分发命令并返回执行结果。
 
         Args:
             event: 消息事件
             command_str: 命令字符串
+            capture_result: 是否捕获结果链（用于直接发送给用户）
 
         Returns:
-            dict: 包含 success (bool) 和 result (str) 的结果字典
+            dict: 包含 success (bool) 和 result (str) 的结果字典。
+                  当 capture_result=True 时，额外包含 result_chains (list[list])。
         """
         command_str = re.sub(r"\s+", " ", command_str.strip())
 
@@ -296,6 +299,8 @@ class CommandDispatcher:
             saved_result = event._result
             saved_stopped = event._force_stopped
 
+            captured_chains: list[list] = []
+
             try:
                 ret = handler.handler(event, **params)
             except TypeError:
@@ -309,6 +314,21 @@ class CommandDispatcher:
                 parts = []
                 async for item in ret:
                     if item is not None:
+                        # handler yield 的可能是 MessageEventResult（标准 AstrBot 模式）
+                        if isinstance(item, MessageEventResult):
+                            chain = getattr(item, "chain", [])
+                            if chain:
+                                # 提取文本用于返回
+                                text_parts = []
+                                for comp in chain:
+                                    if hasattr(comp, "text"):
+                                        text_parts.append(comp.text)
+                                if text_parts:
+                                    parts.append("".join(text_parts))
+                                # 捕获完整链用于直接发送（保持每条消息独立）
+                                if capture_result:
+                                    captured_chains.append(list(chain))
+                                continue
                         parts.append(str(item))
                 result_text = parts[-1] if parts else None
             elif inspect.isawaitable(ret):
@@ -317,6 +337,12 @@ class CommandDispatcher:
                     result_text = str(result)
             elif ret is not None:
                 result_text = str(ret)
+
+            # 捕获 event._result（适用于非 async gen 或 async gen 未 yield 的情况）
+            if capture_result and not captured_chains and event._result is not None:
+                chain = getattr(event._result, "chain", [])
+                if chain:
+                    captured_chains.append(list(chain))
 
             # 检查 handler 是否通过 event.set_result 设置了结果
             if result_text is None and event._result is not None:
@@ -332,10 +358,15 @@ class CommandDispatcher:
             event._result = saved_result
             event._force_stopped = saved_stopped
 
-            return {
+            result = {
                 "success": True,
                 "result": result_text or "命令执行完成（无输出）",
             }
+
+            if capture_result and captured_chains:
+                result["result_chains"] = captured_chains
+
+            return result
 
         except Exception as e:
             logger.error(f"[ChatEngine] 命令分发执行失败: {e}", exc_info=True)
