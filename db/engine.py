@@ -6,6 +6,7 @@ This ensures NO interference with AstrBot's global SQLModel metadata.
 
 import os
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .models import (  # noqa: F401
@@ -39,6 +40,8 @@ class ChatEngineDB:
         # 使用插件自己的 MetaData，而非 SQLModel.metadata
         async with self.engine.begin() as conn:
             await conn.run_sync(chat_engine_metadata.create_all)
+            # 幂等迁移：为旧库添加新列，列已存在时静默跳过
+            await self._migrate_columns(conn)
 
         from .archived_session_repo import ArchivedSessionRepository
         from .image_repo import ImageRepository
@@ -62,6 +65,27 @@ class ChatEngineDB:
     async def close(self):
         """关闭数据库连接"""
         await self.engine.dispose()
+
+    @staticmethod
+    async def _migrate_columns(conn) -> None:
+        """为已有数据库添加新增列（幂等，列已存在时静默跳过）。
+
+        仅适用于 SQLite / MySQL / PostgreSQL 兼容的 ALTER TABLE ADD COLUMN。
+        新建的库由 create_all 直接建好所有列，不会走到这里。
+        """
+        migrations = [
+            ("ce_chat_sessions", "prompt_tokens", "INTEGER DEFAULT 0"),
+            ("ce_chat_sessions", "completion_tokens", "INTEGER DEFAULT 0"),
+            ("ce_archived_sessions", "prompt_tokens", "INTEGER DEFAULT 0"),
+            ("ce_archived_sessions", "completion_tokens", "INTEGER DEFAULT 0"),
+        ]
+        for table, col, coldef in migrations:
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}")
+                )
+            except Exception:
+                pass  # 列已存在，静默跳过
 
     @staticmethod
     def build_db_url(db_type: str, data_dir: str, mysql_url: str = "") -> str:
