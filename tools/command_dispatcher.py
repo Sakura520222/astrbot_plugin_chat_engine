@@ -233,7 +233,7 @@ class CommandDispatcher:
 
         Returns:
             dict: 包含 success (bool) 和 result (str) 的结果字典。
-                  当 capture_result=True 时，额外包含 result_chain (list)。
+                  当 capture_result=True 时，额外包含 result_chains (list[list])。
         """
         command_str = re.sub(r"\s+", " ", command_str.strip())
 
@@ -299,7 +299,7 @@ class CommandDispatcher:
             saved_result = event._result
             saved_stopped = event._force_stopped
 
-            captured_components: list = []
+            captured_chains: list[list] = []
 
             try:
                 ret = handler.handler(event, **params)
@@ -325,9 +325,9 @@ class CommandDispatcher:
                                         text_parts.append(comp.text)
                                 if text_parts:
                                     parts.append("".join(text_parts))
-                                # 捕获完整链用于直接发送
+                                # 捕获完整链用于直接发送（保持每条消息独立）
                                 if capture_result:
-                                    captured_components.extend(chain)
+                                    captured_chains.append(list(chain))
                                 continue
                         parts.append(str(item))
                 result_text = parts[-1] if parts else None
@@ -339,9 +339,10 @@ class CommandDispatcher:
                 result_text = str(ret)
 
             # 捕获 event._result（适用于非 async gen 或 async gen 未 yield 的情况）
-            if capture_result and not captured_components and event._result is not None:
+            if capture_result and not captured_chains and event._result is not None:
                 chain = getattr(event._result, "chain", [])
-                captured_components.extend(chain)
+                if chain:
+                    captured_chains.append(list(chain))
 
             # 检查 handler 是否通过 event.set_result 设置了结果
             if result_text is None and event._result is not None:
@@ -362,8 +363,8 @@ class CommandDispatcher:
                 "result": result_text or "命令执行完成（无输出）",
             }
 
-            if capture_result and captured_components:
-                result["result_chain"] = captured_components
+            if capture_result and captured_chains:
+                result["result_chains"] = captured_chains
 
             return result
 

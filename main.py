@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import contextvars
 import copy
 import inspect
 import json
@@ -35,6 +36,29 @@ from .tools.scanner import ToolScanner
 from .utils import format_current_time, shanghai_now_iso
 from .utils.config import cfg_bool, cfg_float, cfg_int
 from .web.server import ChatWebServer
+
+
+class _ToolCallContext:
+    """Per-call context for _llm_call_with_tools, stored in ContextVar to avoid race conditions.
+
+    AstrBot 的 EventBus.dispatch 通过 asyncio.create_task 并发处理事件，
+    将 _llm_call_with_tools 的中间状态存储在实例变量上会导致不同会话互相覆盖。
+    使用 ContextVar 确保每个 asyncio task 拥有独立的上下文。
+    """
+
+    __slots__ = ("pending_sends", "intermediate_msgs", "final_response")
+
+    def __init__(self):
+        self.pending_sends: list[tuple[str, object]] = []
+        self.intermediate_msgs: list[
+            dict
+        ] = []  # 完整的 tool call 周期消息（assistant + tool results）
+        self.final_response = None
+
+
+_tool_call_ctx: contextvars.ContextVar[_ToolCallContext | None] = (
+    contextvars.ContextVar("_tool_call_ctx", default=None)
+)
 
 
 @register(
@@ -67,10 +91,6 @@ class ChatEnginePlugin(Star):
         self._last_tool_images: list[dict] | None = (
             None  # 当前工具调用产生的图片（单次执行生命周期）
         )
-        self._pending_sends: list[tuple[str, object]] | None = (
-            None  # 供 tool_execute_command 使用的直接发送队列
-        )
-        self._llm_final_response = None  # _llm_call_with_tools 异步生成器存储的最终响应
         self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
 
@@ -692,10 +712,10 @@ class ChatEnginePlugin(Star):
                             yield event.plain_result(_send_data)
                         elif _send_type == "chain":
                             yield event.chain_result(_send_data)
-                    final_response = self._llm_final_response
+                    _llm_ctx = _tool_call_ctx.get()
+                    final_response = _llm_ctx.final_response if _llm_ctx else None
                 except Exception as e:
                     logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
-                    self._pending_sends = None
                     yield event.plain_result(
                         f"❌ LLM 调用失败: {type(e).__name__}: {e}"
                     )
@@ -723,34 +743,18 @@ class ChatEnginePlugin(Star):
                 pending_quote_id = self._pending_quotes.pop(session_key, None)
 
                 if response_text:
-                    segments = self._split_response(response_text)
-                    if len(segments) <= 1:
-                        if pending_quote_id:
+                    _first_seg = True
+                    async for _seg in self._iter_text_segments(response_text):
+                        if _first_seg and pending_quote_id:
                             yield event.chain_result(
-                                [Reply(id=pending_quote_id), Plain(response_text)]
+                                [Reply(id=pending_quote_id), Plain(_seg)]
                             )
                             logger.info(
                                 f"[ChatEngine] 引用回复已发送: quote_msg_id={pending_quote_id}"
                             )
                         else:
-                            yield event.plain_result(response_text)
-                    else:
-                        logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
-                        for seg_idx, segment in enumerate(segments):
-                            if seg_idx == 0 and pending_quote_id:
-                                yield event.chain_result(
-                                    [Reply(id=pending_quote_id), Plain(segment)]
-                                )
-                                logger.info(
-                                    f"[ChatEngine] 引用回复已发送: quote_msg_id={pending_quote_id}"
-                                )
-                            else:
-                                yield event.plain_result(segment)
-                            if seg_idx < len(segments) - 1:
-                                delay_ms = max(
-                                    0, min(self._cfg_int("split_delay_ms", 800), 5000)
-                                )
-                                await asyncio.sleep(delay_ms / 1000)
+                            yield event.plain_result(_seg)
+                        _first_seg = False
                 elif pending_quote_id:
                     # LLM 返回空但设置了引用——清除 pending
                     self._pending_quotes.pop(session_key, None)
@@ -763,16 +767,11 @@ class ChatEnginePlugin(Star):
                         if isinstance(comp, Image):
                             yield event.chain_result([comp])
 
-                #  保存上下文（包含中间助手消息）
+                #  保存上下文（包含完整的 tool call 周期消息）
                 all_new_msgs = [user_msg]
-                for _inter_text in self._intermediate_assistant_contents:
-                    all_new_msgs.append(
-                        {"role": "assistant", "content": _inter_text}
-                    )
-                self._intermediate_assistant_contents = []
-                all_new_msgs.append(
-                    {"role": "assistant", "content": response_text}
-                )
+                if _llm_ctx:
+                    all_new_msgs.extend(_llm_ctx.intermediate_msgs)
+                all_new_msgs.append({"role": "assistant", "content": response_text})
                 # 记录保存前的消息数，用于检测压缩是否发生
                 pre_save_count = len(context_messages_raw)
                 saved = await self.context_mgr._load_compress_save(
@@ -835,16 +834,15 @@ class ChatEnginePlugin(Star):
         """调用 LLM，支持 Tool Call 循环。
 
         异步生成器：在工具调用期间立即 yield 中间结果给用户。
-        最终 LLM 响应存储在 self._llm_final_response 中。
+        最终 LLM 响应存储在 _tool_call_ctx (ContextVar) 中。
 
         yield: ("text", str) | ("chain", list[component])
         """
         if max_tool_rounds is None:
             max_tool_rounds = self._cfg_int("max_tool_rounds", 10)
 
-        self._llm_final_response = None
-        self._pending_sends = []  # 供 tool_execute_command 使用
-        self._intermediate_assistant_contents = []  # 中间助手文本，用于保存上下文
+        ctx = _ToolCallContext()
+        _tool_call_ctx.set(ctx)
 
         # 构建完整上下文
         current_contexts = list(contexts) + [user_msg]
@@ -865,18 +863,18 @@ class ChatEnginePlugin(Star):
             response = await provider.text_chat(**kwargs)
 
             if response is None:
-                self._llm_final_response = final_response
+                ctx.final_response = final_response
                 return
 
             if hasattr(response, "role") and response.role == "err":
-                self._llm_final_response = response
+                ctx.final_response = response
                 return
 
             # 检查是否有工具调用
             tool_calls_name = getattr(response, "tools_call_name", None)
             if not tool_calls_name:
                 # 纯文本响应，存储并返回
-                self._llm_final_response = response
+                ctx.final_response = response
                 return
 
             # 有工具调用 — 追加 assistant 消息 (含 tool_calls)
@@ -884,29 +882,10 @@ class ChatEnginePlugin(Star):
 
             # 立即发送中间文本（经清洗和分段处理）
             if assistant_content.strip():
-                self._intermediate_assistant_contents.append(assistant_content)
                 _t = self._clean_response(assistant_content)
                 if _t:
-                    _segs = self._split_response(_t)
-                    if len(_segs) <= 1:
-                        yield ("text", _t)
-                    else:
-                        logger.info(
-                            f"[ChatEngine] 中间文本分段发送: {len(_segs)} 段"
-                        )
-                        for _si, _seg in enumerate(_segs):
-                            yield ("text", _seg)
-                            if _si < len(_segs) - 1:
-                                await asyncio.sleep(
-                                    max(
-                                        0,
-                                        min(
-                                            self._cfg_int("split_delay_ms", 800),
-                                            5000,
-                                        ),
-                                    )
-                                    / 1000
-                                )
+                    async for _seg in self._iter_text_segments(_t):
+                        yield ("text", _seg)
 
             assistant_msg = {
                 "role": "assistant",
@@ -914,6 +893,7 @@ class ChatEnginePlugin(Star):
                 "tool_calls": response.to_openai_tool_calls(),
             }
             current_contexts.append(assistant_msg)
+            ctx.intermediate_msgs.append(assistant_msg)
 
             # 执行每个工具调用
             tool_calls_ids = response.tools_call_ids or []
@@ -950,12 +930,13 @@ class ChatEnginePlugin(Star):
                     "content": tool_content,
                 }
                 current_contexts.append(tool_msg)
+                ctx.intermediate_msgs.append(tool_msg)
 
             # 立即发送工具产生的直接发送结果（如 execute_command 的命令输出）
-            if self._pending_sends:
-                for _ps in self._pending_sends:
+            if ctx.pending_sends:
+                for _ps in ctx.pending_sends:
                     yield _ps
-                self._pending_sends = []
+                ctx.pending_sends = []
 
             final_response = response
             logger.info(
@@ -970,7 +951,7 @@ class ChatEnginePlugin(Star):
             contexts=current_contexts,
             system_prompt=system_prompt,
         )
-        self._llm_final_response = response
+        ctx.final_response = response
 
     async def _execute_tool(
         self,
@@ -1207,6 +1188,24 @@ class ChatEnginePlugin(Star):
 
         return segments
 
+    async def _iter_text_segments(self, text: str):
+        """将文本分段并异步迭代返回，段间自动添加延迟。
+
+        复用于 _llm_call_with_tools（中间文本）和 handle_all_messages（最终响应），
+        避免分段 + 延迟逻辑重复。
+        """
+        segments = self._split_response(text)
+        if not segments:
+            return
+        if len(segments) > 1:
+            logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
+        for i, seg in enumerate(segments):
+            yield seg
+            if i < len(segments) - 1:
+                await asyncio.sleep(
+                    max(0, min(self._cfg_int("split_delay_ms", 800), 5000)) / 1000
+                )
+
     # Emoji 正则: 包含 Unicode Emoji 属性的字符
     _EMOJI_RE = re.compile(
         "["
@@ -1354,7 +1353,9 @@ class ChatEnginePlugin(Star):
                         text_content = content
                     if isinstance(text_content, str) and text_content.strip():
                         prefix = "用户" if role == "user" else "助手"
-                        recent_texts.insert(0, f"{prefix}: {text_content.strip()[:200]}")
+                        recent_texts.insert(
+                            0, f"{prefix}: {text_content.strip()[:200]}"
+                        )
                 if len(recent_texts) >= 10:
                     break
 
@@ -1514,9 +1515,7 @@ class ChatEnginePlugin(Star):
                 return "❌ 归档不属于此会话。"
 
             # 重新读取当前上下文（避免锁外期间新增的消息被丢失）
-            latest_current = await self.context_mgr.repo.get_context(
-                session_key
-            )
+            latest_current = await self.context_mgr.repo.get_context(session_key)
 
             # 归档当前上下文
             if latest_current:
@@ -1921,13 +1920,16 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
                 return json.dumps(result, ensure_ascii=False)
 
             # 命令执行成功，结果直接发送给用户
-            result_chain = result.get("result_chain", [])
+            result_chains = result.get("result_chains", [])
             result_text = result.get("result", "")
 
-            if result_chain:
-                self._pending_sends.append(("chain", result_chain))
-            elif result_text and result_text != "命令执行完成（无输出）":
-                self._pending_sends.append(("text", result_text))
+            _ctx = _tool_call_ctx.get()
+            if _ctx:
+                if result_chains:
+                    for _chain in result_chains:
+                        _ctx.pending_sends.append(("chain", _chain))
+                elif result_text and result_text != "命令执行完成（无输出）":
+                    _ctx.pending_sends.append(("text", result_text))
 
             return json.dumps(
                 {"success": True, "result": "命令已执行，结果已直接发送给用户。"},
