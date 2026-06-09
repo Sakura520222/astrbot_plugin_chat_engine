@@ -2,7 +2,7 @@ name: astrbot_plugin_chat_engine
 display_name: 聊天增强
 author: 车厘子小樱
 description: 完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、多会话管理、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。
-version: 1.3.2
+version: 1.3.3
 repo: "https://github.com/sakura520222/astrbot_plugin_chat_engine"
 tags:
   - "聊天"

@@ -167,7 +167,7 @@
 
 ```
 astrbot_plugin_chat_engine/
-├── main.py                    # 消息拦截 + LLM 调用编排 + 文本清洗 + 记忆/主动回复工具 + 多会话命令
+├── main.py                    # 消息拦截 + LLM 调用编排 + 文本清洗 + 记忆/主动回复工具 + 多会话命令 + _ToolCallContext
 ├── db/                        # 独立数据库层 (SQLAlchemy)
 │   ├── models.py              # 数据模型 (独立 MetaData)
 │   ├── engine.py              # 数据库引擎
@@ -221,7 +221,9 @@ astrbot_plugin_chat_engine/
 - **记忆向量检索**: 长期记忆通过 Embedding 向量化存储，支持语义检索和可选 Rerank 重排
 - **记忆并发控制**: 自动总结使用会话级 `asyncio.Lock`，后台异步执行不阻塞消息处理
 - **动态 Provider 获取**: 记忆管理器通过 Getter 函数在运行时动态获取 Provider，解决加载时序问题
-- **命令执行分发**: `CommandDispatcher` 扫描所有已注册命令，生成结构化指引注入 System Prompt，LLM 通过工具调用触发实际执行；自动跳过未激活插件，尊重命令权限定义
+- **命令执行分发**: `CommandDispatcher` 扫描所有已注册命令，生成结构化指引注入 System Prompt，LLM 通过工具调用触发实际执行；自动跳过未激活插件，尊重命令权限定义；支持 `capture_result` 模式捕获 `MessageEventResult` 链用于直接发送
+- **工具调用上下文隔离**: 使用 `ContextVar` 管理 `_llm_call_with_tools` 的中间状态（待发送队列、中间消息、最终响应），确保 EventBus 并发 dispatch 下各会话上下文互不干扰
+- **中间结果即时发送**: `_llm_call_with_tools` 作为异步生成器，在工具调用期间即时 yield 中间文本和链式结果，同时完整保存工具调用周期消息（assistant + tool results）到上下文
 - **多会话管理**: 归档会话持久化存储，支持 `/new`、`/list`、`/switch` 命令操作；归档时通过 LLM 自动生成话题标题；群聊管理员权限控制；`/new` 命令采用「锁内快照 → 锁外标题生成 → 锁内归档」策略避免 LLM 调用阻塞并发消息
 - **上海时区时间**: 全局统一使用上海时区 (UTC+8) 记录所有时间戳，替代原有的 UTC 时间，确保时间信息对中文用户友好
 

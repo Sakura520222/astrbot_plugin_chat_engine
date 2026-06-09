@@ -65,7 +65,7 @@ _tool_call_ctx: contextvars.ContextVar[_ToolCallContext | None] = (
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
     "完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、多会话管理、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
-    "1.3.2",
+    "1.3.3",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
