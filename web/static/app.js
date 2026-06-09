@@ -233,7 +233,7 @@ function renderSessions(sessions, total) {
                 <div class="card-header">
                     <div class="card-title">${tag} ${escapeHtml(s.session_key)} ${archiveBadge}</div>
                     <div class="card-meta">
-                        ${s.message_count} 条消息 · ${s.updated_at ? new Date(s.updated_at).toLocaleString() : ''}
+                        ${s.message_count} 条消息 · Token ${(s.total_tokens || 0).toLocaleString()} · ${s.updated_at ? new Date(s.updated_at).toLocaleString() : ''}
                     </div>
                 </div>
                 <div class="card-actions">
@@ -273,7 +273,7 @@ async function viewSession(key) {
         const modal = document.getElementById('session-modal');
         const detail = document.getElementById('session-detail');
 
-        detail.innerHTML = (data.messages || []).map(msg => {
+        const messagesHtml = (data.messages || []).map(msg => {
             const role = msg.role || 'unknown';
             let content = '';
             if (typeof msg.content === 'string') {
@@ -298,16 +298,41 @@ async function viewSession(key) {
             `;
         }).join('');
 
+        // Token 用量统计条（估算）
+        const tokenBar = `
+            <div class="token-stats-bar">
+                <span class="token-stats-title">Token 用量（估算）</span>
+                <span class="token-stats-item">输入 <strong>${(data.prompt_tokens || 0).toLocaleString()}</strong></span>
+                <span class="token-stats-item">输出 <strong>${(data.completion_tokens || 0).toLocaleString()}</strong></span>
+                <span class="token-stats-item">总计 <strong>${(data.total_tokens || 0).toLocaleString()}</strong></span>
+            </div>`;
+
         if (!data.messages || !data.messages.length) {
             detail.innerHTML = `
+                ${tokenBar}
                 <div class="empty-state">
                     <p>此会话暂无消息记录</p>
                 </div>`;
+        } else {
+            detail.innerHTML = tokenBar + messagesHtml;
         }
 
         modal.classList.remove('hidden');
     } catch (e) {
         toast('加载会话失败: ' + e.message, 'error');
+    }
+}
+
+async function clearSession() {
+    if (!currentSessionKey) return;
+    if (!confirm('确定清空当前会话上下文？\nToken 计数将一并归零，且不会归档（不可恢复）。')) return;
+    try {
+        await api('POST', `/api/sessions/${encodeURIComponent(currentSessionKey)}/clear`);
+        toast('已清空上下文');
+        await viewSession(currentSessionKey);
+        loadSessions();
+    } catch (e) {
+        toast('清空失败: ' + e.message, 'error');
     }
 }
 

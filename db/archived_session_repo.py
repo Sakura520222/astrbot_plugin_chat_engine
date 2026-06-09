@@ -16,9 +16,18 @@ class ArchivedSessionRepository:
         self._factory = session_factory
 
     async def archive(
-        self, session_key: str, title: str, messages: list[dict]
+        self,
+        session_key: str,
+        title: str,
+        messages: list[dict],
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ) -> CEArchivedSession:
-        """将一组消息归档为一条记录，返回创建的 ORM 对象。"""
+        """将一组消息归档为一条记录，返回创建的 ORM 对象。
+
+        prompt_tokens/completion_tokens 为归档时的累计用量快照，
+        /switch 恢复时读回以还原该会话的 token 计数。
+        """
         messages_json = json.dumps(messages, ensure_ascii=False)
         async with self._factory() as session:
             row = CEArchivedSession(
@@ -26,6 +35,8 @@ class ArchivedSessionRepository:
                 title=title,
                 messages_json=messages_json,
                 message_count=len(messages),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
                 created_at=_shanghai_now(),
                 updated_at=_shanghai_now(),
             )

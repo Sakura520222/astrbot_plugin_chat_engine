@@ -46,7 +46,13 @@ class _ToolCallContext:
     使用 ContextVar 确保每个 asyncio task 拥有独立的上下文。
     """
 
-    __slots__ = ("pending_sends", "intermediate_msgs", "final_response")
+    __slots__ = (
+        "pending_sends",
+        "intermediate_msgs",
+        "final_response",
+        "prompt_tokens",
+        "completion_tokens",
+    )
 
     def __init__(self):
         self.pending_sends: list[tuple[str, object]] = []
@@ -54,6 +60,10 @@ class _ToolCallContext:
             dict
         ] = []  # 完整的 tool call 周期消息（assistant + tool results）
         self.final_response = None
+        # 本次 _llm_call_with_tools 累计的 Token 用量（估算），整轮结束后由
+        # handle_all_messages 写入会话计数，供 /stats 与 WebUI 读取。
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
 
 
 _tool_call_ctx: contextvars.ContextVar[_ToolCallContext | None] = (
@@ -75,6 +85,8 @@ class ChatEnginePlugin(Star):
     _SESSION_CMD_NEW = re.compile(r"^/?new$", re.IGNORECASE)
     _SESSION_CMD_LIST = re.compile(r"^/?list$", re.IGNORECASE)
     _SESSION_CMD_SWITCH = re.compile(r"^/?switch\s+(\d+)$", re.IGNORECASE)
+    _SESSION_CMD_CLEAR = re.compile(r"^/?clear$", re.IGNORECASE)
+    _SESSION_CMD_STATS = re.compile(r"^/?stats$", re.IGNORECASE)
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -779,6 +791,17 @@ class ChatEnginePlugin(Star):
                 )
                 logger.info("[ChatEngine] 上下文已保存")
 
+                #  累计 Token 用量到会话计数（/stats 与 WebUI 读取）
+                if _llm_ctx and (_llm_ctx.prompt_tokens or _llm_ctx.completion_tokens):
+                    try:
+                        await self.context_mgr.repo.add_token_usage(
+                            session_key,
+                            _llm_ctx.prompt_tokens,
+                            _llm_ctx.completion_tokens,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[ChatEngine] Token 用量累计失败: {e}")
+
                 #  记忆系统: 轮数追踪 + 自动总结
                 if self.memory_mgr:
                     try:
@@ -820,6 +843,30 @@ class ChatEnginePlugin(Star):
                 pass
 
     # LLM 调用 + Tool Call 循环
+
+    def _accumulate_token_usage(
+        self, ctx: _ToolCallContext, system_prompt: str, contexts: list[dict], response
+    ) -> None:
+        """估算单次 LLM 调用的 Token 用量并累加到 ctx。
+
+        prompt 端 = system_prompt + 实际发送的 contexts；
+        completion 端 = 回复文本 + tool_calls JSON。
+        None/err 响应不计入。工具 schema 不计入（非文本）。
+        """
+        if response is None:
+            return
+        if hasattr(response, "role") and response.role == "err":
+            return
+        tool_calls = (
+            response.to_openai_tool_calls()
+            if getattr(response, "tools_call_name", None)
+            else None
+        )
+        estimator = self.context_mgr.token_counter
+        ctx.prompt_tokens += estimator.estimate_prompt(system_prompt, contexts)
+        ctx.completion_tokens += estimator.estimate_completion(
+            getattr(response, "completion_text", "") or "", tool_calls
+        )
 
     async def _llm_call_with_tools(
         self,
@@ -869,6 +916,9 @@ class ChatEnginePlugin(Star):
             if hasattr(response, "role") and response.role == "err":
                 ctx.final_response = response
                 return
+
+            # 累计本次调用的 Token 用量（估算）
+            self._accumulate_token_usage(ctx, system_prompt, current_contexts, response)
 
             # 检查是否有工具调用
             tool_calls_name = getattr(response, "tools_call_name", None)
@@ -951,6 +1001,7 @@ class ChatEnginePlugin(Star):
             contexts=current_contexts,
             system_prompt=system_prompt,
         )
+        self._accumulate_token_usage(ctx, system_prompt, current_contexts, response)
         ctx.final_response = response
 
     async def _execute_tool(
@@ -1296,6 +1347,8 @@ class ChatEnginePlugin(Star):
         - /new: 归档当前会话，开启新会话
         - /list: 查看所有归档会话
         - /switch <N>: 切换到指定归档会话
+        - /clear: 清空当前会话上下文（不归档），归零 Token 计数
+        - /stats: 查看当前会话累计 Token 用量
         """
         text = message_text.strip()
 
@@ -1312,6 +1365,14 @@ class ChatEnginePlugin(Star):
         if switch_match:
             index = int(switch_match.group(1))
             return await self._cmd_switch(event, index)
+
+        # /clear
+        if self._SESSION_CMD_CLEAR.match(text):
+            return await self._cmd_clear(event)
+
+        # /stats
+        if self._SESSION_CMD_STATS.match(text):
+            return await self._cmd_stats(event)
 
         return None
 
@@ -1427,17 +1488,25 @@ class ChatEnginePlugin(Star):
             latest_messages = await self.context_mgr.repo.get_context(session_key)
 
             if latest_messages:
+                prompt_tokens, completion_tokens = (
+                    await self.context_mgr.repo.get_token_usage(session_key)
+                )
                 await self.db.archived_session_repo.archive(
-                    session_key, archive_title, latest_messages
+                    session_key,
+                    archive_title,
+                    latest_messages,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
                 )
 
-                # 清空当前上下文
+                # 清空当前上下文 + 归零 Token 计数
 
-                await self.context_mgr.repo.save_context(session_key, [])
+                await self.context_mgr.repo.clear_session(session_key)
 
                 logger.info(
                     f"[ChatEngine] 会话已归档: {session_key}, "
-                    f"标题: {archive_title}, 消息数: {len(latest_messages)}"
+                    f"标题: {archive_title}, 消息数: {len(latest_messages)}, "
+                    f"Token: {prompt_tokens + completion_tokens}"
                 )
 
         if archive_title and raw_messages:
@@ -1517,10 +1586,17 @@ class ChatEnginePlugin(Star):
             # 重新读取当前上下文（避免锁外期间新增的消息被丢失）
             latest_current = await self.context_mgr.repo.get_context(session_key)
 
-            # 归档当前上下文
+            # 归档当前上下文（连带当前 Token 计数快照）
             if latest_current:
+                cur_prompt, cur_completion = (
+                    await self.context_mgr.repo.get_token_usage(session_key)
+                )
                 await self.db.archived_session_repo.archive(
-                    session_key, current_archive_title, latest_current
+                    session_key,
+                    current_archive_title,
+                    latest_current,
+                    prompt_tokens=cur_prompt,
+                    completion_tokens=cur_completion,
                 )
 
             # 恢复目标归档的上下文到当前会话
@@ -1529,6 +1605,13 @@ class ChatEnginePlugin(Star):
                 target_messages
             )
             await self.context_mgr.repo.save_context(session_key, target_messages)
+
+            # 恢复目标归档的 Token 计数快照
+            await self.context_mgr.repo.set_token_usage(
+                session_key,
+                target.prompt_tokens or 0,
+                target.completion_tokens or 0,
+            )
 
             # 删除已恢复的归档记录
             deleted = await self.db.archived_session_repo.delete(target_id)
@@ -1541,6 +1624,40 @@ class ChatEnginePlugin(Star):
         if current_archive_title:
             parts.append(f"当前会话已归档: {current_archive_title}")
         return "\n".join(parts)
+
+    async def _cmd_clear(self, event: AstrMessageEvent) -> str:
+        """处理 /clear 命令 — 清空当前会话上下文（不归档），归零 Token 计数。"""
+        perm_err = self._check_session_cmd_permission(event)
+        if perm_err:
+            return f"❌ {perm_err}"
+
+        session_key = self.context_mgr.build_session_key(event)
+
+        async with self.context_mgr.get_session_lock(session_key):
+            cleared_count = await self.context_mgr.repo.clear_session(session_key)
+
+        logger.info(
+            f"[ChatEngine] 会话上下文已清空: {session_key}, 清除 {cleared_count} 条消息"
+        )
+        if cleared_count:
+            return f"✅ 已清空当前会话（{cleared_count} 条消息），Token 计数已归零。"
+        return "✅ 当前会话已是空的。"
+
+    async def _cmd_stats(self, event: AstrMessageEvent) -> str:
+        """处理 /stats 命令 — 查看当前会话累计 Token 用量（估算）。"""
+        session_key = self.context_mgr.build_session_key(event)
+
+        async with self.context_mgr.get_session_lock(session_key):
+            prompt_tokens, completion_tokens = (
+                await self.context_mgr.repo.get_token_usage(session_key)
+            )
+        total = prompt_tokens + completion_tokens
+        return (
+            "📊 当前会话 Token 用量（估算）\n"
+            f"输入：{prompt_tokens:,}\n"
+            f"输出：{completion_tokens:,}\n"
+            f"总计：{total:,}"
+        )
 
     async def _extract_image_urls(self, event: AstrMessageEvent) -> list[str]:
         """从消息事件中提取图片并转换为 base64 data URL 列表。

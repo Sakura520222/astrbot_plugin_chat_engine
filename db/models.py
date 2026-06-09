@@ -29,6 +29,9 @@ class ChatSession(ChatEngineBase):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_key: Mapped[str] = mapped_column(String(512), unique=True, index=True)
     messages_json: Mapped[str] = mapped_column(Text, default="[]")
+    # 当前会话累计 Token 用量（估算值，/stats 与 WebUI 读取）
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now)
 
@@ -69,6 +72,9 @@ class CEArchivedSession(ChatEngineBase):
     title: Mapped[str] = mapped_column(String(256), default="")
     messages_json: Mapped[str] = mapped_column(Text, default="[]")
     message_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 归档时的 Token 用量快照（/switch 恢复时读回）
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now)
 

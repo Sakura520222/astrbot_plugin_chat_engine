@@ -120,6 +120,10 @@ class ChatWebServer:
         self.app.router.add_delete(
             "/api/sessions/{key:.*}/archives/{id}", self._api_delete_archive
         )
+        # 清空上下文（保留会话行，对应 /clear）
+        self.app.router.add_post(
+            "/api/sessions/{key:.*}/clear", self._api_clear_session
+        )
         # 通配路由放最后
         self.app.router.add_get("/api/sessions/{key:.*}", self._api_get_session)
         self.app.router.add_delete("/api/sessions/{key:.*}", self._api_delete_session)
@@ -320,12 +324,25 @@ class ChatWebServer:
     async def _api_get_session(self, request: web.Request) -> web.Response:
         session_key = request.match_info["key"]
         messages = await self.plugin.context_mgr.load_context(session_key)
+        prompt_tokens, completion_tokens = (
+            await self.plugin.context_mgr.repo.get_token_usage(session_key)
+        )
         return web.json_response(
             {
                 "session_key": session_key,
                 "messages": messages,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
             }
         )
+
+    async def _api_clear_session(self, request: web.Request) -> web.Response:
+        """清空指定会话的上下文并归零 Token 计数（保留会话行，对应 /clear）。"""
+        session_key = request.match_info["key"]
+        async with self.plugin.context_mgr.get_session_lock(session_key):
+            cleared = await self.plugin.context_mgr.repo.clear_session(session_key)
+        return web.json_response({"ok": True, "cleared_messages": cleared})
 
     async def _api_delete_session(self, request: web.Request) -> web.Response:
         session_key = request.match_info["key"]
@@ -533,8 +550,15 @@ class ChatWebServer:
                 fallback_title = (
                     f"自动归档 ({shanghai_now_iso()[:16].replace('T', ' ')})"
                 )
+                cur_prompt, cur_completion = (
+                    await self.plugin.context_mgr.repo.get_token_usage(session_key)
+                )
                 await self.plugin.db.archived_session_repo.archive(
-                    session_key, fallback_title, raw_current
+                    session_key,
+                    fallback_title,
+                    raw_current,
+                    prompt_tokens=cur_prompt,
+                    completion_tokens=cur_completion,
                 )
 
             # 恢复归档上下文
@@ -543,6 +567,13 @@ class ChatWebServer:
             )
             await self.plugin.context_mgr.repo.save_context(
                 session_key, target_messages
+            )
+
+            # 恢复归档的 Token 计数快照
+            await self.plugin.context_mgr.repo.set_token_usage(
+                session_key,
+                archive.prompt_tokens or 0,
+                archive.completion_tokens or 0,
             )
 
             # 删除已恢复的归档

@@ -58,6 +58,86 @@ class SessionRepository:
             await session.commit()
             return result.rowcount > 0
 
+    async def get_token_usage(self, session_key: str) -> tuple[int, int]:
+        """读取会话累计 token 用量。行不存在返回 (0, 0)。"""
+        async with self._factory() as session:
+            result = await session.execute(
+                select(ChatSession).where(ChatSession.session_key == session_key)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return (0, 0)
+            return (row.prompt_tokens or 0, row.completion_tokens or 0)
+
+    async def add_token_usage(
+        self, session_key: str, prompt_delta: int, completion_delta: int
+    ) -> None:
+        """累加 token 用量增量（UPSERT）。"""
+        async with self._factory() as session:
+            result = await session.execute(
+                select(ChatSession).where(ChatSession.session_key == session_key)
+            )
+            row = result.scalar_one_or_none()
+            now = _shanghai_now()
+            if row is None:
+                row = ChatSession(
+                    session_key=session_key,
+                    messages_json="[]",
+                    prompt_tokens=prompt_delta,
+                    completion_tokens=completion_delta,
+                    updated_at=now,
+                    created_at=now,
+                )
+                session.add(row)
+            else:
+                row.prompt_tokens = (row.prompt_tokens or 0) + prompt_delta
+                row.completion_tokens = (row.completion_tokens or 0) + completion_delta
+                row.updated_at = now
+            await session.commit()
+
+    async def set_token_usage(
+        self, session_key: str, prompt_tokens: int, completion_tokens: int
+    ) -> None:
+        """设置 token 用量绝对值（用于 /switch 恢复归档快照）。"""
+        async with self._factory() as session:
+            result = await session.execute(
+                select(ChatSession).where(ChatSession.session_key == session_key)
+            )
+            row = result.scalar_one_or_none()
+            now = _shanghai_now()
+            if row is None:
+                row = ChatSession(
+                    session_key=session_key,
+                    messages_json="[]",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    updated_at=now,
+                    created_at=now,
+                )
+                session.add(row)
+            else:
+                row.prompt_tokens = prompt_tokens
+                row.completion_tokens = completion_tokens
+                row.updated_at = now
+            await session.commit()
+
+    async def clear_session(self, session_key: str) -> int:
+        """清空上下文并归零 token 计数。返回清空前的消息条数。"""
+        async with self._factory() as session:
+            result = await session.execute(
+                select(ChatSession).where(ChatSession.session_key == session_key)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return 0
+            prev_count = len(json.loads(row.messages_json or "[]"))
+            row.messages_json = "[]"
+            row.prompt_tokens = 0
+            row.completion_tokens = 0
+            row.updated_at = _shanghai_now()
+            await session.commit()
+            return prev_count
+
     async def list_sessions(
         self, page: int = 1, page_size: int = 50
     ) -> tuple[list[dict], int]:
@@ -86,6 +166,10 @@ class SessionRepository:
                     {
                         "session_key": row.session_key,
                         "message_count": len(messages),
+                        "prompt_tokens": row.prompt_tokens or 0,
+                        "completion_tokens": row.completion_tokens or 0,
+                        "total_tokens": (row.prompt_tokens or 0)
+                        + (row.completion_tokens or 0),
                         "updated_at": row.updated_at.isoformat()
                         if row.updated_at
                         else None,

@@ -578,6 +578,31 @@ body {
     gap: 8px;
 }
 
+/* Token 用量统计条（会话详情顶部） */
+.token-stats-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 13px;
+    flex-shrink: 0;
+}
+.token-stats-title {
+    font-weight: 600;
+    color: var(--text);
+    margin-right: 4px;
+}
+.token-stats-item {
+    color: var(--text-dim);
+}
+.token-stats-item strong {
+    color: var(--primary);
+    font-variant-numeric: tabular-nums;
+}
+
 .msg-bubble {
     padding: 12px 16px;
     border-radius: var(--radius);
