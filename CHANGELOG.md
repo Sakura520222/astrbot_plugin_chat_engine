@@ -4,6 +4,8 @@
 
 <!-- placeholder 6.11 -->
 
+- minor style cleanup
+
 <!-- placeholder 6.10 -->
 
 ### 新增
