@@ -105,14 +105,14 @@ class MessageDebouncer:
             return True
 
         # 启动新计时器
-        window_ms = max(500, min(cfg_int(self.config, "debounce_window_ms", 2000), 30000))
+        window_ms = max(
+            500, min(cfg_int(self.config, "debounce_window_ms", 2000), 30000)
+        )
         window_s = window_ms / 1000.0
         self._timers[session_key] = asyncio.create_task(
             self._on_timer(session_key, window_s)
         )
-        logger.debug(
-            f"[Debounce] 缓冲消息: {session_key}, 当前 {len(buf)} 条"
-        )
+        logger.debug(f"[Debounce] 缓冲消息: {session_key}, 当前 {len(buf)} 条")
         return False
 
     async def force_flush(self, session_key: str) -> None:
@@ -123,9 +123,7 @@ class MessageDebouncer:
                 task.cancel()
             messages = self._buffers.pop(session_key, [])
         if messages:
-            logger.info(
-                f"[Debounce] 强制刷新: {session_key}, {len(messages)} 条消息"
-            )
+            logger.info(f"[Debounce] 强制刷新: {session_key}, {len(messages)} 条消息")
             await self._invoke_process_fn(session_key, messages)
 
     async def flush_all(self) -> None:
@@ -155,14 +153,10 @@ class MessageDebouncer:
     # 内部实现
     # ------------------------------------------------------------------
 
-    async def _invoke_process_fn(
-        self, session_key: str, messages: list[dict]
-    ) -> None:
+    async def _invoke_process_fn(self, session_key: str, messages: list[dict]) -> None:
         """包装 _process_fn 调用，追踪任务生命周期并清理锁。"""
         # 将 _process_fn 包装为独立 Task 以便追踪
-        task = asyncio.create_task(
-            self._do_process(session_key, messages)
-        )
+        task = asyncio.create_task(self._do_process(session_key, messages))
         self._inflight.add(task)
         try:
             await task
@@ -171,9 +165,7 @@ class MessageDebouncer:
             # 清理 flush 锁（不再有缓冲或计时器引用此 session）
             self._cleanup_lock(session_key)
 
-    async def _do_process(
-        self, session_key: str, messages: list[dict]
-    ) -> None:
+    async def _do_process(self, session_key: str, messages: list[dict]) -> None:
         """实际执行 _process_fn，捕获并记录异常。"""
         try:
             await self._process_fn(session_key, messages)
@@ -198,7 +190,5 @@ class MessageDebouncer:
             self._cleanup_lock(session_key)
             return
 
-        logger.info(
-            f"[Debounce] 窗口到期，处理: {session_key}, {len(messages)} 条消息"
-        )
+        logger.info(f"[Debounce] 窗口到期，处理: {session_key}, {len(messages)} 条消息")
         await self._invoke_process_fn(session_key, messages)

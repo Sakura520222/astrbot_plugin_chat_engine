@@ -601,9 +601,7 @@ class ChatEnginePlugin(Star):
                     "umo": event.unified_msg_origin,
                     "event": event,
                 }
-                _force = await self.debouncer.add_message(
-                    _debounce_key, _debounce_data
-                )
+                _force = await self.debouncer.add_message(_debounce_key, _debounce_data)
 
                 # 主动回复: 注册会话 + 轮数计数
                 if self.proactive_mgr:
@@ -613,15 +611,12 @@ class ChatEnginePlugin(Star):
                         )
                         await self.proactive_mgr.on_message(_debounce_key)
                     except Exception as e:
-                        logger.debug(
-                            f"[ChatEngine] 主动回复注册失败: {e}"
-                        )
+                        logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
 
                 if _force:
                     await self.debouncer.force_flush(_debounce_key)
                 logger.info(
-                    f"[Debounce] 消息已缓冲: {_debounce_key}, "
-                    f"强制刷新={_force}"
+                    f"[Debounce] 消息已缓冲: {_debounce_key}, 强制刷新={_force}"
                 )
                 event.should_call_llm(False)
                 return
@@ -670,13 +665,9 @@ class ChatEnginePlugin(Star):
             async def _collect_text(seg_text, is_first, quote_id, **_kw):
                 if is_first and quote_id:
                     _yield_queue.append(
-                        event.chain_result(
-                            [Reply(id=quote_id), Plain(seg_text)]
-                        )
+                        event.chain_result([Reply(id=quote_id), Plain(seg_text)])
                     )
-                    logger.info(
-                        f"[ChatEngine] 引用回复已发送: quote_msg_id={quote_id}"
-                    )
+                    logger.info(f"[ChatEngine] 引用回复已发送: quote_msg_id={quote_id}")
                 else:
                     _yield_queue.append(event.plain_result(seg_text))
 
@@ -704,9 +695,7 @@ class ChatEnginePlugin(Star):
                 # _execute_llm_turn 返回 None 可能是异常或空响应
                 # 检查是否有回调已发送了错误信息（通过 _yield_queue）
                 if not _yield_queue:
-                    yield event.plain_result(
-                        "❌ LLM 调用失败或未返回有效响应。"
-                    )
+                    yield event.plain_result("❌ LLM 调用失败或未返回有效响应。")
             else:
                 # 分段发送延迟
                 for _idx, _result in enumerate(_yield_queue):
@@ -767,21 +756,15 @@ class ChatEnginePlugin(Star):
             # 加载上下文
             context_messages_raw = await self.context_mgr.load_context(session_key)
             context_messages = [
-                {**msg, "role": "user"}
-                if msg.get("role") == "observed"
-                else msg
+                {**msg, "role": "user"} if msg.get("role") == "observed" else msg
                 for msg in context_messages_raw
             ]
-            logger.info(
-                f"{log_tag} 已加载 {len(context_messages)} 条上下文消息"
-            )
+            logger.info(f"{log_tag} 已加载 {len(context_messages)} 条上下文消息")
 
             # 构建系统 Prompt
             system_prompt = await self.persona_mgr.get_system_prompt()
             if log_tag == "[ChatEngine]":
-                logger.info(
-                    f"{log_tag} System prompt 长度: {len(system_prompt)}"
-                )
+                logger.info(f"{log_tag} System prompt 长度: {len(system_prompt)}")
 
             context_prefix = await self._build_system_prompt_prefix(
                 event, session_key=session_key
@@ -809,16 +792,12 @@ class ChatEnginePlugin(Star):
                 try:
                     if log_tag == "[ChatEngine]":
                         enabled_names = await self.tool_mgr.get_enabled_names()
-                        logger.info(
-                            f"{log_tag} 已启用工具名称数: {len(enabled_names)}"
-                        )
+                        logger.info(f"{log_tag} 已启用工具名称数: {len(enabled_names)}")
 
                     tool_set = await self.tool_mgr.build_active_tool_set()
                     if tool_set:
                         tool_count = (
-                            len(tool_set.names())
-                            if not tool_set.empty()
-                            else 0
+                            len(tool_set.names()) if not tool_set.empty() else 0
                         )
 
                     tool_desc = await self.tool_mgr.build_tool_description_text()
@@ -828,9 +807,7 @@ class ChatEnginePlugin(Star):
                     if self.memory_mgr:
                         system_prompt += self._build_memory_tool_guidance()
                 except Exception as e:
-                    logger.warning(
-                        f"{log_tag} 构建工具集失败: {e}", exc_info=True
-                    )
+                    logger.warning(f"{log_tag} 构建工具集失败: {e}", exc_info=True)
             else:
                 if log_tag == "[ChatEngine]":
                     logger.info(f"{log_tag} Tool Calls 已禁用")
@@ -840,9 +817,7 @@ class ChatEnginePlugin(Star):
             llm_contexts = list(context_messages)
             llm_user_msg = user_msg
             all_messages = copy.deepcopy(list(context_messages) + [user_msg])
-            sanitized, stats = sanitize_contexts_by_modalities(
-                all_messages, modalities
-            )
+            sanitized, stats = sanitize_contexts_by_modalities(all_messages, modalities)
             if stats.changed:
                 if log_tag == "[ChatEngine]":
                     logger.info(
@@ -856,9 +831,7 @@ class ChatEnginePlugin(Star):
             llm_contexts = self._strip_history_images(llm_contexts)
 
             # Token 安全截断
-            llm_contexts = await self._trim_context_to_fit(
-                llm_contexts, provider
-            )
+            llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
 
             # 注入 [msg:ID] 标记
             llm_contexts = self._enrich_context_with_ids(llm_contexts)
@@ -871,7 +844,7 @@ class ChatEnginePlugin(Star):
                 f"工具: {tool_count} 个"
             )
             try:
-                async for (_st, _sd) in self._llm_call_with_tools(
+                async for _st, _sd in self._llm_call_with_tools(
                     provider=provider,
                     system_prompt=system_prompt,
                     contexts=llm_contexts,
@@ -886,35 +859,24 @@ class ChatEnginePlugin(Star):
                         await on_chain_segment(_sd)
 
                 _llm_ctx = _tool_call_ctx.get()
-                final_response = (
-                    _llm_ctx.final_response if _llm_ctx else None
-                )
+                final_response = _llm_ctx.final_response if _llm_ctx else None
             except Exception as e:
-                logger.error(
-                    f"{log_tag} LLM 调用异常: {e}", exc_info=True
-                )
+                logger.error(f"{log_tag} LLM 调用异常: {e}", exc_info=True)
                 return None
 
             if final_response is None:
                 logger.warning(f"{log_tag} LLM 返回 None")
                 return None
 
-            if (
-                hasattr(final_response, "role")
-                and final_response.role == "err"
-            ):
-                err_text = getattr(
-                    final_response, "completion_text", "未知错误"
-                )
+            if hasattr(final_response, "role") and final_response.role == "err":
+                err_text = getattr(final_response, "completion_text", "未知错误")
                 logger.error(f"{log_tag} LLM 错误: {err_text}")
                 return None
 
             # 处理响应文本
             response_text = final_response.completion_text or ""
             if log_tag == "[ChatEngine]":
-                logger.info(
-                    f"{log_tag} LLM 响应长度: {len(response_text)}"
-                )
+                logger.info(f"{log_tag} LLM 响应长度: {len(response_text)}")
 
             response_text = self._clean_response(response_text)
 
@@ -939,10 +901,7 @@ class ChatEnginePlugin(Star):
                 self._pending_quotes.pop(session_key, None)
 
             # 发送图片结果
-            if (
-                hasattr(final_response, "result_chain")
-                and final_response.result_chain
-            ):
+            if hasattr(final_response, "result_chain") and final_response.result_chain:
                 for comp in final_response.result_chain.chain:
                     if isinstance(comp, Image):
                         if on_image_component:
@@ -952,9 +911,7 @@ class ChatEnginePlugin(Star):
             all_new_msgs = [user_msg]
             if _llm_ctx:
                 all_new_msgs.extend(_llm_ctx.intermediate_msgs)
-            all_new_msgs.append(
-                {"role": "assistant", "content": response_text}
-            )
+            all_new_msgs.append({"role": "assistant", "content": response_text})
 
             pre_save_count = len(context_messages_raw)
             saved = await self.context_mgr._load_compress_save(
@@ -963,9 +920,7 @@ class ChatEnginePlugin(Star):
             logger.info(f"{log_tag} 上下文已保存")
 
             # Token 用量
-            if _llm_ctx and (
-                _llm_ctx.prompt_tokens or _llm_ctx.completion_tokens
-            ):
+            if _llm_ctx and (_llm_ctx.prompt_tokens or _llm_ctx.completion_tokens):
                 try:
                     await self.context_mgr.repo.add_token_usage(
                         session_key,
@@ -978,15 +933,11 @@ class ChatEnginePlugin(Star):
             # 记忆追踪
             if self.memory_mgr:
                 try:
-                    post_save_count = (
-                        len(saved) if saved else pre_save_count
-                    )
+                    post_save_count = len(saved) if saved else pre_save_count
                     compressed = post_save_count < pre_save_count + 2
 
                     if compressed:
-                        logger.info(
-                            f"{log_tag} 检测到上下文压缩，触发记忆总结"
-                        )
+                        logger.info(f"{log_tag} 检测到上下文压缩，触发记忆总结")
                         await self.memory_mgr.on_context_compressed(
                             session_key,
                             provider,
@@ -1011,9 +962,7 @@ class ChatEnginePlugin(Star):
                     )
                     await self.proactive_mgr.reset_round_count(session_key)
                 except Exception as e:
-                    logger.debug(
-                        f"{log_tag} 主动回复管理失败: {e}"
-                    )
+                    logger.debug(f"{log_tag} 主动回复管理失败: {e}")
 
         return response_text
 
@@ -1283,9 +1232,7 @@ class ChatEnginePlugin(Star):
 
     # 消息抖动 — 合并处理
 
-    def _merge_debounced_messages(
-        self, messages: list[dict]
-    ) -> tuple[str, list[str]]:
+    def _merge_debounced_messages(self, messages: list[dict]) -> tuple[str, list[str]]:
         """合并缓冲消息。
 
         Returns:
@@ -1359,25 +1306,16 @@ class ChatEnginePlugin(Star):
             # 4. 回调: 通过 send_message 发送 LLM 输出
             async def _send_text(seg_text, is_first, quote_id, has_more=False):
                 if is_first and quote_id:
-                    chain = MessageChain(
-                        [Reply(id=quote_id), Plain(seg_text)]
-                    )
-                    logger.info(
-                        f"[Debounce] 引用回复: "
-                        f"quote_msg_id={quote_id}"
-                    )
+                    chain = MessageChain([Reply(id=quote_id), Plain(seg_text)])
+                    logger.info(f"[Debounce] 引用回复: quote_msg_id={quote_id}")
                 else:
                     chain = MessageChain([Plain(seg_text)])
                 sent = await self.context.send_message(umo, chain)
                 if not sent:
-                    logger.warning(
-                        f"[Debounce] 发送失败: {session_key}"
-                    )
+                    logger.warning(f"[Debounce] 发送失败: {session_key}")
                 # 分段发送延迟（仅在有后续段时执行）
                 if has_more:
-                    delay_ms = max(
-                        0, min(self._cfg_int("split_delay_ms", 800), 5000)
-                    )
+                    delay_ms = max(0, min(self._cfg_int("split_delay_ms", 800), 5000))
                     if delay_ms > 0:
                         await asyncio.sleep(delay_ms / 1000)
 
@@ -1385,9 +1323,7 @@ class ChatEnginePlugin(Star):
                 await self.context.send_message(umo, MessageChain(components))
 
             async def _send_image(comp):
-                await self.context.send_message(
-                    umo, MessageChain([comp])
-                )
+                await self.context.send_message(umo, MessageChain([comp]))
 
             # 5. 调用共享 LLM 处理流程
             response_text = await self._execute_llm_turn(
@@ -1406,9 +1342,7 @@ class ChatEnginePlugin(Star):
                 logger.info(f"[Debounce] 处理完成: {session_key}")
 
         except Exception as e:
-            logger.error(
-                f"[Debounce] 顶层异常: {e}", exc_info=True
-            )
+            logger.error(f"[Debounce] 顶层异常: {e}", exc_info=True)
 
     async def _trim_context_to_fit(self, messages: list[dict], provider) -> list[dict]:
         """Token 安全截断：确保上下文不超过模型阈值。
@@ -1804,9 +1738,10 @@ class ChatEnginePlugin(Star):
             latest_messages = await self.context_mgr.repo.get_context(session_key)
 
             if latest_messages:
-                prompt_tokens, completion_tokens = (
-                    await self.context_mgr.repo.get_token_usage(session_key)
-                )
+                (
+                    prompt_tokens,
+                    completion_tokens,
+                ) = await self.context_mgr.repo.get_token_usage(session_key)
                 await self.db.archived_session_repo.archive(
                     session_key,
                     archive_title,
@@ -1904,9 +1839,10 @@ class ChatEnginePlugin(Star):
 
             # 归档当前上下文（连带当前 Token 计数快照）
             if latest_current:
-                cur_prompt, cur_completion = (
-                    await self.context_mgr.repo.get_token_usage(session_key)
-                )
+                (
+                    cur_prompt,
+                    cur_completion,
+                ) = await self.context_mgr.repo.get_token_usage(session_key)
                 await self.db.archived_session_repo.archive(
                     session_key,
                     current_archive_title,
@@ -1964,9 +1900,10 @@ class ChatEnginePlugin(Star):
         session_key = self.context_mgr.build_session_key(event)
 
         async with self.context_mgr.get_session_lock(session_key):
-            prompt_tokens, completion_tokens = (
-                await self.context_mgr.repo.get_token_usage(session_key)
-            )
+            (
+                prompt_tokens,
+                completion_tokens,
+            ) = await self.context_mgr.repo.get_token_usage(session_key)
         total = prompt_tokens + completion_tokens
         return (
             "📊 当前会话 Token 用量（估算）\n"

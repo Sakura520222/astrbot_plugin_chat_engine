@@ -324,9 +324,10 @@ class ChatWebServer:
     async def _api_get_session(self, request: web.Request) -> web.Response:
         session_key = request.match_info["key"]
         messages = await self.plugin.context_mgr.load_context(session_key)
-        prompt_tokens, completion_tokens = (
-            await self.plugin.context_mgr.repo.get_token_usage(session_key)
-        )
+        (
+            prompt_tokens,
+            completion_tokens,
+        ) = await self.plugin.context_mgr.repo.get_token_usage(session_key)
         return web.json_response(
             {
                 "session_key": session_key,
@@ -550,9 +551,10 @@ class ChatWebServer:
                 fallback_title = (
                     f"自动归档 ({shanghai_now_iso()[:16].replace('T', ' ')})"
                 )
-                cur_prompt, cur_completion = (
-                    await self.plugin.context_mgr.repo.get_token_usage(session_key)
-                )
+                (
+                    cur_prompt,
+                    cur_completion,
+                ) = await self.plugin.context_mgr.repo.get_token_usage(session_key)
                 await self.plugin.db.archived_session_repo.archive(
                     session_key,
                     fallback_title,
@@ -721,7 +723,9 @@ class ChatWebServer:
         from ..debounce.manager import MessageDebouncer
         from ..utils.config import cfg_bool as _cfg_bool
 
-        debounce_enabled = _cfg_bool(self.plugin.config, "enable_message_debounce", False)
+        debounce_enabled = _cfg_bool(
+            self.plugin.config, "enable_message_debounce", False
+        )
         if debounce_enabled:
             if self.plugin.debouncer:
                 # 确保 debouncer 使用最新 config 引用
