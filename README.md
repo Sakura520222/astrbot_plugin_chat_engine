@@ -80,6 +80,15 @@
 - 工具调用产生的图片自动以多模态格式嵌入 tool result
 - 通过 WebUI 启用/禁用工具
 
+### 消息抖动
+- 群聊中用户快速连发多条消息时，自动缓冲并合并为一次 LLM 调用，减少冗余回复
+- 可配置等待窗口时间，窗口内无新消息时触发处理
+- 可配置最大缓冲消息数，缓冲区满时立即处理
+- 支持适用范围选择: 仅群聊 / 仅私聊 / 所有会话
+- 支持两种合并模式: `concat`（直接拼接）和 `numbered`（序号前缀）
+- 支持自定义消息分隔符
+- WebUI 热重载，无需重启插件即可启用/禁用
+
 ### 分段发送
 - 将 LLM 回复按标点符号拆分为多条消息分段发送
 - 模拟真人打字节奏
@@ -156,6 +165,12 @@
 | `proactive_timeout_max_consecutive` | `2` | 主动回复最大连续次数，0 不限制 |
 | `proactive_round_interval` | `0` | N 轮触发回复（仅群聊，0 禁用） |
 | `enable_command_execution` | `false` | 启用命令执行，LLM 可执行其他插件命令 |
+| `enable_message_debounce` | `false` | 启用消息抖动 |
+| `debounce_window_ms` | `2000` | 抖动等待窗口（毫秒）|
+| `debounce_max_messages` | `10` | 最大缓冲消息数 |
+| `debounce_scope` | `group` | 适用范围: `group` / `private` / `all` |
+| `debounce_merge_mode` | `concat` | 合并模式: `concat` / `numbered` |
+| `debounce_separator` | `\n` | 消息分隔符 |
 | `web_port` | `8765` | WebUI 端口 |
 | `web_auth_enabled` | `false` | 启用 WebUI 登录认证 |
 | `web_username` | `admin` | WebUI 登录用户名 |
@@ -187,6 +202,8 @@ astrbot_plugin_chat_engine/
 │   ├── vector_store.py        # 长期记忆向量存储 (Embedding + 语义检索)
 │   ├── summarizer.py          # 记忆总结器 (LLM 总结)
 │   └── tools.py               # 记忆 LLM 工具 (save/search/update/delete)
+├── debounce/                 # 消息抖动
+│   └── manager.py             # 消息缓冲 / 计时器触发 / 合并处理
 ├── proactive/                 # 主动回复
 │   └── manager.py             # 超时发言 / N 轮触发 / 定时回复 / 消息清洗分段
 ├── persona/                   # 人格管理
@@ -226,6 +243,7 @@ astrbot_plugin_chat_engine/
 - **中间结果即时发送**: `_llm_call_with_tools` 作为异步生成器，在工具调用期间即时 yield 中间文本和链式结果，同时完整保存工具调用周期消息（assistant + tool results）到上下文
 - **多会话管理**: 归档会话持久化存储，支持 `/new`、`/list`、`/switch` 命令操作；归档时通过 LLM 自动生成话题标题；群聊管理员权限控制；`/new` 命令采用「锁内快照 → 锁外标题生成 → 锁内归档」策略避免 LLM 调用阻塞并发消息
 - **上海时区时间**: 全局统一使用上海时区 (UTC+8) 记录所有时间戳，替代原有的 UTC 时间，确保时间信息对中文用户友好
+- **消息抖动 (Debounce)**: 群聊中用户快速连发消息时，自动缓冲并合并为一次 LLM 调用；支持可配置的等待窗口、最大缓冲消息数、适用范围和合并模式；会话级 flush 锁保护防止并发冲突；WebUI 热重载支持
 
 ## 兼容性
 
