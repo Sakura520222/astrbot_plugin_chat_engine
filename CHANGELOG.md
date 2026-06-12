@@ -1,5 +1,31 @@
 # 变更日志
 
+## [1.3.4] - 2026-06-12
+
+### 新增
+- **消息抖动 (Debounce)**: 群聊中用户快速连发多条消息时，自动缓冲并合并为一次 LLM 调用，减少冗余回复
+  - 新增 `debounce/manager.py`，实现 `MessageDebouncer` 消息抖动管理器
+  - 支持可配置的等待窗口时间，窗口内无新消息时触发处理
+  - 支持最大缓冲消息数，缓冲区满时立即处理不等计时器
+  - 支持适用范围选择: 仅群聊 / 仅私聊 / 所有会话
+  - 支持两种合并模式: `concat`（直接拼接，保留发送者标识）和 `numbered`（为每条消息添加序号前缀）
+  - 支持自定义消息分隔符
+  - 会话级 flush 锁保护，防止计时器到期与强制 flush 并发冲突
+  - WebUI 配置保存时支持热重载，无需重启插件即可启用/禁用抖动功能
+
+### 改进
+- **DB 迁移日志增强**: `db/engine.py` 中 `ALTER TABLE ADD COLUMN` 失败时不再静默跳过，改为记录 `logger.debug` 日志，便于排查迁移问题
+
+### 配置项新增
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `enable_message_debounce` | `false` | 启用消息抖动 |
+| `debounce_window_ms` | `2000` | 抖动等待窗口（毫秒）|
+| `debounce_max_messages` | `10` | 最大缓冲消息数 |
+| `debounce_scope` | `group` | 适用范围: `group` / `private` / `all` |
+| `debounce_merge_mode` | `concat` | 合并模式: `concat` / `numbered` |
+| `debounce_separator` | `\n` | 消息分隔符 |
+
 ## [1.3.3] - 2026-06-08
 
 ### 新增
