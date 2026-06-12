@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "metadata.yaml"
+  workflow_dispatch:
 
 permissions:
   contents: write
