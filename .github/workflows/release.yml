@@ -1,0 +1,93 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "metadata.yaml"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: meta
+        run: |
+          VERSION=$(python3 -c "import yaml; print(yaml.safe_load(open('metadata.yaml'))['version'])")
+          TAG="v${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if tag already exists
+        id: check
+        run: |
+          if git tag -l | grep -qx "${{ steps.meta.outputs.tag }}"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract changelog
+        if: steps.check.outputs.exists == 'false'
+        id: changelog
+        run: |
+          python3 << 'PYEOF'
+          import re, sys
+
+          with open("CHANGELOG.md", encoding="utf-8") as f:
+              content = f.read()
+
+          pattern = r"^## \[.*?\] - \d{4}-\d{2}-\d{2}\s*\n(.*?)(?=\n^## \[|\Z)"
+          m = re.search(pattern, content, re.MULTILINE | re.DOTALL)
+          if m:
+              print(m.group(1).rstrip())
+          else:
+              print("No changelog entry found.")
+          PYEOF
+
+      - name: Build package
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          ARTIFACT="astrbot_plugin_chat_engine-${{ steps.meta.outputs.tag }}.zip"
+          zip -r "$ARTIFACT" \
+            main.py \
+            __init__.py \
+            metadata.yaml \
+            _conf_schema.json \
+            requirements.txt \
+            LICENSE \
+            README.md \
+            logo.png \
+            context/ \
+            db/ \
+            debounce/ \
+            memory/ \
+            pages/ \
+            persona/ \
+            proactive/ \
+            tools/ \
+            utils/ \
+            web/ \
+            -x "*.pyc" "__pycache__/*" "*/__pycache__/*"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_ENV"
+
+      - name: Create tag and release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "v${{ steps.meta.outputs.version }}"
+          body: "${{ steps.changelog.outputs.stdout }}"
+          files: |
+            ${{ env.artifact }}
+          draft: false
+          prerelease: false
