@@ -271,5 +271,51 @@
         "type": "bool",
         "default": false,
         "hint": "开启后，用户可通过自然语言让 LLM 代为执行其他插件注册的命令。每个命令自身的权限定义会被尊重（管理员限定命令仅管理员可执行）。"
+    },
+    "enable_message_debounce": {
+        "description": "启用消息抖动",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，短时间内的多条消息会合并为一次 LLM 调用，减少冗余回复。适用于群聊中用户快速连发消息的场景。"
+    },
+    "debounce_window_ms": {
+        "description": "抖动等待窗口 (毫秒)",
+        "type": "int",
+        "default": 2000,
+        "hint": "收到消息后等待多少毫秒，若期间无新消息则开始处理。推荐 1500~3000。"
+    },
+    "debounce_max_messages": {
+        "description": "最大缓冲消息数",
+        "type": "int",
+        "default": 10,
+        "hint": "缓冲区最多收集多少条消息，超出后立即处理不再等待。"
+    },
+    "debounce_scope": {
+        "description": "抖动适用范围",
+        "type": "string",
+        "_special": {
+            "select": {
+                "options": ["group", "private", "all"]
+            }
+        },
+        "default": "group",
+        "hint": "group: 仅群聊生效。private: 仅私聊生效。all: 所有会话生效。"
+    },
+    "debounce_merge_mode": {
+        "description": "消息合并模式",
+        "type": "string",
+        "_special": {
+            "select": {
+                "options": ["concat", "numbered"]
+            }
+        },
+        "default": "concat",
+        "hint": "concat: 直接拼接消息（保留发送者标识）。numbered: 为每条消息添加 [N] 序号前缀。"
+    },
+    "debounce_separator": {
+        "description": "消息分隔符",
+        "type": "string",
+        "default": "\\n",
+        "hint": "合并多条消息时使用的分隔符。默认换行符。"
     }
 }

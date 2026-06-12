@@ -6,6 +6,7 @@ This ensures NO interference with AstrBot's global SQLModel metadata.
 
 import os
 
+from astrbot.api import logger
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -84,8 +85,11 @@ class ChatEngineDB:
                 await conn.execute(
                     text(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}")
                 )
-            except Exception:
-                pass  # 列已存在，静默跳过
+            except Exception as e:
+                # 列已存在时静默跳过；其他异常记录日志但不阻断启动
+                logger.debug(
+                    f"[ChatEngine] 迁移 {table}.{col} 跳过: {e}"
+                )
 
     @staticmethod
     def build_db_url(db_type: str, data_dir: str, mysql_url: str = "") -> str:

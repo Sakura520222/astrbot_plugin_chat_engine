@@ -643,6 +643,12 @@ class ChatWebServer:
             "proactive_timeout_probability",
             "proactive_timeout_max_consecutive",
             "proactive_round_interval",
+            "enable_message_debounce",
+            "debounce_window_ms",
+            "debounce_max_messages",
+            "debounce_scope",
+            "debounce_merge_mode",
+            "debounce_separator",
         ]
         config_data = {}
         for key in config_keys:
@@ -690,6 +696,12 @@ class ChatWebServer:
             "proactive_timeout_probability",
             "proactive_timeout_max_consecutive",
             "proactive_round_interval",
+            "enable_message_debounce",
+            "debounce_window_ms",
+            "debounce_max_messages",
+            "debounce_scope",
+            "debounce_merge_mode",
+            "debounce_separator",
         ]
         for key in allowed_keys:
             if key in data:
@@ -704,6 +716,29 @@ class ChatWebServer:
         # 重载压缩器
         self.plugin.context_mgr.config = self.plugin.config
         self.plugin.context_mgr.reload_compressor()
+
+        # 重载消息抖动管理器
+        from ..debounce.manager import MessageDebouncer
+        from ..utils.config import cfg_bool as _cfg_bool
+
+        debounce_enabled = _cfg_bool(self.plugin.config, "enable_message_debounce", False)
+        if debounce_enabled and not self.plugin.debouncer:
+            try:
+                self.plugin.debouncer = MessageDebouncer(
+                    config=self.plugin.config,
+                    process_fn=self.plugin._process_debounced_messages,
+                )
+                logger.info("[ChatEngine] 消息抖动已通过 WebUI 启用")
+            except Exception as e:
+                logger.warning(f"[ChatEngine] 消息抖动初始化失败: {e}")
+        elif not debounce_enabled and self.plugin.debouncer:
+            try:
+                # close() 内部会先 flush_all() 再等待进行中的任务完成
+                await self.plugin.debouncer.close()
+            except Exception:
+                pass
+            self.plugin.debouncer = None
+            logger.info("[ChatEngine] 消息抖动已通过 WebUI 禁用")
 
         return web.json_response({"ok": True})
 

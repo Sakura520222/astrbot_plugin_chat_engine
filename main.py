@@ -27,6 +27,7 @@ from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
 from .context.manager import ChatContextManager
 from .context.token_counter import TokenEstimator
 from .db.engine import ChatEngineDB
+from .debounce.manager import MessageDebouncer
 from .memory.manager import MemoryManager
 from .persona.manager import ChatPersonaManager
 from .proactive.manager import ProactiveManager
@@ -97,6 +98,7 @@ class ChatEnginePlugin(Star):
         self.tool_mgr: ChatToolManager = None
         self.memory_mgr: MemoryManager = None
         self.proactive_mgr: ProactiveManager = None
+        self.debouncer: MessageDebouncer = None
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
@@ -396,6 +398,20 @@ class ChatEnginePlugin(Star):
         else:
             logger.info("[ChatEngine] 主动回复功能未启用")
 
+        # 消息抖动管理器
+        if self._cfg_bool("enable_message_debounce", False):
+            try:
+                self.debouncer = MessageDebouncer(
+                    config=self.config,
+                    process_fn=self._process_debounced_messages,
+                )
+                logger.info("[ChatEngine] 消息抖动已启用")
+            except Exception as e:
+                logger.warning(f"[ChatEngine] 消息抖动初始化失败: {e}")
+                self.debouncer = None
+        else:
+            logger.info("[ChatEngine] 消息抖动未启用")
+
         # 启动 WebUI
         web_port = self._cfg_int("web_port", 8765)
         self.web_server = ChatWebServer(self, port=web_port)
@@ -412,6 +428,8 @@ class ChatEnginePlugin(Star):
             await self.memory_mgr.close()
         if self.proactive_mgr:
             await self.proactive_mgr.close()
+        if self.debouncer:
+            await self.debouncer.close()
         if self.db:
             await self.db.close()
         logger.info("[ChatEngine] 已关闭")
@@ -568,6 +586,45 @@ class ChatEnginePlugin(Star):
                 event.should_call_llm(False)  # 恢复默认 LLM
                 return
 
+            # 消息抖动: 收集短时间内的多条消息，合并后一次性处理
+            if self.debouncer and self.debouncer.should_debounce(is_group):
+                _debounce_key = self.context_mgr.build_session_key(event)
+                # 提前提取易失数据（图片 URL 等可能过期），
+                # 仅保留 event 引用供工具系统使用（handler 需要 event 参数）
+                _debounce_text = self.context_mgr.format_user_message(event)
+                _debounce_images = await self._extract_image_urls(event)
+                _debounce_data = {
+                    "user_text": _debounce_text,
+                    "images": _debounce_images,
+                    "message_id": getattr(event.message_obj, "message_id", ""),
+                    "umo": event.unified_msg_origin,
+                    "event": event,
+                }
+                _force = await self.debouncer.add_message(
+                    _debounce_key, _debounce_data
+                )
+
+                # 主动回复: 注册会话 + 轮数计数
+                if self.proactive_mgr:
+                    try:
+                        await self.proactive_mgr.register_session(
+                            _debounce_key, _debounce_data["umo"]
+                        )
+                        await self.proactive_mgr.on_message(_debounce_key)
+                    except Exception as e:
+                        logger.debug(
+                            f"[ChatEngine] 主动回复注册失败: {e}"
+                        )
+
+                if _force:
+                    await self.debouncer.force_flush(_debounce_key)
+                logger.info(
+                    f"[Debounce] 消息已缓冲: {_debounce_key}, "
+                    f"强制刷新={_force}"
+                )
+                event.should_call_llm(False)
+                return
+
             #  获取 Provider
             provider = self.context.get_using_provider(event.unified_msg_origin)
             if not provider:
@@ -583,257 +640,110 @@ class ChatEnginePlugin(Star):
             session_key = self.context_mgr.build_session_key(event)
             logger.info(f"[ChatEngine] 会话 Key: {session_key}")
 
-            # 获取会话锁，确保同一会话的消息串行处理（防止竞态条件）
-            async with self.context_mgr.get_session_lock(session_key):
-                #  加载上下文
-                context_messages_raw = await self.context_mgr.load_context(session_key)
-                # 被动记录消息使用 "observed" role 存储在数据库中，避免压缩器将每条
-                # 被动消息都计为独立一轮（与 user/assistant 配对压缩逻辑冲突）。
-                # 此处将其转换为 "user" role 供 LLM API 使用，同时拷贝一份避免修改原始数据。
-                context_messages = [
-                    {**msg, "role": "user"} if msg.get("role") == "observed" else msg
-                    for msg in context_messages_raw
-                ]
-                logger.info(f"[ChatEngine] 已加载 {len(context_messages)} 条上下文消息")
+            #  格式化用户消息
+            user_text = self.context_mgr.format_user_message(event)
+            image_urls = await self._extract_image_urls(event)
+            if image_urls:
+                logger.info(f"[ChatEngine] 提取到 {len(image_urls)} 张图片")
+                user_msg = {
+                    "role": "user",
+                    "message_id": getattr(event.message_obj, "message_id", ""),
+                    "content": [
+                        {"type": "text", "text": user_text},
+                    ]
+                    + [
+                        {"type": "image_url", "image_url": {"url": url}}
+                        for url in image_urls
+                    ],
+                }
+            else:
+                user_msg = {
+                    "role": "user",
+                    "message_id": getattr(event.message_obj, "message_id", ""),
+                    "content": user_text,
+                }
 
-                #  格式化用户消息
-                user_text = self.context_mgr.format_user_message(event)
-
-                image_urls = await self._extract_image_urls(event)
-                if image_urls:
-                    logger.info(f"[ChatEngine] 提取到 {len(image_urls)} 张图片")
-                    user_msg = {
-                        "role": "user",
-                        "message_id": getattr(event.message_obj, "message_id", ""),
-                        "content": [
-                            {"type": "text", "text": user_text},
-                        ]
-                        + [
-                            {"type": "image_url", "image_url": {"url": url}}
-                            for url in image_urls
-                        ],
-                    }
-                else:
-                    user_msg = {
-                        "role": "user",
-                        "message_id": getattr(event.message_obj, "message_id", ""),
-                        "content": user_text,
-                    }
-
-                #  获取人格 System Prompt
-                system_prompt = await self.persona_mgr.get_system_prompt()
-                logger.info(f"[ChatEngine] System prompt 长度: {len(system_prompt)}")
-
-                #  注入环境信息前缀（时间、群名、Bot 名等）
-                context_prefix = await self._build_system_prompt_prefix(
-                    event, session_key=session_key
-                )
-                if context_prefix:
-                    system_prompt = context_prefix + "\n\n" + system_prompt
-
-                #  注入记忆到 System Prompt
-                if self.memory_mgr:
-                    try:
-                        memory_text = await self.memory_mgr.get_memory_prompt(
-                            session_key, query=user_text
-                        )
-                        if memory_text:
-                            system_prompt += f"\n\n{memory_text}"
-                            logger.info("[ChatEngine] 注入记忆到 System Prompt")
-                    except Exception as e:
-                        logger.warning(f"[ChatEngine] 注入记忆失败: {e}")
-
-                #  构建工具集和工具描述
-                enable_tools = self._cfg_bool("enable_tool_calls", True)
-                tool_set = None
-                tool_count = 0
-                if enable_tools:
-                    try:
-                        # 诊断: 检查启用的工具数量
-                        enabled_names = await self.tool_mgr.get_enabled_names()
-                        logger.info(
-                            f"[ChatEngine] 已启用工具名称数: {len(enabled_names)}"
-                        )
-
-                        tool_set = await self.tool_mgr.build_active_tool_set()
-                        if tool_set:
-                            tool_count = (
-                                len(tool_set.names()) if not tool_set.empty() else 0
-                            )
-
-                        tool_desc = await self.tool_mgr.build_tool_description_text()
-                        if tool_desc:
-                            system_prompt += f"\n\n## 可用工具\n\n{tool_desc}"
-
-                        # 记忆工具使用指引
-                        if self.memory_mgr:
-                            system_prompt += self._build_memory_tool_guidance()
-                    except Exception as e:
-                        logger.warning(
-                            f"[ChatEngine] 构建工具集失败: {e}", exc_info=True
-                        )
-                else:
-                    logger.info("[ChatEngine] Tool Calls 已禁用")
-
-                #  模态过滤
-                # 根据模型能力过滤上下文和当前消息中不支持的模态内容（如图片）
-                # 深拷贝确保原始消息不被修改，只影响传给 LLM 的副本，不影响保存到数据库
-                modalities = await self.context_mgr.get_modalities(provider)
-                llm_contexts = list(context_messages)
-                llm_user_msg = user_msg
-                all_messages = copy.deepcopy(list(context_messages) + [user_msg])
-                sanitized, stats = sanitize_contexts_by_modalities(
-                    all_messages, modalities
-                )
-                if stats.changed:
+            # 回调: 将 LLM 输出 yield 给 AstrBot 事件管道
+            async def _on_text(seg_text, is_first, quote_id):
+                if is_first and quote_id:
+                    yield event.chain_result(
+                        [Reply(id=quote_id), Plain(seg_text)]
+                    )
                     logger.info(
-                        f"[ChatEngine] 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
-                        f"{stats.fixed_audio_blocks} 个音频块"
+                        f"[ChatEngine] 引用回复已发送: quote_msg_id={quote_id}"
                     )
-                    llm_contexts = sanitized[:-1]
-                    llm_user_msg = sanitized[-1]
+                else:
+                    yield event.plain_result(seg_text)
 
-                #  剥离历史上下文中的图片，仅保留当前用户消息的图片
-                llm_contexts = self._strip_history_images(llm_contexts)
+            async def _on_chain(components):
+                yield event.chain_result(components)
 
-                #  Token 安全截断
-                llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
+            async def _on_image(comp):
+                yield event.chain_result([comp])
 
-                #  注入 [msg:ID] 标记，让 LLM 可以引用特定消息
-                llm_contexts = self._enrich_context_with_ids(llm_contexts)
-                llm_user_msg = self._inject_msg_id_tag(llm_user_msg)
+            # 需要一个可 yield 的包装方式，因为 handle_all_messages 是 async generator
+            # _execute_llm_turn 通过回调发送结果，但此处的回调需要 yield
+            # 所以直接在 _execute_llm_turn 中使用 yield 会更自然
+            # → 此处改用 inline 的方式调用共享逻辑
 
-                #  调用 LLM (含 Tool Call 循环)
-                logger.info(
-                    f"[ChatEngine] 开始调用 LLM, 上下文: {len(llm_contexts) + 1} 条, "
-                    f"工具: {tool_count} 个, 传递原生FC: {tool_set is not None and not tool_set.empty()}"
-                )
-                try:
-                    async for (
-                        _send_type,
-                        _send_data,
-                    ) in self._llm_call_with_tools(
-                        provider=provider,
-                        system_prompt=system_prompt,
-                        contexts=llm_contexts,
-                        user_msg=llm_user_msg,
-                        tool_set=tool_set,
-                        event=event,
-                    ):
-                        if _send_type == "text":
-                            yield event.plain_result(_send_data)
-                        elif _send_type == "chain":
-                            yield event.chain_result(_send_data)
-                    _llm_ctx = _tool_call_ctx.get()
-                    final_response = _llm_ctx.final_response if _llm_ctx else None
-                except Exception as e:
-                    logger.error(f"[ChatEngine] LLM 调用异常: {e}", exc_info=True)
+            # 由于 async generator 不能嵌套 yield，使用返回结果的方式
+            # 收集所有需要 yield 的结果
+            _yield_queue = []
+
+            async def _collect_text(seg_text, is_first, quote_id):
+                if is_first and quote_id:
+                    _yield_queue.append(
+                        event.chain_result(
+                            [Reply(id=quote_id), Plain(seg_text)]
+                        )
+                    )
+                    logger.info(
+                        f"[ChatEngine] 引用回复已发送: quote_msg_id={quote_id}"
+                    )
+                else:
+                    _yield_queue.append(event.plain_result(seg_text))
+
+            async def _collect_chain(components):
+                _yield_queue.append(event.chain_result(components))
+
+            async def _collect_image(comp):
+                _yield_queue.append(event.chain_result([comp]))
+
+            response_text = await self._execute_llm_turn(
+                provider=provider,
+                session_key=session_key,
+                user_msg=user_msg,
+                event=event,
+                user_text=user_text,
+                log_tag="[ChatEngine]",
+                on_text_segment=_collect_text,
+                on_chain_segment=_collect_chain,
+                on_image_component=_collect_image,
+            )
+
+            # 处理错误情况
+            if response_text is None:
+                # 区分 LLM 异常和 LLM 返回 None/err
+                # _execute_llm_turn 返回 None 可能是异常或空响应
+                # 检查是否有回调已发送了错误信息（通过 _yield_queue）
+                if not _yield_queue:
                     yield event.plain_result(
-                        f"❌ LLM 调用失败: {type(e).__name__}: {e}"
+                        "❌ LLM 调用失败或未返回有效响应。"
                     )
-                    return
-
-                if final_response is None:
-                    logger.warning("[ChatEngine] LLM 返回 None")
-                    yield event.plain_result("❌ LLM 未返回有效响应。")
-                    return
-
-                if hasattr(final_response, "role") and final_response.role == "err":
-                    err_text = getattr(final_response, "completion_text", "未知错误")
-                    logger.error(f"[ChatEngine] LLM 返回错误: {err_text}")
-                    yield event.plain_result(f"❌ LLM 错误: {err_text}")
-                    return
-
-                #  返回结果
-                response_text = final_response.completion_text or ""
-                logger.info(f"[ChatEngine] LLM 响应长度: {len(response_text)}")
-
-                # 文本清洗 (在分段发送之前)
-                response_text = self._clean_response(response_text)
-
-                # 检查是否有待发送的引用回复
-                pending_quote_id = self._pending_quotes.pop(session_key, None)
-
-                if response_text:
-                    _first_seg = True
-                    async for _seg in self._iter_text_segments(response_text):
-                        if _first_seg and pending_quote_id:
-                            yield event.chain_result(
-                                [Reply(id=pending_quote_id), Plain(_seg)]
-                            )
-                            logger.info(
-                                f"[ChatEngine] 引用回复已发送: quote_msg_id={pending_quote_id}"
-                            )
-                        else:
-                            yield event.plain_result(_seg)
-                        _first_seg = False
-                elif pending_quote_id:
-                    # LLM 返回空但设置了引用——清除 pending
-                    self._pending_quotes.pop(session_key, None)
-
-                if (
-                    hasattr(final_response, "result_chain")
-                    and final_response.result_chain
-                ):
-                    for comp in final_response.result_chain.chain:
-                        if isinstance(comp, Image):
-                            yield event.chain_result([comp])
-
-                #  保存上下文（包含完整的 tool call 周期消息）
-                all_new_msgs = [user_msg]
-                if _llm_ctx:
-                    all_new_msgs.extend(_llm_ctx.intermediate_msgs)
-                all_new_msgs.append({"role": "assistant", "content": response_text})
-                # 记录保存前的消息数，用于检测压缩是否发生
-                pre_save_count = len(context_messages_raw)
-                saved = await self.context_mgr._load_compress_save(
-                    session_key, all_new_msgs, provider=provider
-                )
-                logger.info("[ChatEngine] 上下文已保存")
-
-                #  累计 Token 用量到会话计数（/stats 与 WebUI 读取）
-                if _llm_ctx and (_llm_ctx.prompt_tokens or _llm_ctx.completion_tokens):
-                    try:
-                        await self.context_mgr.repo.add_token_usage(
-                            session_key,
-                            _llm_ctx.prompt_tokens,
-                            _llm_ctx.completion_tokens,
+            else:
+                # 分段发送延迟
+                for _idx, _result in enumerate(_yield_queue):
+                    yield _result
+                    if _idx < len(_yield_queue) - 1:
+                        delay_ms = max(
+                            0,
+                            min(
+                                self._cfg_int("split_delay_ms", 800),
+                                5000,
+                            ),
                         )
-                    except Exception as e:
-                        logger.warning(f"[ChatEngine] Token 用量累计失败: {e}")
-
-                #  记忆系统: 轮数追踪 + 自动总结
-                if self.memory_mgr:
-                    try:
-                        # 检测压缩是否发生
-                        post_save_count = len(saved) if saved else pre_save_count
-                        compressed = post_save_count < pre_save_count + 2
-
-                        if compressed:
-                            logger.info("[ChatEngine] 检测到上下文压缩，触发记忆总结")
-                            await self.memory_mgr.on_context_compressed(
-                                session_key,
-                                provider,
-                                self.persona_mgr,
-                                self.context_mgr,
-                            )
-
-                        await self.memory_mgr.on_turn_complete(
-                            session_key, provider, self.persona_mgr, self.context_mgr
-                        )
-                    except Exception as e:
-                        logger.warning(f"[ChatEngine] 记忆轮数追踪失败: {e}")
-
-                # 主动回复: 注册会话 + 重置轮数（机器人已回复，从零开始计数）
-                if self.proactive_mgr:
-                    try:
-                        await self.proactive_mgr.register_session(
-                            session_key,
-                            event.unified_msg_origin,
-                        )
-                        await self.proactive_mgr.reset_round_count(session_key)
-                    except Exception as e:
-                        logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
+                        if delay_ms > 0:
+                            await asyncio.sleep(delay_ms / 1000)
 
         except Exception as e:
             logger.error(f"[ChatEngine] 顶层异常: {e}", exc_info=True)
@@ -841,6 +751,292 @@ class ChatEnginePlugin(Star):
                 yield event.plain_result(f"❌ ChatEngine 异常: {type(e).__name__}")
             except Exception:
                 pass
+
+    # 共享 LLM 处理流程
+
+    async def _execute_llm_turn(
+        self,
+        *,
+        provider,
+        session_key: str,
+        user_msg: dict,
+        event: AstrMessageEvent,
+        user_text: str,
+        log_tag: str = "[ChatEngine]",
+        on_text_segment=None,
+        on_chain_segment=None,
+        on_image_component=None,
+    ) -> str | None:
+        """执行一轮完整的 LLM 调用流程（上下文加载 → Prompt 构建 → LLM 调用 → 结果处理 → 上下文保存）。
+
+        被 handle_all_messages 和 _process_debounced_messages 共享调用，
+        避免两处维护 ~200 行几乎相同的代码。
+
+        Args:
+            provider: LLM Provider 实例
+            session_key: 会话标识
+            user_msg: 构建好的用户消息 dict
+            event: 消息事件（用于环境信息构建和工具调用）
+            user_text: 用户文本（用于记忆查询）
+            log_tag: 日志前缀
+            on_text_segment: ``async (text, is_first, pending_quote_id) -> None``
+            on_chain_segment: ``async (components) -> None``
+            on_image_component: ``async (component) -> None``
+
+        Returns:
+            LLM 响应文本，或 None 表示失败/无需进一步处理。
+        """
+        async with self.context_mgr.get_session_lock(session_key):
+            # 加载上下文
+            context_messages_raw = await self.context_mgr.load_context(session_key)
+            context_messages = [
+                {**msg, "role": "user"}
+                if msg.get("role") == "observed"
+                else msg
+                for msg in context_messages_raw
+            ]
+            logger.info(
+                f"{log_tag} 已加载 {len(context_messages)} 条上下文消息"
+            )
+
+            # 构建系统 Prompt
+            system_prompt = await self.persona_mgr.get_system_prompt()
+            if log_tag == "[ChatEngine]":
+                logger.info(
+                    f"{log_tag} System prompt 长度: {len(system_prompt)}"
+                )
+
+            context_prefix = await self._build_system_prompt_prefix(
+                event, session_key=session_key
+            )
+            if context_prefix:
+                system_prompt = context_prefix + "\n\n" + system_prompt
+
+            # 注入记忆
+            if self.memory_mgr:
+                try:
+                    memory_text = await self.memory_mgr.get_memory_prompt(
+                        session_key, query=user_text
+                    )
+                    if memory_text:
+                        system_prompt += f"\n\n{memory_text}"
+                        logger.info(f"{log_tag} 注入记忆到 System Prompt")
+                except Exception as e:
+                    logger.warning(f"{log_tag} 注入记忆失败: {e}")
+
+            # 构建工具集
+            enable_tools = self._cfg_bool("enable_tool_calls", True)
+            tool_set = None
+            tool_count = 0
+            if enable_tools:
+                try:
+                    if log_tag == "[ChatEngine]":
+                        enabled_names = await self.tool_mgr.get_enabled_names()
+                        logger.info(
+                            f"{log_tag} 已启用工具名称数: {len(enabled_names)}"
+                        )
+
+                    tool_set = await self.tool_mgr.build_active_tool_set()
+                    if tool_set:
+                        tool_count = (
+                            len(tool_set.names())
+                            if not tool_set.empty()
+                            else 0
+                        )
+
+                    tool_desc = await self.tool_mgr.build_tool_description_text()
+                    if tool_desc:
+                        system_prompt += f"\n\n## 可用工具\n\n{tool_desc}"
+
+                    if self.memory_mgr:
+                        system_prompt += self._build_memory_tool_guidance()
+                except Exception as e:
+                    logger.warning(
+                        f"{log_tag} 构建工具集失败: {e}", exc_info=True
+                    )
+            else:
+                if log_tag == "[ChatEngine]":
+                    logger.info(f"{log_tag} Tool Calls 已禁用")
+
+            # 模态过滤
+            modalities = await self.context_mgr.get_modalities(provider)
+            llm_contexts = list(context_messages)
+            llm_user_msg = user_msg
+            all_messages = copy.deepcopy(list(context_messages) + [user_msg])
+            sanitized, stats = sanitize_contexts_by_modalities(
+                all_messages, modalities
+            )
+            if stats.changed:
+                if log_tag == "[ChatEngine]":
+                    logger.info(
+                        f"{log_tag} 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
+                        f"{stats.fixed_audio_blocks} 个音频块"
+                    )
+                llm_contexts = sanitized[:-1]
+                llm_user_msg = sanitized[-1]
+
+            # 剥离历史图片
+            llm_contexts = self._strip_history_images(llm_contexts)
+
+            # Token 安全截断
+            llm_contexts = await self._trim_context_to_fit(
+                llm_contexts, provider
+            )
+
+            # 注入 [msg:ID] 标记
+            llm_contexts = self._enrich_context_with_ids(llm_contexts)
+            llm_user_msg = self._inject_msg_id_tag(llm_user_msg)
+
+            # 调用 LLM (含 Tool Call 循环)
+            logger.info(
+                f"{log_tag} 开始调用 LLM, "
+                f"上下文: {len(llm_contexts) + 1} 条, "
+                f"工具: {tool_count} 个"
+            )
+            try:
+                async for (_st, _sd) in self._llm_call_with_tools(
+                    provider=provider,
+                    system_prompt=system_prompt,
+                    contexts=llm_contexts,
+                    user_msg=llm_user_msg,
+                    tool_set=tool_set,
+                    event=event,
+                ):
+                    # 通过回调发送中间结果
+                    if _st == "text" and on_text_segment:
+                        await on_text_segment(_sd, False, None)
+                    elif _st == "chain" and on_chain_segment:
+                        await on_chain_segment(_sd)
+
+                _llm_ctx = _tool_call_ctx.get()
+                final_response = (
+                    _llm_ctx.final_response if _llm_ctx else None
+                )
+            except Exception as e:
+                logger.error(
+                    f"{log_tag} LLM 调用异常: {e}", exc_info=True
+                )
+                return None
+
+            if final_response is None:
+                logger.warning(f"{log_tag} LLM 返回 None")
+                return None
+
+            if (
+                hasattr(final_response, "role")
+                and final_response.role == "err"
+            ):
+                err_text = getattr(
+                    final_response, "completion_text", "未知错误"
+                )
+                logger.error(f"{log_tag} LLM 错误: {err_text}")
+                return None
+
+            # 处理响应文本
+            response_text = final_response.completion_text or ""
+            if log_tag == "[ChatEngine]":
+                logger.info(
+                    f"{log_tag} LLM 响应长度: {len(response_text)}"
+                )
+
+            response_text = self._clean_response(response_text)
+
+            # 检查引用回复
+            pending_quote_id = self._pending_quotes.pop(session_key, None)
+
+            if response_text:
+                # 发送分段文本
+                _first_seg = True
+                async for _seg in self._iter_text_segments(response_text):
+                    if on_text_segment:
+                        await on_text_segment(
+                            _seg,
+                            _first_seg,
+                            pending_quote_id if _first_seg else None,
+                        )
+                    _first_seg = False
+            elif pending_quote_id:
+                # LLM 返回空但设置了引用——清除 pending
+                self._pending_quotes.pop(session_key, None)
+
+            # 发送图片结果
+            if (
+                hasattr(final_response, "result_chain")
+                and final_response.result_chain
+            ):
+                for comp in final_response.result_chain.chain:
+                    if isinstance(comp, Image):
+                        if on_image_component:
+                            await on_image_component(comp)
+
+            # 保存上下文
+            all_new_msgs = [user_msg]
+            if _llm_ctx:
+                all_new_msgs.extend(_llm_ctx.intermediate_msgs)
+            all_new_msgs.append(
+                {"role": "assistant", "content": response_text}
+            )
+
+            pre_save_count = len(context_messages_raw)
+            saved = await self.context_mgr._load_compress_save(
+                session_key, all_new_msgs, provider=provider
+            )
+            logger.info(f"{log_tag} 上下文已保存")
+
+            # Token 用量
+            if _llm_ctx and (
+                _llm_ctx.prompt_tokens or _llm_ctx.completion_tokens
+            ):
+                try:
+                    await self.context_mgr.repo.add_token_usage(
+                        session_key,
+                        _llm_ctx.prompt_tokens,
+                        _llm_ctx.completion_tokens,
+                    )
+                except Exception as e:
+                    logger.warning(f"{log_tag} Token 用量累计失败: {e}")
+
+            # 记忆追踪
+            if self.memory_mgr:
+                try:
+                    post_save_count = (
+                        len(saved) if saved else pre_save_count
+                    )
+                    compressed = post_save_count < pre_save_count + 2
+
+                    if compressed:
+                        logger.info(
+                            f"{log_tag} 检测到上下文压缩，触发记忆总结"
+                        )
+                        await self.memory_mgr.on_context_compressed(
+                            session_key,
+                            provider,
+                            self.persona_mgr,
+                            self.context_mgr,
+                        )
+
+                    await self.memory_mgr.on_turn_complete(
+                        session_key,
+                        provider,
+                        self.persona_mgr,
+                        self.context_mgr,
+                    )
+                except Exception as e:
+                    logger.warning(f"{log_tag} 记忆追踪失败: {e}")
+
+            # 主动回复管理
+            if self.proactive_mgr:
+                try:
+                    await self.proactive_mgr.register_session(
+                        session_key, event.unified_msg_origin
+                    )
+                    await self.proactive_mgr.reset_round_count(session_key)
+                except Exception as e:
+                    logger.debug(
+                        f"{log_tag} 主动回复管理失败: {e}"
+                    )
+
+        return response_text
 
     # LLM 调用 + Tool Call 循环
 
@@ -1104,6 +1300,134 @@ class ChatEnginePlugin(Star):
             return json.dumps(
                 {"error": f"工具执行失败: {type(e).__name__}: {str(e)}"},
                 ensure_ascii=False,
+            )
+
+    # 消息抖动 — 合并处理
+
+    def _merge_debounced_messages(
+        self, messages: list[dict]
+    ) -> tuple[str, list[str]]:
+        """合并缓冲消息。
+
+        Returns:
+            (合并后文本, 合并后图片列表)
+        """
+        separator = self.config.get("debounce_separator", "\n")
+        # 处理转义序列: AstrBot 配置面板输入的 \n 是字面两个字符
+        separator = separator.replace("\\n", "\n").replace("\\t", "\t")
+        merge_mode = self.config.get("debounce_merge_mode", "concat")
+
+        texts = [m["user_text"] for m in messages]
+        images: list[str] = []
+        for m in messages:
+            images.extend(m.get("images", []))
+
+        if merge_mode == "numbered" and len(texts) > 1:
+            numbered = [f"[{i + 1}] {t}" for i, t in enumerate(texts)]
+            combined_text = separator.join(numbered)
+        else:
+            combined_text = separator.join(texts)
+
+        return combined_text, images
+
+    async def _process_debounced_messages(
+        self, session_key: str, messages: list[dict]
+    ) -> None:
+        """处理抖动收集的消息 — 合并后调用 LLM 并通过 send_message 发送回复。
+
+        被 MessageDebouncer 的计时器回调和 force_flush 调用，
+        运行在独立的 asyncio.Task 中，不走 handle_all_messages 的 yield 流程。
+        """
+        from astrbot.core.message.message_event_result import MessageChain
+
+        if not messages:
+            return
+
+        last = messages[-1]
+        umo = last["umo"]
+        last_event = last["event"]
+
+        try:
+            # 1. 获取 Provider
+            provider = self.context.get_using_provider(umo)
+            if not provider:
+                logger.warning("[Debounce] 未找到 Provider")
+                return
+
+            # 2. 合并消息
+            combined_text, combined_images = self._merge_debounced_messages(messages)
+
+            # 3. 构建合并后的 user_msg
+            if combined_images:
+                user_msg = {
+                    "role": "user",
+                    "message_id": last["message_id"],
+                    "content": [
+                        {"type": "text", "text": combined_text},
+                    ]
+                    + [
+                        {"type": "image_url", "image_url": {"url": url}}
+                        for url in combined_images
+                    ],
+                }
+            else:
+                user_msg = {
+                    "role": "user",
+                    "message_id": last["message_id"],
+                    "content": combined_text,
+                }
+
+            # 4. 回调: 通过 send_message 发送 LLM 输出
+            async def _send_text(seg_text, is_first, quote_id):
+                if is_first and quote_id:
+                    chain = MessageChain(
+                        [Reply(id=quote_id), Plain(seg_text)]
+                    )
+                    logger.info(
+                        f"[Debounce] 引用回复: "
+                        f"quote_msg_id={quote_id}"
+                    )
+                else:
+                    chain = MessageChain([Plain(seg_text)])
+                sent = await self.context.send_message(umo, chain)
+                if not sent:
+                    logger.warning(
+                        f"[Debounce] 发送失败: {session_key}"
+                    )
+                # 分段发送延迟
+                delay_ms = max(
+                    0, min(self._cfg_int("split_delay_ms", 800), 5000)
+                )
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000)
+
+            async def _send_chain(components):
+                await self.context.send_message(umo, MessageChain(components))
+
+            async def _send_image(comp):
+                await self.context.send_message(
+                    umo, MessageChain([comp])
+                )
+
+            # 5. 调用共享 LLM 处理流程
+            response_text = await self._execute_llm_turn(
+                provider=provider,
+                session_key=session_key,
+                user_msg=user_msg,
+                event=last_event,
+                user_text=combined_text,
+                log_tag="[Debounce]",
+                on_text_segment=_send_text,
+                on_chain_segment=_send_chain,
+                on_image_component=_send_image,
+            )
+
+            if response_text is not None:
+                logger.info(f"[Debounce] 处理完成: {session_key}")
+
+        except Exception as e:
+            logger.error(
+                f"[Debounce] 顶层异常: {e}", exc_info=True
             )
 
     async def _trim_context_to_fit(self, messages: list[dict], provider) -> list[dict]:
