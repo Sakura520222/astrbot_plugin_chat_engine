@@ -684,6 +684,12 @@ const CONFIG_FIELDS = [
     { key: 'proactive_timeout_probability', label: '超时触发概率 (%)', type: 'number', hint: '每次超时命中时以此概率(0~100)决定是否实际触发。30 表示约三成概率触发，100 则每次必触发。' },
     { key: 'proactive_timeout_max_consecutive', label: '最大连续主动次数', type: 'number', hint: '连续主动回复的最大次数，达到后不再触发直到用户再次发言。0 表示不限制。' },
     { key: 'proactive_round_interval', label: 'N 轮触发回复（仅群聊）', type: 'number', hint: '每收到 N 条消息触发一次主动回复，仅对群聊生效。0 表示禁用。需在会话设置中单独启用。' },
+    { key: 'enable_message_debounce', label: '启用消息抖动', type: 'checkbox', hint: '开启后，短时间内的多条消息会合并为一次 LLM 调用，减少冗余回复。适用于群聊中用户快速连发消息的场景。' },
+    { key: 'debounce_window_ms', label: '抖动等待窗口 (毫秒)', type: 'number', hint: '收到消息后等待多少毫秒，若期间无新消息则开始处理。推荐 1500~3000。' },
+    { key: 'debounce_max_messages', label: '最大缓冲消息数', type: 'number', hint: '缓冲区最多收集多少条消息，超出后立即处理不再等待。' },
+    { key: 'debounce_scope', label: '抖动适用范围', type: 'select', options: ['group', 'private', 'all'], hint: 'group: 仅群聊生效。private: 仅私聊生效。all: 所有会话生效。' },
+    { key: 'debounce_merge_mode', label: '消息合并模式', type: 'select', options: ['concat', 'numbered'], hint: 'concat: 直接拼接消息（保留发送者标识）。numbered: 为每条消息添加 [N] 序号前缀。' },
+    { key: 'debounce_separator', label: '消息分隔符', type: 'text', hint: '合并多条消息时使用的分隔符。默认换行符 \\n。' },
 ];
 
 let currentConfig = {};
