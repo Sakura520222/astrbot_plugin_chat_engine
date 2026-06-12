@@ -56,8 +56,13 @@ class MessageDebouncer:
         return lock
 
     def _cleanup_lock(self, session_key: str) -> None:
-        """清理指定会话的 flush 锁，避免无界内存增长。"""
-        self._flush_locks.pop(session_key, None)
+        """清理指定会话的 flush 锁，避免无界内存增长。
+
+        仅在对应 session 无活跃缓冲且无未完成计时器时才移除锁，
+        避免新消息到达时的无锁窗口。
+        """
+        if session_key not in self._buffers and session_key not in self._timers:
+            self._flush_locks.pop(session_key, None)
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -68,6 +73,9 @@ class MessageDebouncer:
         if not cfg_bool(self.config, "enable_message_debounce", False):
             return False
         scope = self.config.get("debounce_scope", "group")
+        if scope not in ("group", "private", "all"):
+            logger.warning(f"[Debounce] 无效 debounce_scope='{scope}'，回退到 'group'")
+            scope = "group"
         if scope == "group" and not is_group:
             return False
         if scope == "private" and is_group:
@@ -92,12 +100,13 @@ class MessageDebouncer:
             old_task.cancel()
 
         # 缓冲区已满 → 不启动新计时器，由调用方 force_flush
-        max_msgs = cfg_int(self.config, "debounce_max_messages", 10)
+        max_msgs = max(1, min(cfg_int(self.config, "debounce_max_messages", 10), 100))
         if len(buf) >= max_msgs:
             return True
 
         # 启动新计时器
-        window_s = cfg_int(self.config, "debounce_window_ms", 2000) / 1000.0
+        window_ms = max(500, min(cfg_int(self.config, "debounce_window_ms", 2000), 30000))
+        window_s = window_ms / 1000.0
         self._timers[session_key] = asyncio.create_task(
             self._on_timer(session_key, window_s)
         )

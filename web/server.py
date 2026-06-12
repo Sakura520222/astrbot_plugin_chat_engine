@@ -722,15 +722,19 @@ class ChatWebServer:
         from ..utils.config import cfg_bool as _cfg_bool
 
         debounce_enabled = _cfg_bool(self.plugin.config, "enable_message_debounce", False)
-        if debounce_enabled and not self.plugin.debouncer:
-            try:
-                self.plugin.debouncer = MessageDebouncer(
-                    config=self.plugin.config,
-                    process_fn=self.plugin._process_debounced_messages,
-                )
-                logger.info("[ChatEngine] 消息抖动已通过 WebUI 启用")
-            except Exception as e:
-                logger.warning(f"[ChatEngine] 消息抖动初始化失败: {e}")
+        if debounce_enabled:
+            if self.plugin.debouncer:
+                # 确保 debouncer 使用最新 config 引用
+                self.plugin.debouncer.config = self.plugin.config
+            else:
+                try:
+                    self.plugin.debouncer = MessageDebouncer(
+                        config=self.plugin.config,
+                        process_fn=self.plugin._process_debounced_messages,
+                    )
+                    logger.info("[ChatEngine] 消息抖动已通过 WebUI 启用")
+                except Exception as e:
+                    logger.warning(f"[ChatEngine] 消息抖动初始化失败: {e}")
         elif not debounce_enabled and self.plugin.debouncer:
             try:
                 # close() 内部会先 flush_all() 再等待进行中的任务完成
