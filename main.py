@@ -924,8 +924,7 @@ class ChatEnginePlugin(Star):
             if response_text:
                 # 发送分段文本
                 _first_seg = True
-                _seg_iter = self._iter_text_segments_no_delay(response_text)
-                _segs = [s async for s in _seg_iter]
+                _segs = list(self._iter_text_segments_no_delay(response_text))
                 for _si, _seg in enumerate(_segs):
                     if on_text_segment:
                         await on_text_segment(
@@ -1544,8 +1543,8 @@ class ChatEnginePlugin(Star):
 
         return segments
 
-    async def _iter_text_segments_no_delay(self, text: str):
-        """将文本分段并异步迭代返回，不添加段间延迟。
+    def _iter_text_segments_no_delay(self, text: str):
+        """将文本分段并迭代返回，不添加段间延迟。
 
         延迟由调用方根据回调参数 ``has_more`` 自行控制，
         避免在无法预知总段数时最后一段后多等待。
@@ -1555,14 +1554,12 @@ class ChatEnginePlugin(Star):
             return
         if len(segments) > 1:
             logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
-        for seg in segments:
-            yield seg
+        yield from segments
 
     async def _iter_text_segments(self, text: str):
         """将文本分段并异步迭代返回，段间自动添加延迟。
 
-        复用于 _llm_call_with_tools（中间文本）和 handle_all_messages（最终响应），
-        避免分段 + 延迟逻辑重复。
+        用于 _llm_call_with_tools 的中间文本输出。
         """
         segments = self._split_response(text)
         if not segments:
