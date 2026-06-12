@@ -17,6 +17,7 @@ import inspect
 import json
 import re
 import time as _time
+from collections.abc import Awaitable, Callable
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -663,34 +664,10 @@ class ChatEnginePlugin(Star):
                     "content": user_text,
                 }
 
-            # 回调: 将 LLM 输出 yield 给 AstrBot 事件管道
-            async def _on_text(seg_text, is_first, quote_id):
-                if is_first and quote_id:
-                    yield event.chain_result(
-                        [Reply(id=quote_id), Plain(seg_text)]
-                    )
-                    logger.info(
-                        f"[ChatEngine] 引用回复已发送: quote_msg_id={quote_id}"
-                    )
-                else:
-                    yield event.plain_result(seg_text)
-
-            async def _on_chain(components):
-                yield event.chain_result(components)
-
-            async def _on_image(comp):
-                yield event.chain_result([comp])
-
-            # 需要一个可 yield 的包装方式，因为 handle_all_messages 是 async generator
-            # _execute_llm_turn 通过回调发送结果，但此处的回调需要 yield
-            # 所以直接在 _execute_llm_turn 中使用 yield 会更自然
-            # → 此处改用 inline 的方式调用共享逻辑
-
-            # 由于 async generator 不能嵌套 yield，使用返回结果的方式
             # 收集所有需要 yield 的结果
             _yield_queue = []
 
-            async def _collect_text(seg_text, is_first, quote_id):
+            async def _collect_text(seg_text, is_first, quote_id, **_kw):
                 if is_first and quote_id:
                     _yield_queue.append(
                         event.chain_result(
@@ -763,9 +740,9 @@ class ChatEnginePlugin(Star):
         event: AstrMessageEvent,
         user_text: str,
         log_tag: str = "[ChatEngine]",
-        on_text_segment=None,
-        on_chain_segment=None,
-        on_image_component=None,
+        on_text_segment: Callable[..., Awaitable[None]] | None = None,
+        on_chain_segment: Callable[[list], Awaitable[None]] | None = None,
+        on_image_component: Callable[[object], Awaitable[None]] | None = None,
     ) -> str | None:
         """执行一轮完整的 LLM 调用流程（上下文加载 → Prompt 构建 → LLM 调用 → 结果处理 → 上下文保存）。
 
@@ -779,7 +756,7 @@ class ChatEnginePlugin(Star):
             event: 消息事件（用于环境信息构建和工具调用）
             user_text: 用户文本（用于记忆查询）
             log_tag: 日志前缀
-            on_text_segment: ``async (text, is_first, pending_quote_id) -> None``
+            on_text_segment: ``async (text, is_first, pending_quote_id, *, has_more=False) -> None``
             on_chain_segment: ``async (components) -> None``
             on_image_component: ``async (component) -> None``
 
@@ -947,12 +924,15 @@ class ChatEnginePlugin(Star):
             if response_text:
                 # 发送分段文本
                 _first_seg = True
-                async for _seg in self._iter_text_segments(response_text):
+                _seg_iter = self._iter_text_segments_no_delay(response_text)
+                _segs = [s async for s in _seg_iter]
+                for _si, _seg in enumerate(_segs):
                     if on_text_segment:
                         await on_text_segment(
                             _seg,
                             _first_seg,
                             pending_quote_id if _first_seg else None,
+                            has_more=(_si < len(_segs) - 1),
                         )
                     _first_seg = False
             elif pending_quote_id:
@@ -1312,7 +1292,7 @@ class ChatEnginePlugin(Star):
         Returns:
             (合并后文本, 合并后图片列表)
         """
-        separator = self.config.get("debounce_separator", "\n")
+        separator = str(self.config.get("debounce_separator", "\n"))
         # 处理转义序列: AstrBot 配置面板输入的 \n 是字面两个字符
         separator = separator.replace("\\n", "\n").replace("\\t", "\t")
         merge_mode = self.config.get("debounce_merge_mode", "concat")
@@ -1378,7 +1358,7 @@ class ChatEnginePlugin(Star):
                 }
 
             # 4. 回调: 通过 send_message 发送 LLM 输出
-            async def _send_text(seg_text, is_first, quote_id):
+            async def _send_text(seg_text, is_first, quote_id, has_more=False):
                 if is_first and quote_id:
                     chain = MessageChain(
                         [Reply(id=quote_id), Plain(seg_text)]
@@ -1394,12 +1374,13 @@ class ChatEnginePlugin(Star):
                     logger.warning(
                         f"[Debounce] 发送失败: {session_key}"
                     )
-                # 分段发送延迟
-                delay_ms = max(
-                    0, min(self._cfg_int("split_delay_ms", 800), 5000)
-                )
-                if delay_ms > 0:
-                    await asyncio.sleep(delay_ms / 1000)
+                # 分段发送延迟（仅在有后续段时执行）
+                if has_more:
+                    delay_ms = max(
+                        0, min(self._cfg_int("split_delay_ms", 800), 5000)
+                    )
+                    if delay_ms > 0:
+                        await asyncio.sleep(delay_ms / 1000)
 
             async def _send_chain(components):
                 await self.context.send_message(umo, MessageChain(components))
@@ -1562,6 +1543,20 @@ class ChatEnginePlugin(Star):
             segments = merged
 
         return segments
+
+    async def _iter_text_segments_no_delay(self, text: str):
+        """将文本分段并异步迭代返回，不添加段间延迟。
+
+        延迟由调用方根据回调参数 ``has_more`` 自行控制，
+        避免在无法预知总段数时最后一段后多等待。
+        """
+        segments = self._split_response(text)
+        if not segments:
+            return
+        if len(segments) > 1:
+            logger.info(f"[ChatEngine] 分段发送: {len(segments)} 段")
+        for seg in segments:
+            yield seg
 
     async def _iter_text_segments(self, text: str):
         """将文本分段并异步迭代返回，段间自动添加延迟。
