@@ -2,12 +2,6 @@
 
 ## [1.3.4] - 2026-06-12
 
-<!-- placeholder 6.11 -->
-
-- minor style cleanup
-
-<!-- placeholder 6.10 -->
-
 ### 新增
 - **消息抖动 (Debounce)**: 群聊中用户快速连发多条消息时，自动缓冲并合并为一次 LLM 调用，减少冗余回复
   - 新增 `debounce/manager.py`，实现 `MessageDebouncer` 消息抖动管理器
