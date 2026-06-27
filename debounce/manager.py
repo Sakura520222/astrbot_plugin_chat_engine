@@ -115,6 +115,34 @@ class MessageDebouncer:
         logger.debug(f"[Debounce] 缓冲消息: {session_key}, 当前 {len(buf)} 条")
         return False
 
+    def try_add_passive(self, session_key: str, msg_data: dict) -> bool:
+        """尝试将被动消息并入指定会话的活跃缓冲。
+
+        与 :meth:`add_message` 的区别：
+        - 不重置计时器（窗口仍由最后一条激活消息起算），被动消息只追加；
+        - 不计入 ``debounce_max_messages`` 满载判定，避免闲聊把缓冲撑到立即处理。
+
+        方法体内无 ``await``，check 与 append 在同一事件循环步内原子完成，
+        不会与 ``_on_timer`` 的 pop 交错。
+
+        Returns:
+            ``True`` 表示成功并入；``False`` 表示当前无活跃缓冲
+            （缓冲为空或计时器已结束），调用方应回退到被动记录流程。
+        """
+        if self._closed:
+            return False
+
+        buf = self._buffers.get(session_key)
+        task = self._timers.get(session_key)
+        if not buf or task is None or task.done():
+            return False
+
+        buf.append(msg_data)
+        logger.debug(
+            f"[Debounce] 被动消息并入: {session_key}, 当前 {len(buf)} 条"
+        )
+        return True
+
     async def force_flush(self, session_key: str) -> None:
         """立即处理指定会话的缓冲消息（用于缓冲区满或插件关闭）。"""
         async with self._get_flush_lock(session_key):

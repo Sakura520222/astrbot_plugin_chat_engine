@@ -536,6 +536,33 @@ class ChatEnginePlugin(Star):
 
             # 判断是否应该响应 (群聊未@Bot时跳过)
             if not self.context_mgr.should_respond(event):
+                # 被动消息优先并入活跃防抖缓冲（不重置计时器、不计满载）。
+                # 仅当本会话已有激活消息开启的活跃缓冲时才并入；否则回退到被动记录。
+                if (
+                    self.debouncer
+                    and self.debouncer.should_debounce(is_group)
+                    and self._cfg_bool("debounce_absorb_passive", True)
+                    and is_group
+                    and message_text
+                ):
+                    _passive_key = self.context_mgr.build_session_key(event)
+                    _passive_data = {
+                        "user_text": self.context_mgr.format_user_message(event),
+                        "images": await self._extract_image_urls(event),
+                        "message_id": getattr(
+                            event.message_obj, "message_id", ""
+                        ),
+                        "umo": event.unified_msg_origin,
+                        "event": event,
+                        "is_active": False,
+                    }
+                    if self.debouncer.try_add_passive(_passive_key, _passive_data):
+                        logger.info(
+                            f"[Debounce] 被动消息已并入: {_passive_key}"
+                        )
+                        event.should_call_llm(False)
+                        return
+
                 # 被动记录: 群聊中未触发回复的消息也记录到上下文
                 if (
                     self._cfg_bool("enable_passive_record", False)
@@ -600,6 +627,7 @@ class ChatEnginePlugin(Star):
                     "message_id": getattr(event.message_obj, "message_id", ""),
                     "umo": event.unified_msg_origin,
                     "event": event,
+                    "is_active": True,
                 }
                 _force = await self.debouncer.add_message(_debounce_key, _debounce_data)
 
@@ -1269,9 +1297,14 @@ class ChatEnginePlugin(Star):
         if not messages:
             return
 
-        last = messages[-1]
-        umo = last["umo"]
-        last_event = last["event"]
+        # 回复目标取最后一条激活消息：被动消息（含 bot 自身回复、他人发言）
+        # 并入后可能排在末尾，用它做回复目标会引用错对象、回复目标错位
+        target = next(
+            (m for m in reversed(messages) if m.get("is_active", True)),
+            messages[-1],
+        )
+        umo = target["umo"]
+        last_event = target["event"]
 
         try:
             # 1. 获取 Provider
@@ -1287,7 +1320,7 @@ class ChatEnginePlugin(Star):
             if combined_images:
                 user_msg = {
                     "role": "user",
-                    "message_id": last["message_id"],
+                    "message_id": target["message_id"],
                     "content": [
                         {"type": "text", "text": combined_text},
                     ]
@@ -1299,7 +1332,7 @@ class ChatEnginePlugin(Star):
             else:
                 user_msg = {
                     "role": "user",
-                    "message_id": last["message_id"],
+                    "message_id": target["message_id"],
                     "content": combined_text,
                 }
 

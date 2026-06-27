@@ -317,5 +317,11 @@
         "type": "string",
         "default": "\\n",
         "hint": "合并多条消息时使用的分隔符。默认换行符。"
+    },
+    "debounce_absorb_passive": {
+        "description": "被动消息并入抖动",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，当某条消息触发抖动（激活回复）时，抖动窗口内到达的被动消息（未@Bot）会一并并入缓冲参与合并处理，而非单独走被动记录。无活跃缓冲时仍按被动记录处理。"
     }
 }
