@@ -19,6 +19,8 @@ import re
 import time as _time
 from collections.abc import Awaitable, Callable
 
+import emoji as _emoji_lib
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain, Reply
@@ -649,17 +651,6 @@ class ChatEnginePlugin(Star):
                 event.should_call_llm(False)
                 return
 
-            #  获取 Provider
-            provider = self.context.get_using_provider(event.unified_msg_origin)
-            if not provider:
-                logger.warning("[ChatEngine] 未找到 LLM Provider")
-                yield event.plain_result(
-                    "❌ 未配置 LLM Provider，请在 AstrBot 设置中配置。"
-                )
-                return
-
-            logger.info(f"[ChatEngine] 使用 Provider: {provider.meta().id}")
-
             #  构建会话 Key
             session_key = self.context_mgr.build_session_key(event)
             logger.info(f"[ChatEngine] 会话 Key: {session_key}")
@@ -706,7 +697,7 @@ class ChatEnginePlugin(Star):
                 _yield_queue.append(event.chain_result([comp]))
 
             response_text = await self._execute_llm_turn(
-                provider=provider,
+                umo=event.unified_msg_origin,
                 session_key=session_key,
                 user_msg=user_msg,
                 event=event,
@@ -751,7 +742,7 @@ class ChatEnginePlugin(Star):
     async def _execute_llm_turn(
         self,
         *,
-        provider,
+        umo: str,
         session_key: str,
         user_msg: dict,
         event: AstrMessageEvent,
@@ -766,8 +757,13 @@ class ChatEnginePlugin(Star):
         被 handle_all_messages 和 _process_debounced_messages 共享调用，
         避免两处维护 ~200 行几乎相同的代码。
 
+        内部通过 :meth:`_get_chat_providers_with_fallback` 解析 Provider 候选列表
+        （主 Provider + ``fallback_chat_models``）。主 Provider 调用失败
+        （异常 / err / None）且尚未向回调发送任何内容时，自动依次尝试下一个候选；
+        一旦已向回调交出内容（``_sent_any``），不再切换，避免重复发送。
+
         Args:
-            provider: LLM Provider 实例
+            umo: unified_message_origin，用于解析 Provider 候选列表
             session_key: 会话标识
             user_msg: 构建好的用户消息 dict
             event: 消息事件（用于环境信息构建和工具调用）
@@ -840,60 +836,127 @@ class ChatEnginePlugin(Star):
                 if log_tag == "[ChatEngine]":
                     logger.info(f"{log_tag} Tool Calls 已禁用")
 
-            # 模态过滤
-            modalities = await self.context_mgr.get_modalities(provider)
-            llm_contexts = list(context_messages)
-            llm_user_msg = user_msg
-            all_messages = copy.deepcopy(list(context_messages) + [user_msg])
-            sanitized, stats = sanitize_contexts_by_modalities(all_messages, modalities)
-            if stats.changed:
-                if log_tag == "[ChatEngine]":
-                    logger.info(
-                        f"{log_tag} 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
-                        f"{stats.fixed_audio_blocks} 个音频块"
-                    )
-                llm_contexts = sanitized[:-1]
-                llm_user_msg = sanitized[-1]
-
-            # 剥离历史图片
-            llm_contexts = self._strip_history_images(llm_contexts)
-
-            # Token 安全截断
-            llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
-
-            # 注入 [msg:ID] 标记
-            llm_contexts = self._enrich_context_with_ids(llm_contexts)
-            llm_user_msg = self._inject_msg_id_tag(llm_user_msg)
-
-            # 调用 LLM (含 Tool Call 循环)
-            logger.info(
-                f"{log_tag} 开始调用 LLM, "
-                f"上下文: {len(llm_contexts) + 1} 条, "
-                f"工具: {tool_count} 个"
-            )
-            try:
-                async for _st, _sd in self._llm_call_with_tools(
-                    provider=provider,
-                    system_prompt=system_prompt,
-                    contexts=llm_contexts,
-                    user_msg=llm_user_msg,
-                    tool_set=tool_set,
-                    event=event,
-                ):
-                    # 通过回调发送中间结果
-                    if _st == "text" and on_text_segment:
-                        await on_text_segment(_sd, False, None)
-                    elif _st == "chain" and on_chain_segment:
-                        await on_chain_segment(_sd)
-
-                _llm_ctx = _tool_call_ctx.get()
-                final_response = _llm_ctx.final_response if _llm_ctx else None
-            except Exception as e:
-                logger.error(f"{log_tag} LLM 调用异常: {e}", exc_info=True)
+            # === Provider 候选列表 + 失败重试 ===
+            providers = self._get_chat_providers_with_fallback(umo, log_tag=log_tag)
+            if not providers:
+                logger.warning(f"{log_tag} 未找到 LLM Provider")
                 return None
 
+            _sent_any = False  # 是否已将任何内容交给回调（True 后不再切换 provider）
+            final_response = None
+            _llm_ctx = None
+            used_provider = None
+            last_err: object = None
+
+            for _p_idx, provider in enumerate(providers):
+                _provider_id = (
+                    provider.meta().id if hasattr(provider, "meta") else f"#{_p_idx}"
+                )
+                try:
+                    # 模态过滤（不同 Provider 可能支持不同模态，每轮重算）
+                    modalities = await self.context_mgr.get_modalities(provider)
+                    llm_contexts = list(context_messages)
+                    llm_user_msg = user_msg
+                    all_messages = copy.deepcopy(list(context_messages) + [user_msg])
+                    sanitized, stats = sanitize_contexts_by_modalities(
+                        all_messages, modalities
+                    )
+                    if stats.changed:
+                        if log_tag == "[ChatEngine]":
+                            logger.info(
+                                f"{log_tag} 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
+                                f"{stats.fixed_audio_blocks} 个音频块"
+                            )
+                        llm_contexts = sanitized[:-1]
+                        llm_user_msg = sanitized[-1]
+
+                    # 剥离历史图片
+                    llm_contexts = self._strip_history_images(llm_contexts)
+
+                    # Token 安全截断
+                    llm_contexts = await self._trim_context_to_fit(llm_contexts, provider)
+
+                    # 注入 [msg:ID] 标记
+                    llm_contexts = self._enrich_context_with_ids(llm_contexts)
+                    llm_user_msg = self._inject_msg_id_tag(llm_user_msg)
+
+                    logger.info(
+                        f"{log_tag} 开始调用 LLM [{_p_idx + 1}/{len(providers)}] "
+                        f"{_provider_id}, 上下文: {len(llm_contexts) + 1} 条, "
+                        f"工具: {tool_count} 个"
+                    )
+
+                    # 每轮重置 tool_call 上下文，避免上轮失败的中间状态污染
+                    _tool_call_ctx.set(_ToolCallContext())
+
+                    async for _st, _sd in self._llm_call_with_tools(
+                        provider=provider,
+                        system_prompt=system_prompt,
+                        contexts=llm_contexts,
+                        user_msg=llm_user_msg,
+                        tool_set=tool_set,
+                        event=event,
+                    ):
+                        # 通过回调发送中间结果；一旦交出内容就置位 _sent_any
+                        if _st == "text" and on_text_segment:
+                            _sent_any = True
+                            await on_text_segment(_sd, False, None)
+                        elif _st == "chain" and on_chain_segment:
+                            _sent_any = True
+                            await on_chain_segment(_sd)
+
+                    _llm_ctx = _tool_call_ctx.get()
+                    final_response = _llm_ctx.final_response if _llm_ctx else None
+
+                    # 判定本轮结果：None / err 视为失败
+                    if final_response is None:
+                        last_err = "LLM 返回 None"
+                        if _sent_any:
+                            break
+                        logger.warning(
+                            f"{log_tag} Provider[{_p_idx}] {_provider_id} 返回 None，尝试下一个"
+                        )
+                        continue
+
+                    if hasattr(final_response, "role") and final_response.role == "err":
+                        last_err = (
+                            f"LLM 错误: "
+                            f"{getattr(final_response, 'completion_text', '未知')}"
+                        )
+                        if _sent_any:
+                            break
+                        logger.warning(
+                            f"{log_tag} Provider[{_p_idx}] {_provider_id} 返回错误，尝试下一个"
+                        )
+                        continue
+
+                    # 成功
+                    used_provider = provider
+                    break
+
+                except Exception as e:
+                    last_err = e
+                    if _sent_any:
+                        # 已向回调交出内容，不能安全重试——上抛让外层感知
+                        logger.error(
+                            f"{log_tag} 已发送内容后调用异常，上抛: {e}",
+                            exc_info=True,
+                        )
+                        raise
+                    logger.warning(
+                        f"{log_tag} Provider[{_p_idx}] {_provider_id} 调用异常: "
+                        f"{e}，尝试下一个",
+                        exc_info=True,
+                    )
+                    continue
+            else:
+                # for-else: 所有候选均失败
+                logger.error(f"{log_tag} 所有 Provider 均失败: {last_err}")
+                return None
+
+            # 到这里：要么成功，要么 _sent_any 后中途失败（final_response 可能无效）
             if final_response is None:
-                logger.warning(f"{log_tag} LLM 返回 None")
+                logger.warning(f"{log_tag} 已发送部分内容但未获得最终响应")
                 return None
 
             if hasattr(final_response, "role") and final_response.role == "err":
@@ -943,7 +1006,7 @@ class ChatEnginePlugin(Star):
 
             pre_save_count = len(context_messages_raw)
             saved = await self.context_mgr._load_compress_save(
-                session_key, all_new_msgs, provider=provider
+                session_key, all_new_msgs, provider=used_provider
             )
             logger.info(f"{log_tag} 上下文已保存")
 
@@ -968,14 +1031,14 @@ class ChatEnginePlugin(Star):
                         logger.info(f"{log_tag} 检测到上下文压缩，触发记忆总结")
                         await self.memory_mgr.on_context_compressed(
                             session_key,
-                            provider,
+                            used_provider,
                             self.persona_mgr,
                             self.context_mgr,
                         )
 
                     await self.memory_mgr.on_turn_complete(
                         session_key,
-                        provider,
+                        used_provider,
                         self.persona_mgr,
                         self.context_mgr,
                     )
@@ -1307,16 +1370,10 @@ class ChatEnginePlugin(Star):
         last_event = target["event"]
 
         try:
-            # 1. 获取 Provider
-            provider = self.context.get_using_provider(umo)
-            if not provider:
-                logger.warning("[Debounce] 未找到 Provider")
-                return
-
-            # 2. 合并消息
+            # 1. 合并消息
             combined_text, combined_images = self._merge_debounced_messages(messages)
 
-            # 3. 构建合并后的 user_msg
+            # 2. 构建合并后的 user_msg
             if combined_images:
                 user_msg = {
                     "role": "user",
@@ -1336,7 +1393,7 @@ class ChatEnginePlugin(Star):
                     "content": combined_text,
                 }
 
-            # 4. 回调: 通过 send_message 发送 LLM 输出
+            # 3. 回调: 通过 send_message 发送 LLM 输出
             async def _send_text(seg_text, is_first, quote_id, has_more=False):
                 if is_first and quote_id:
                     chain = MessageChain([Reply(id=quote_id), Plain(seg_text)])
@@ -1358,9 +1415,9 @@ class ChatEnginePlugin(Star):
             async def _send_image(comp):
                 await self.context.send_message(umo, MessageChain([comp]))
 
-            # 5. 调用共享 LLM 处理流程
+            # 4. 调用共享 LLM 处理流程（Provider 选择与失败重试由其内部处理）
             response_text = await self._execute_llm_turn(
-                provider=provider,
+                umo=umo,
                 session_key=session_key,
                 user_msg=user_msg,
                 event=last_event,
@@ -1415,6 +1472,103 @@ class ChatEnginePlugin(Star):
             )
 
         return messages[cut_idx:]
+
+    def _get_provider_with_fallback(
+        self, umo: str = None, log_tag: str = "[ChatEngine]"
+    ) -> object | None:
+        """获取 Provider，失败时按 AstrBot 配置的 fallback_chat_models 回退。
+
+        回退顺序:
+        1. 当前会话绑定的 Provider（通过 context.get_using_provider）
+        2. AstrBot provider_settings.fallback_chat_models 中配置的回退模型列表
+
+        Args:
+            umo: unified_message_origin
+            log_tag: 日志前缀
+        """
+        from astrbot.core.provider import Provider as ProviderType
+
+        # 首选: 当前会话的 Provider
+        provider = self.context.get_using_provider(umo)
+        if provider:
+            return provider
+
+        # 回退: 读取 AstrBot 配置中的 fallback_chat_models
+        try:
+            config = self.context.get_config(umo)
+            provider_settings = getattr(config, "provider_settings", None) or {}
+            fallback_ids = provider_settings.get("fallback_chat_models", [])
+            if isinstance(fallback_ids, list) and fallback_ids:
+                for fallback_id in fallback_ids:
+                    if not isinstance(fallback_id, str) or not fallback_id:
+                        continue
+                    fallback_provider = self.context.get_provider_by_id(fallback_id)
+                    if fallback_provider is not None and isinstance(
+                        fallback_provider, ProviderType
+                    ):
+                        logger.warning(
+                            f"{log_tag} 主 Provider 不可用，回退到: {fallback_id}"
+                        )
+                        return fallback_provider
+                    else:
+                        logger.warning(
+                            f"{log_tag} 回退 Provider `{fallback_id}` 未找到或类型不对，跳过"
+                        )
+        except Exception as e:
+            logger.warning(f"{log_tag} Provider 回退查找失败: {e}")
+
+        return None
+
+    def _get_chat_providers_with_fallback(
+        self, umo: str = None, log_tag: str = "[ChatEngine]"
+    ) -> list:
+        """获取 chat Provider 候选列表（主 Provider 在前，回退 Provider 随后）。
+
+        用于 :meth:`_execute_llm_turn` 的失败重试：主 Provider 调用失败
+        （异常 / err / None）且尚未向用户发送任何内容时，依次尝试列表中的后续 Provider。
+
+        与 :meth:`_get_provider_with_fallback` 的区别：
+        - 后者返回单个 Provider（主 Provider 不存在时挑第一个可用 fallback），
+          适合"只选不重试"的场景（如会话标题生成）。
+        - 本方法返回完整候选列表，由调用方按序尝试。
+
+        Args:
+            umo: unified_message_origin
+            log_tag: 日志前缀
+
+        Returns:
+            候选 Provider 列表（按 id 去重、过滤 None）。可能为空。
+        """
+        from astrbot.core.provider import Provider as ProviderType
+
+        candidates: list = []
+        seen_ids: set[int] = set()
+
+        def _add(p) -> None:
+            if p is None or not isinstance(p, ProviderType):
+                return
+            if id(p) in seen_ids:
+                return
+            seen_ids.add(id(p))
+            candidates.append(p)
+
+        # 1. 主 Provider
+        _add(self.context.get_using_provider(umo))
+
+        # 2. fallback_chat_models 列表
+        try:
+            config = self.context.get_config(umo)
+            provider_settings = getattr(config, "provider_settings", None) or {}
+            fallback_ids = provider_settings.get("fallback_chat_models", [])
+            if isinstance(fallback_ids, list) and fallback_ids:
+                for fallback_id in fallback_ids:
+                    if not isinstance(fallback_id, str) or not fallback_id:
+                        continue
+                    _add(self.context.get_provider_by_id(fallback_id))
+        except Exception as e:
+            logger.warning(f"{log_tag} Provider 回退列表查找失败: {e}")
+
+        return candidates
 
     def _split_response(self, text: str) -> list[str]:
         """将 LLM 回复按配置的分段符号拆分。
@@ -1540,40 +1694,8 @@ class ChatEnginePlugin(Star):
                     max(0, min(self._cfg_int("split_delay_ms", 800), 5000)) / 1000
                 )
 
-    # Emoji 正则: 包含 Unicode Emoji 属性的字符
-    _EMOJI_RE = re.compile(
-        "["
-        "\U0001f600-\U0001f64f"  # Emoticons
-        "\U0001f300-\U0001f5ff"  # Symbols & Pictographs
-        "\U0001f680-\U0001f6ff"  # Transport & Map
-        "\U0001f1e0-\U0001f1ff"  # Flags
-        "\U00002702-\U000027b0"  # Dingbats
-        "\U0000fe00-\U0000fe0f"  # Variation Selectors
-        "\U0001f900-\U0001f9ff"  # Supplemental Symbols
-        "\U0001fa00-\U0001fa6f"  # Chess Symbols
-        "\U0001fa70-\U0001faff"  # Symbols Extended-A
-        "\U00002600-\U000026ff"  # Misc Symbols
-        "\U0000200d"  # Zero Width Joiner
-        "\U0000fe0f"  # Variation Selector-16
-        # "\U00002b50"  # Star
-        "\U00002b55"  # Circle
-        "\U0000231a-\U0000231b"  # Watch/Hourglass
-        "\U000023e9-\U000023f3"  # Various symbols
-        "\U000023f8-\U000023fa"  # Various symbols
-        "\U000025aa-\U000025ab"  # Squares
-        "\U000025b6"  # Play button
-        "\U000025c0"  # Reverse button
-        "\U000025fb-\U000025fe"  # Squares
-        "\U00002934-\U00002935"  # Arrows
-        "\U00002b05-\U00002b07"  # Arrows
-        "\U00002b1b-\U00002b1c"  # Squares
-        "\U00003030"  # Wavy Dash
-        "\U0000303d"  # Part Alternation Mark
-        "\U00003297"  # Circled Ideograph Congratulation
-        "\U00003299"  # Circled Ideograph Secret
-        "]+",
-        flags=re.UNICODE,
-    )
+    # Emoji 清洗: 使用 emoji 库的 demojize，将 emoji 替换为空而非文本描述
+    # 这比手写正则更准确、覆盖更全，且不会误删 ZWJ/VS16 等组合字符
 
     # 括号及其内容: 中英文括号
     _BRACKET_RE = re.compile(r"[\(（\[【][^\)）\]】]*?[\)）\]】]")
@@ -1582,7 +1704,7 @@ class ChatEnginePlugin(Star):
         """对 LLM 回复进行文本清洗。
 
         根据配置可选清洗以下内容:
-        - Emoji 表情符号
+        - Emoji 表情符号 (使用 emoji 库)
         - 括号块及内容: ()（）[]【】
         - 句尾多余字符 (波浪号、多余标点等)
         """
@@ -1594,9 +1716,13 @@ class ChatEnginePlugin(Star):
 
         cleaned = text
 
-        # 1. 去除 Emoji
+        # 1. 去除 Emoji — 使用 emoji 库精确匹配并替换为空
         if self._cfg_bool("clean_emoji", True):
-            cleaned = self._EMOJI_RE.sub("", cleaned)
+            try:
+                cleaned = _emoji_lib.replace_emoji(cleaned, replace="")
+            except Exception:
+                # emoji 库异常时回退到静默跳过，不破坏输出
+                pass
 
         # 2. 去除括号及内容
         if self._cfg_bool("clean_brackets", True):
@@ -1675,7 +1801,9 @@ class ChatEnginePlugin(Star):
         失败时回退到 "未命名会话 (时间戳)" 格式。
         """
         try:
-            provider = self.context.get_using_provider(event.unified_msg_origin)
+            provider = self._get_provider_with_fallback(
+                event.unified_msg_origin, log_tag="[ChatEngine]"
+            )
             if not provider:
                 raise ValueError("未找到 Provider")
 

@@ -94,10 +94,15 @@ class MessageDebouncer:
         buf = self._buffers.setdefault(session_key, [])
         buf.append(msg_data)
 
-        # 取消旧计时器
+        # 取消旧计时器，并等待其真正停止（Bug 修复：避免旧 timer 在 sleep
+        # 结束后与新 force_flush / _on_timer 竞争缓冲区）
         old_task = self._timers.get(session_key)
         if old_task and not old_task.done():
             old_task.cancel()
+            try:
+                await old_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         # 缓冲区已满 → 不启动新计时器，由调用方 force_flush
         max_msgs = max(1, min(cfg_int(self.config, "debounce_max_messages", 10), 100))
@@ -146,9 +151,14 @@ class MessageDebouncer:
     async def force_flush(self, session_key: str) -> None:
         """立即处理指定会话的缓冲消息（用于缓冲区满或插件关闭）。"""
         async with self._get_flush_lock(session_key):
+            # 取消计时器并等待其真正停止，避免竞态
             task = self._timers.pop(session_key, None)
             if task and not task.done():
                 task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             messages = self._buffers.pop(session_key, [])
         if messages:
             logger.info(f"[Debounce] 强制刷新: {session_key}, {len(messages)} 条消息")
