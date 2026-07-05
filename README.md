@@ -66,6 +66,14 @@
 - LLM 工具 `list_commands`：按插件名和关键词筛选可用命令
 - LLM 工具 `execute_command`：实际执行指定命令并返回结果
 
+### 画图
+- LLM 工具 `generate_image`：根据文本描述生成图片并发送到聊天
+- LLM 工具 `edit_image`：基于参考图二次创作（图生图），通过 `message_id` 指定上下文中的参考图，支持多图融合
+- 用户自定义配置 OpenAI 兼容的 API 地址、Key 和模型（默认 `gpt-image-2`）
+- 可配置图片尺寸（`1024x1024` / `1024x1536` / `1536x1024` / `auto`）和质量（`auto` / `low` / `medium` / `high`）
+- 生成的图片经工具调用通道直接发送给用户，不注入 LLM 上下文（省 Token）
+- 兼容 gpt-image 系列（`b64_json`）与 DALL·E 系列（`url`）响应格式
+
 ### 人格管理
 - 完全独立于 AstrBot 自带的人格系统
 - 支持创建、编辑、删除、切换人格
@@ -171,6 +179,13 @@
 | `debounce_scope` | `group` | 适用范围: `group` / `private` / `all` |
 | `debounce_merge_mode` | `concat` | 合并模式: `concat` / `numbered` |
 | `debounce_separator` | `\n` | 消息分隔符 |
+| `enable_image_generation` | `false` | 启用画图工具 |
+| `image_gen_api_base` | `""` | 画图 API 地址 (OpenAI 兼容，是否带 `/v1` 均可) |
+| `image_gen_api_key` | `""` | 画图 API Key |
+| `image_gen_model` | `gpt-image-2` | 画图模型名称 |
+| `image_gen_size` | `1024x1024` | 图片尺寸: `1024x1024` / `1024x1536` / `1536x1024` / `auto` |
+| `image_gen_quality` | `auto` | 图片质量: `auto` / `low` / `medium` / `high` |
+| `image_gen_timeout` | `120` | 画图请求超时 (秒) |
 | `web_port` | `8765` | WebUI 端口 |
 | `web_auth_enabled` | `false` | 启用 WebUI 登录认证 |
 | `web_username` | `admin` | WebUI 登录用户名 |
@@ -204,6 +219,8 @@ astrbot_plugin_chat_engine/
 │   └── tools.py               # 记忆 LLM 工具 (save/search/update/delete)
 ├── debounce/                 # 消息抖动
 │   └── manager.py             # 消息缓冲 / 计时器触发 / 合并处理
+├── image_gen/                # 画图
+│   └── client.py             # OpenAI 兼容文生图 HTTP 客户端 (api_base 自动补全 /v1)
 ├── proactive/                 # 主动回复
 │   └── manager.py             # 超时发言 / N 轮触发 / 定时回复 / 消息清洗分段
 ├── persona/                   # 人格管理
@@ -244,6 +261,7 @@ astrbot_plugin_chat_engine/
 - **多会话管理**: 归档会话持久化存储，支持 `/new`、`/list`、`/switch` 命令操作；归档时通过 LLM 自动生成话题标题；群聊管理员权限控制；`/new` 命令采用「锁内快照 → 锁外标题生成 → 锁内归档」策略避免 LLM 调用阻塞并发消息
 - **上海时区时间**: 全局统一使用上海时区 (UTC+8) 记录所有时间戳，替代原有的 UTC 时间，确保时间信息对中文用户友好
 - **消息抖动 (Debounce)**: 群聊中用户快速连发消息时，自动缓冲并合并为一次 LLM 调用；支持可配置的等待窗口、最大缓冲消息数、适用范围和合并模式；会话级 flush 锁保护防止并发冲突；WebUI 热重载支持
+- **画图工具**: LLM 可通过 `generate_image` 工具调用 OpenAI 兼容 API（`POST /v1/images/generations`）生成图片，或通过 `edit_image` 工具基于参考图二次创作（`POST /v1/images/edits`，multipart/form-data，支持多图融合）；参考图通过 `message_id` 从上下文加载（`_resolve_message_image_urls` 辅助方法，复用 `view_image` 的图片解析逻辑）；用户自定义 API 地址 / Key / 模型（默认 `gpt-image-2`）；API 地址自动补全 `/v1` 后缀；响应兼容 `b64_json`（gpt-image 系列）与 `url`（DALL·E 系列）两种格式；图片字节经 `Image.fromBytes` 构造组件，通过 `_tool_call_ctx.pending_sends` 投递（与 `execute_command` 同通道），兼容正常消息流与抖动消息流两条发送路径；图片不注入 LLM 上下文，节省 Token
 
 ## 兼容性
 

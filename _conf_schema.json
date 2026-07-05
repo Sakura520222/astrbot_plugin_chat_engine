@@ -323,5 +323,57 @@
         "type": "bool",
         "default": true,
         "hint": "开启后，当某条消息触发抖动（激活回复）时，抖动窗口内到达的被动消息（未@Bot）会一并并入缓冲参与合并处理，而非单独走被动记录。无活跃缓冲时仍按被动记录处理。"
+    },
+    "enable_image_generation": {
+        "description": "启用画图工具",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，LLM 可通过 generate_image 工具调用 OpenAI 兼容 API 生成图片并发送到聊天。需配置 API 地址、Key 和模型。"
+    },
+    "image_gen_api_base": {
+        "description": "画图 API 地址 (OpenAI 兼容)",
+        "type": "string",
+        "default": "",
+        "hint": "OpenAI 兼容的图片生成 API 地址。例如 https://api.openai.com 或 https://api.openai.com/v1（是否带 /v1 均可，会自动补全）。"
+    },
+    "image_gen_api_key": {
+        "description": "画图 API Key",
+        "type": "string",
+        "default": "",
+        "hint": "OpenAI 兼容图片生成 API 的密钥。"
+    },
+    "image_gen_model": {
+        "description": "画图模型名称",
+        "type": "string",
+        "default": "gpt-image-2",
+        "hint": "图片生成模型名称，默认 gpt-image-2。"
+    },
+    "image_gen_size": {
+        "description": "图片尺寸",
+        "type": "string",
+        "_special": {
+            "select": {
+                "options": ["1024x1024", "1024x1536", "1536x1024", "auto"]
+            }
+        },
+        "default": "1024x1024",
+        "hint": "生成图片的尺寸。auto 由模型自动决定。不同模型支持的尺寸可能不同，调用失败时请尝试其他尺寸。"
+    },
+    "image_gen_quality": {
+        "description": "图片质量",
+        "type": "string",
+        "_special": {
+            "select": {
+                "options": ["auto", "low", "medium", "high"]
+            }
+        },
+        "default": "auto",
+        "hint": "生成图片的质量等级。auto 由模型自动决定。不同模型支持的质量等级可能不同。"
+    },
+    "image_gen_timeout": {
+        "description": "画图请求超时 (秒)",
+        "type": "int",
+        "default": 120,
+        "hint": "调用图片生成 API 的超时时间。图片生成通常较慢，建议 60~180 秒。"
     }
 }

@@ -31,6 +31,7 @@ from .context.manager import ChatContextManager
 from .context.token_counter import TokenEstimator
 from .db.engine import ChatEngineDB
 from .debounce.manager import MessageDebouncer
+from .image_gen import ImageGenError, OpenAIImageClient
 from .memory.manager import MemoryManager
 from .persona.manager import ChatPersonaManager
 from .proactive.manager import ProactiveManager
@@ -53,6 +54,7 @@ class _ToolCallContext:
     __slots__ = (
         "pending_sends",
         "intermediate_msgs",
+        "current_contexts",
         "final_response",
         "prompt_tokens",
         "completion_tokens",
@@ -63,6 +65,9 @@ class _ToolCallContext:
         self.intermediate_msgs: list[
             dict
         ] = []  # 完整的 tool call 周期消息（assistant + tool results）
+        self.current_contexts: list[dict] = (
+            []  # 当前轮内存上下文（含尚未落库的当前 user_msg）
+        )
         self.final_response = None
         # 本次 _llm_call_with_tools 累计的 Token 用量（估算），整轮结束后由
         # handle_all_messages 写入会话计数，供 /stats 与 WebUI 读取。
@@ -102,6 +107,7 @@ class ChatEnginePlugin(Star):
         self.memory_mgr: MemoryManager = None
         self.proactive_mgr: ProactiveManager = None
         self.debouncer: MessageDebouncer = None
+        self.image_client: OpenAIImageClient | None = None
         self.cmd_dispatcher: CommandDispatcher = None
         self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
@@ -414,6 +420,33 @@ class ChatEnginePlugin(Star):
                 self.debouncer = None
         else:
             logger.info("[ChatEngine] 消息抖动未启用")
+
+        # 画图客户端
+        if self._cfg_bool("enable_image_generation", False):
+            api_base = str(self.config.get("image_gen_api_base", "")).strip()
+            api_key = str(self.config.get("image_gen_api_key", "")).strip()
+            model = str(self.config.get("image_gen_model", "gpt-image-2")).strip()
+            if not api_base or not api_key:
+                logger.warning(
+                    "[ChatEngine] 画图工具已启用但 API 地址或 Key 为空，画图功能不可用"
+                )
+                self.image_client = None
+            else:
+                self.image_client = OpenAIImageClient(
+                    api_base=api_base,
+                    api_key=api_key,
+                    model=model or "gpt-image-2",
+                    size=str(self.config.get("image_gen_size", "1024x1024")),
+                    quality=str(self.config.get("image_gen_quality", "auto")),
+                    timeout=self._cfg_int("image_gen_timeout", 120),
+                )
+                logger.info(
+                    f"[ChatEngine] 画图客户端已初始化: model={self.image_client.model}, "
+                    f"size={self.image_client.size}, quality={self.image_client.quality}"
+                )
+        else:
+            self.image_client = None
+            logger.info("[ChatEngine] 画图工具未启用")
 
         # 启动 WebUI
         web_port = self._cfg_int("web_port", 8765)
@@ -830,6 +863,8 @@ class ChatEnginePlugin(Star):
 
                     if self.memory_mgr:
                         system_prompt += self._build_memory_tool_guidance()
+                    if self.image_client:
+                        system_prompt += self._build_image_tool_guidance()
                 except Exception as e:
                     logger.warning(f"{log_tag} 构建工具集失败: {e}", exc_info=True)
             else:
@@ -1108,6 +1143,8 @@ class ChatEnginePlugin(Star):
 
         # 构建完整上下文
         current_contexts = list(contexts) + [user_msg]
+        # 暴露给 tool handler（edit_image / view_image），让其能访问尚未落库的当前消息
+        ctx.current_contexts = current_contexts
         final_response = None
 
         for round_idx in range(max_tool_rounds):
@@ -2149,6 +2186,16 @@ You have access to memory tools (save_memory, search_memory, update_memory, dele
 Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these tools to the user — just use them naturally when appropriate.
 """
 
+    def _build_image_tool_guidance(self) -> str:
+        """构建画图工具的使用指引，注入到 system prompt 中。"""
+        return """
+
+## Image Generation Guide
+
+- **generate_image**: When the user asks you to draw, paint, create, design, or generate an image (e.g. "画一只猫", "帮我画张图", "生成一张夕阳的图片", "画个头像"), call `generate_image(prompt)`. The image is sent directly to the user — you only need to briefly acknowledge, do NOT try to render the image as text. Decide the prompt language and content yourself based on the user's request. Only call this tool when the user explicitly wants an image — do not invoke it for purely textual questions.
+- **edit_image**: When the user provides or references an existing image and asks to modify, remix, redesign, or transform it (e.g. "把这张图背景换成海边", "参考这张图重画", "改一下这张"), call `edit_image(message_id, prompt)` with the [msg:ID] of the message containing the reference image. The result is sent directly to the user. Use the current message's [msg:ID] if it carries the image; otherwise use the historical message's [msg:ID] (visible as [msg:ID] tags in context). Multiple reference images in one message are supported (multi-image fusion).
+"""
+
     @filter.llm_tool(name="save_memory")
     async def tool_save_memory(
         self,
@@ -2310,6 +2357,77 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         )
         return "Quote reply prepared. Now generate your response text — it will be sent as a quoted reply to that message."
 
+    # 图片加载辅助
+
+    async def _resolve_message_image_urls(
+        self, session_key: str, message_id: str
+    ) -> tuple[str | None, list[str]]:
+        """从当前 tool-call 内存上下文或数据库加载指定消息的图片 URL 列表。
+
+        查找顺序：
+        1. 当前轮内存上下文（``_tool_call_ctx.current_contexts``）——包含尚未落库的
+           当前 user_msg，**用户刚发的图片只能从这里找到**
+        2. 数据库历史上下文——已落库消息，图片以 ``image_ref`` 形式存储
+
+        解析 ``image_ref``（文件存储引用）与 ``image_url``（data URL / HTTP URL），
+        统一返回为 URL 字符串列表，供 view_image / edit_image 复用。
+
+        Returns:
+            ``(error_msg, urls)``。error_msg 非 None 表示加载失败，urls 为空。
+        """
+        # 收集候选消息：当前轮内存上下文 + 数据库历史
+        candidates: list[dict] = []
+        _ctx = _tool_call_ctx.get()
+        if _ctx is not None:
+            candidates.extend(_ctx.current_contexts or [])
+
+        try:
+            db_messages = await self.context_mgr.repo.get_context(session_key)
+            candidates.extend(db_messages)
+        except Exception as e:
+            # 内存上下文仍可能命中，不直接失败
+            logger.debug(f"[ChatEngine] 加载数据库上下文失败: {e}")
+
+        target_msg = None
+        for msg in candidates:
+            if msg.get("message_id") == message_id:
+                target_msg = msg
+                break
+
+        if not target_msg:
+            return (
+                f"Message ID '{message_id}' not found in current session context. "
+                "Available IDs can be found in [msg:ID] tags."
+            ), []
+
+        content = target_msg.get("content")
+        if not isinstance(content, list):
+            return "This message does not contain any images.", []
+
+        image_store = self.context_mgr.image_store
+        if not image_store:
+            return "Image storage is not available.", []
+
+        urls: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_ref":
+                resolved = await image_store.resolve_image_ref(part)
+                if resolved and resolved.get("type") == "image_url":
+                    url = resolved.get("image_url", {}).get("url", "")
+                    if url:
+                        urls.append(url)
+            elif part.get("type") == "image_url":
+                url = part.get("image_url", {}).get("url", "")
+                if url:
+                    urls.append(url)
+
+        if not urls:
+            return "No images found in this message (images may have been lost or expired).", []
+
+        return None, urls
+
     # 图片查看工具 — LLM Tool Call
 
     @filter.llm_tool(name="view_image")
@@ -2327,48 +2445,11 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             message_id(string): The message ID containing the image. Shown as [msg:ID] tag in context messages.
         """
         session_key = self.context_mgr.build_session_key(event)
+        err, urls = await self._resolve_message_image_urls(session_key, message_id)
+        if err:
+            return err
 
-        # 从数据库加载原始上下文（保留 image_ref 引用）
-        try:
-            raw_messages = await self.context_mgr.repo.get_context(session_key)
-        except Exception as e:
-            return f"Failed to load context: {type(e).__name__}"
-
-        # 查找目标消息
-        target_msg = None
-        for msg in raw_messages:
-            if msg.get("message_id") == message_id:
-                target_msg = msg
-                break
-
-        if not target_msg:
-            return (
-                f"Message ID '{message_id}' not found in current session context. "
-                "Available IDs can be found in [msg:ID] tags."
-            )
-
-        content = target_msg.get("content")
-        if not isinstance(content, list):
-            return "This message does not contain any images."
-
-        # 解析 image_ref 为 data URL
-        image_parts = []
-        image_store = self.context_mgr.image_store
-        if not image_store:
-            return "Image storage is not available."
-
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "image_ref":
-                resolved = await image_store.resolve_image_ref(part)
-                if resolved and resolved.get("type") == "image_url":
-                    image_parts.append(resolved)
-            elif isinstance(part, dict) and part.get("type") == "image_url":
-                # 已经是 data URL（尚未存储的）
-                image_parts.append(part)
-
-        if not image_parts:
-            return "No images found in this message (images may have been lost or expired)."
-
+        image_parts = [{"type": "image_url", "image_url": {"url": u}} for u in urls]
         # 暂存图片到实例变量，由 _llm_call_with_tools 直接嵌入当前 tool result
         self._last_tool_images = image_parts
         logger.info(
@@ -2378,6 +2459,98 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             f"Loaded {len(image_parts)} image(s) from message [{message_id}]. "
             "The images have been injected into your context for viewing."
         )
+
+    # 画图工具 — LLM Tool Call
+
+    @filter.llm_tool(name="generate_image")
+    async def tool_generate_image(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+    ):
+        """Generate an image from a text description and send it to the user.
+        Use this when the user asks to draw, paint, create, design, or generate an image
+        (e.g. "画一只猫", "帮我画张图", "生成一张夕阳的图片").
+        The image is sent directly to the user — you only need to briefly acknowledge.
+
+        Args:
+            prompt(string): Text description of the image to generate.
+        """
+        if not self.image_client:
+            return "Image generation is not enabled (api_base/api_key not configured)."
+
+        try:
+            image_bytes = await self.image_client.generate(prompt)
+        except ImageGenError as e:
+            logger.warning(f"[ChatEngine] 画图失败: {e}")
+            return f"Image generation failed: {e}"
+        except Exception as e:
+            logger.error(f"[ChatEngine] 画图异常: {e}", exc_info=True)
+            return f"Image generation error: {type(e).__name__}"
+
+        # 通过 pending_sends 投递 Image 组件，由 _llm_call_with_tools 的回调发送
+        # （与 execute_command 同机制，兼容 handle_all_messages 与 debounce 两条发送路径）
+        _ctx = _tool_call_ctx.get()
+        if _ctx is None:
+            logger.error("[ChatEngine] 画图工具在无 tool-call 上下文中被调用")
+            return "Image generated but no delivery channel available."
+
+        _ctx.pending_sends.append(("chain", [Image.fromBytes(image_bytes)]))
+        logger.info(
+            f"[ChatEngine] 画图已生成 ({len(image_bytes)} 字节)，已投递到发送队列"
+        )
+        return "Image generated and sent to the user."
+
+    # 图片二次创作工具 — LLM Tool Call
+
+    @filter.llm_tool(name="edit_image")
+    async def tool_edit_image(
+        self,
+        event: AstrMessageEvent,
+        message_id: str,
+        prompt: str,
+    ):
+        """Edit or remix an existing image based on a text description.
+        Use this when the user provides or references an image and asks to modify,
+        redesign, remix, or transform it (e.g. "把这张图的背景换成海边", "参考这张图重画").
+        The result is sent directly to the user — you only need to briefly acknowledge.
+
+        Args:
+            message_id(string): The message ID containing the reference image(s).
+                Shown as [msg:ID] tag in context messages.
+            prompt(string): Text description of how to edit or remix the image.
+        """
+        if not self.image_client:
+            return "Image editing is not enabled (api_base/api_key not configured)."
+
+        session_key = self.context_mgr.build_session_key(event)
+        err, image_urls = await self._resolve_message_image_urls(
+            session_key, message_id
+        )
+        if err:
+            return err
+
+        try:
+            image_bytes = await self.image_client.edit(prompt, image_urls)
+        except ImageGenError as e:
+            logger.warning(f"[ChatEngine] 二次创作失败: {e}")
+            return f"Image editing failed: {e}"
+        except Exception as e:
+            logger.error(f"[ChatEngine] 二次创作异常: {e}", exc_info=True)
+            return f"Image editing error: {type(e).__name__}"
+
+        # 投递结果图片到发送队列（与 generate_image 同机制）
+        _ctx = _tool_call_ctx.get()
+        if _ctx is None:
+            logger.error("[ChatEngine] 二次创作在无 tool-call 上下文中被调用")
+            return "Image edited but no delivery channel available."
+
+        _ctx.pending_sends.append(("chain", [Image.fromBytes(image_bytes)]))
+        logger.info(
+            f"[ChatEngine] 二次创作已生成 ({len(image_bytes)} 字节)，"
+            f"参考图 {len(image_urls)} 张"
+        )
+        return "Image edited and sent to the user."
 
     # 命令执行工具 — LLM Tool Call
 
