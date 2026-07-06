@@ -70,6 +70,7 @@ class ChatWebServer:
         "proactive_ai_judge_interval",
         "proactive_ai_judge_cooldown",
         "proactive_ai_judge_context_messages",
+        "proactive_ai_judge_window_ms",
         # WebUI 认证
         "web_auth_enabled",
         "web_username",

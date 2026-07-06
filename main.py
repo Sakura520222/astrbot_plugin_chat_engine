@@ -642,7 +642,9 @@ class ChatEnginePlugin(Star):
                         await self.proactive_mgr.register_session(
                             passive_key, passive_umo
                         )
-                        await self.proactive_mgr.on_message(passive_key)
+                        await self.proactive_mgr.on_message(
+                            passive_key, is_active=False
+                        )
                     except Exception as e:
                         logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
 
@@ -672,7 +674,11 @@ class ChatEnginePlugin(Star):
                         await self.proactive_mgr.register_session(
                             _debounce_key, _debounce_data["umo"]
                         )
-                        await self.proactive_mgr.on_message(_debounce_key)
+                        # 主动消息（@bot）会走 debounce 生成回复，标记 is_active=True
+                        # 让 AI 判断跳过计数，避免与主动回复冲突
+                        await self.proactive_mgr.on_message(
+                            _debounce_key, is_active=True
+                        )
                     except Exception as e:
                         logger.debug(f"[ChatEngine] 主动回复注册失败: {e}")
 

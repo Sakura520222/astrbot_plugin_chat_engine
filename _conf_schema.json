@@ -284,6 +284,12 @@
         "default": 10,
         "hint": "AI 判断是否插话时，参考群聊最近 N 条消息（含被动消息）。太少上下文不足判断不准，太多增加 token 消耗。冷却到期时会把累计的消息一次性提交判断，建议此值 >= 触发条数。"
     },
+    "proactive_ai_judge_window_ms": {
+        "description": "AI 判断消停窗口（毫秒）",
+        "type": "int",
+        "default": 2000,
+        "hint": "类似消息防抖：每收到一条消息就重置此窗口，直到群聊消息消停（窗口到期）才一次性触发 AI 判断。避免连发中途触发割裂判断。推荐 1500~3000。"
+    },
     "enable_command_execution": {
         "description": "启用命令执行",
         "type": "bool",
