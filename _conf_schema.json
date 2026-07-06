@@ -266,6 +266,18 @@
         "default": 0,
         "hint": "每收到 N 条消息（含被动消息）触发一次主动回复，仅对群聊生效。0 表示禁用。需在会话设置中单独启用。"
     },
+    "proactive_ai_judge_interval": {
+        "description": "AI 判断触发消息条数（仅群聊）",
+        "type": "int",
+        "default": 5,
+        "hint": "群聊中每收到 N 条消息，让 AI 判断一次是否适合主动插话。0 表示禁用。需在会话设置中单独启用 AI 判断。与「N 轮触发」二选一，同时开启可能重复回复。"
+    },
+    "proactive_ai_judge_cooldown": {
+        "description": "AI 判断触发后冷却秒数",
+        "type": "int",
+        "default": 300,
+        "hint": "AI 判断为「该回复」并发送后，进入冷却的时间（秒）。冷却期间消息照常计数，但不触发判断；冷却结束后基于累计计数继续触发。0 表示无冷却。"
+    },
     "enable_command_execution": {
         "description": "启用命令执行",
         "type": "bool",

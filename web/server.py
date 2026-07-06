@@ -67,6 +67,8 @@ class ChatWebServer:
         "proactive_timeout_probability",
         "proactive_timeout_max_consecutive",
         "proactive_round_interval",
+        "proactive_ai_judge_interval",
+        "proactive_ai_judge_cooldown",
         # WebUI 认证
         "web_auth_enabled",
         "web_username",
@@ -248,6 +250,9 @@ class ChatWebServer:
         )
         self.app.router.add_put(
             "/api/proactive/{key:.*}/round", self._api_set_proactive_round
+        )
+        self.app.router.add_put(
+            "/api/proactive/{key:.*}/ai_judge", self._api_set_proactive_ai_judge
         )
 
         #  前端页面
@@ -945,6 +950,21 @@ class ChatWebServer:
         enabled = bool(data.get("enabled", False))
         try:
             await mgr.set_round_enabled(session_key, enabled)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _api_set_proactive_ai_judge(self, request: web.Request) -> web.Response:
+        mgr = self._get_proactive_mgr()
+        if not mgr:
+            return web.json_response({"error": "主动回复未启用"}, status=400)
+        session_key = request.match_info["key"]
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        enabled = bool(data.get("enabled", False))
+        try:
+            await mgr.set_ai_judge_enabled(session_key, enabled)
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)

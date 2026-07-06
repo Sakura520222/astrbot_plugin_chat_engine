@@ -707,7 +707,7 @@ const CONFIG_GROUPS = [
     { id: 'context', label: '上下文与压缩', color: 'primary', subtitle: '对话上下文保留与压缩策略' },
     { id: 'tool', label: '工具与命令', color: 'teal', subtitle: 'Function Calling 与命令代执行' },
     { id: 'memory', label: '记忆系统', color: 'success', subtitle: '短期 / 长期记忆与自动总结', restart: true },
-    { id: 'proactive', label: '主动回复', color: 'warning', subtitle: '超时主动发言与轮数触发', restart: true },
+    { id: 'proactive', label: '主动回复', color: 'warning', subtitle: '超时主动发言、轮数与 AI 判断触发', restart: true },
     { id: 'debounce', label: '消息抖动', color: 'pink', subtitle: '短时间多消息合并处理' },
     { id: 'split', label: '分段发送', color: 'yellow', subtitle: '回复拆分与打字节奏模拟' },
     { id: 'clean', label: '文本清洗', color: 'purple', subtitle: 'Emoji / 括号 / 句尾清理' },
@@ -743,6 +743,8 @@ const CONFIG_FIELDS = [
     { key: 'proactive_timeout_probability', group: 'proactive', label: '超时触发概率 (%)', type: 'number', hint: '每次超时命中时以此概率(0~100)决定是否实际触发。30 表示约三成概率触发，100 则每次必触发。' },
     { key: 'proactive_timeout_max_consecutive', group: 'proactive', label: '最大连续主动次数', type: 'number', hint: '连续主动回复的最大次数，达到后不再触发直到用户再次发言。0 表示不限制。' },
     { key: 'proactive_round_interval', group: 'proactive', label: 'N 轮触发回复（仅群聊）', type: 'number', hint: '每收到 N 条消息触发一次主动回复，仅对群聊生效。0 表示禁用。需在会话设置中单独启用。' },
+    { key: 'proactive_ai_judge_interval', group: 'proactive', label: 'AI 判断触发消息条数（仅群聊）', type: 'number', hint: '群聊中每收到 N 条消息，让 AI 判断一次是否适合主动插话。0 表示禁用。需在会话设置中单独启用。与「N 轮触发」二选一。' },
+    { key: 'proactive_ai_judge_cooldown', group: 'proactive', label: 'AI 判断触发后冷却秒数', type: 'number', hint: 'AI 判断为「该回复」并发送后进入冷却的时间（秒）。冷却期间消息照常计数但不触发判断。0 表示无冷却。' },
     { key: 'enable_message_debounce', group: 'debounce', label: '启用消息抖动', type: 'checkbox', hint: '开启后，短时间内的多条消息会合并为一次 LLM 调用，减少冗余回复。适用于群聊中用户快速连发消息的场景。' },
     { key: 'debounce_window_ms', group: 'debounce', label: '抖动等待窗口 (毫秒)', type: 'number', hint: '收到消息后等待多少毫秒，若期间无新消息则开始处理。推荐 1500~3000。' },
     { key: 'debounce_max_messages', group: 'debounce', label: '最大缓冲消息数', type: 'number', hint: '缓冲区最多收集多少条消息，超出后立即处理不再等待。' },
@@ -1133,6 +1135,10 @@ function updateProactiveToggles() {
     const roundToggle = document.getElementById('proactive-round-toggle');
     roundToggle.checked = isGroup && !!settings.round_enabled;
     roundLabel.style.display = isGroup ? '' : 'none';
+    const aiJudgeLabel = document.getElementById('proactive-ai-judge-label');
+    const aiJudgeToggle = document.getElementById('proactive-ai-judge-toggle');
+    aiJudgeToggle.checked = isGroup && !!settings.ai_judge_enabled;
+    aiJudgeLabel.style.display = isGroup ? '' : 'none';
 }
 
 async function toggleProactiveTimeout() {
@@ -1158,6 +1164,19 @@ async function toggleProactiveRound() {
     } catch (e) {
         toast('设置失败: ' + e.message, 'error');
         document.getElementById('proactive-round-toggle').checked = !enabled;
+    }
+}
+
+async function toggleProactiveAiJudge() {
+    if (!currentProactiveSessionKey) return;
+    const enabled = document.getElementById('proactive-ai-judge-toggle').checked;
+    const key = encodeURIComponent(currentProactiveSessionKey);
+    try {
+        await api('PUT', `/api/proactive/${key}/ai_judge`, { enabled });
+        toast(enabled ? '已启用 AI 判断插话' : '已关闭 AI 判断插话');
+    } catch (e) {
+        toast('设置失败: ' + e.message, 'error');
+        document.getElementById('proactive-ai-judge-toggle').checked = !enabled;
     }
 }
 

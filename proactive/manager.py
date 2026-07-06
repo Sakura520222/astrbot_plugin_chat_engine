@@ -5,7 +5,7 @@ import json
 import random
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from astrbot.api import logger
@@ -47,6 +47,22 @@ Guidelines:
 - Output ONLY the message text, nothing else
 - Do NOT mention that this is a proactive/system-triggered message
 """
+
+AI_JUDGE_SYSTEM_PROMPT = """You are a "should-I-chime-in" decider in a GROUP chat. Your task is to decide whether the bot (you) should proactively send a message to chime in, based on the recent group conversation only.
+
+Answer YES when:
+- Someone is directly asking you a question or @-mentioning you (and you haven't answered yet)
+- The topic is exactly your expertise and you can add real value
+- There is a natural opening to continue a joke, topic, or emotional resonance
+- The conversation has stalled and someone seems to be waiting for a reply
+
+Answer NO when:
+- The topic is unrelated to you; chiming in would feel abrupt or intrusive
+- People are actively chatting and don't need you
+- You have nothing genuinely valuable or interesting to add
+- Someone else is already answering the question
+
+Output ONLY "YES" or "NO" — nothing else."""
 
 
 class ProactiveManager:
@@ -142,6 +158,9 @@ class ProactiveManager:
                 "round_count": 0,
                 "last_message_at": _shanghai_now_iso(),
                 "consecutive_proactive_count": 0,
+                "ai_judge_enabled": False,
+                "ai_judge_count": 0,
+                "ai_judge_cooldown_until": "",  # ISO 时间戳，空表示未冷却
             }
         else:
             if umo:
@@ -157,7 +176,7 @@ class ProactiveManager:
         self._mark_dirty()
 
     async def on_message(self, session_key: str):
-        """收到消息时调用：更新时间戳 + 重置连续主动计数 + 检查轮数触发。"""
+        """收到消息时调用：更新时间戳 + 重置连续主动计数 + 检查 AI 判断/轮数触发。"""
         session = self._sessions.get(session_key)
         if not session:
             return
@@ -169,8 +188,25 @@ class ProactiveManager:
             session["consecutive_proactive_count"] = 0
             self._mark_dirty()
 
-        # 轮数触发 — 仅群聊（私聊每条都触发回复，无需轮数触发）
         is_group = ":private:" not in session_key
+
+        # AI 判断触发 — 仅群聊（攒够 N 条让 AI 判断是否插话，YES 才回复并进入冷却）
+        if is_group and session.get("ai_judge_enabled"):
+            interval = self._cfg_int("proactive_ai_judge_interval", 5)
+            if interval > 0:
+                session["ai_judge_count"] = session.get("ai_judge_count", 0) + 1
+                if session["ai_judge_count"] >= interval:
+                    cooldown_sec = self._cfg_int("proactive_ai_judge_cooldown", 300)
+                    if self._is_ai_judge_in_cooldown(session, cooldown_sec):
+                        # 冷却中：不触发判断，保留累计计数（冷却结束后基于累计量继续触发）
+                        self._mark_dirty()
+                    else:
+                        # 即时写入：计数重置必须在 spawn 任务前持久化，防止崩溃后重复触发
+                        session["ai_judge_count"] = 0
+                        await self._save_registry()
+                        asyncio.create_task(self._ai_judge_and_reply(session_key))
+
+        # 轮数触发 — 仅群聊（私聊每条都触发回复，无需轮数触发）
         if is_group and session.get("round_enabled"):
             interval = self._cfg_int("proactive_round_interval", 0)
             if interval > 0:
@@ -238,6 +274,14 @@ class ProactiveManager:
         session = self._get_or_create_session(session_key)
         session["round_enabled"] = enabled
         session["round_count"] = 0
+        await self._save_registry()
+
+    async def set_ai_judge_enabled(self, session_key: str, enabled: bool):
+        """开启/关闭 AI 判断主动回复。关闭时一并清空计数与冷却状态。"""
+        session = self._get_or_create_session(session_key)
+        session["ai_judge_enabled"] = enabled
+        session["ai_judge_count"] = 0
+        session["ai_judge_cooldown_until"] = ""
         await self._save_registry()
 
     def get_session_settings(self, session_key: str) -> dict:
@@ -423,6 +467,143 @@ class ProactiveManager:
                             content = f"[msg:{msg_id}] {content}"
                     if content:
                         recent.append(f"[{role}]: {content}")
+                if len(recent) >= 10:
+                    break
+            return "\n".join(reversed(recent))
+        except Exception:
+            return ""
+
+    # AI 判断主动回复
+
+    def _is_ai_judge_in_cooldown(self, session: dict, cooldown_sec: int) -> bool:
+        """检查会话是否处于 AI 判断冷却中。cooldown_sec <= 0 视为无冷却。"""
+        if cooldown_sec <= 0:
+            return False
+        until_str = session.get("ai_judge_cooldown_until", "")
+        if not until_str:
+            return False
+        try:
+            until = datetime.fromisoformat(until_str)
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=_SHANGHAI_TZ)
+            return datetime.now(_SHANGHAI_TZ) < until
+        except Exception:
+            return False
+
+    async def _ai_judge_and_reply(self, session_key: str):
+        """AI 判断入口：先轻量判断，YES 才生成回复并进入冷却；NO 仅记录日志。"""
+        session = self._sessions.get(session_key)
+        if not session:
+            return
+        # 二次确认非冷却（防止外部重置计数后又攒满的极端竞态）
+        cooldown_sec = self._cfg_int("proactive_ai_judge_cooldown", 300)
+        if self._is_ai_judge_in_cooldown(session, cooldown_sec):
+            return
+
+        try:
+            should_reply = await self._judge_should_reply(session_key)
+        except Exception as e:
+            logger.error(f"[Proactive] AI 判断异常 [{session_key}]: {e}")
+            should_reply = False
+
+        if not should_reply:
+            logger.info(f"[Proactive] AI 判断为 NO，不插话 [{session_key}]")
+            return
+
+        reason = "AI 判断当前群聊上下文适合主动插话"
+        await self._send_proactive(session_key, reason)
+
+        # 进入冷却（仅在判断为 YES 并完成回复后）
+        session = self._sessions.get(session_key)
+        if not session:
+            return
+        if cooldown_sec > 0:
+            until = datetime.now(_SHANGHAI_TZ) + timedelta(seconds=cooldown_sec)
+            session["ai_judge_cooldown_until"] = until.isoformat()
+            await self._save_registry()
+            logger.info(
+                f"[Proactive] AI 判断触发回复，进入冷却 {cooldown_sec}s [{session_key}]"
+            )
+
+    async def _judge_should_reply(self, session_key: str) -> bool:
+        """轻量 LLM 判断：当前群聊上下文是否适合主动插话。任何异常均保守返回 False。"""
+        provider = None
+        if self._provider_getter:
+            try:
+                provider = self._provider_getter()
+            except Exception:
+                pass
+        if not provider:
+            logger.warning("[Proactive] AI 判断无可用 Provider，跳过")
+            return False
+
+        recent_text = await self._get_judge_context(session_key)
+        if not recent_text:
+            logger.debug(f"[Proactive] AI 判断无可用上下文 [{session_key}]")
+            return False
+
+        prompt = (
+            "以下是群聊最近的对话记录（user 包含群成员发言，assistant 为你之前的回复）。"
+            "请判断现在是否适合你（机器人）主动插话：\n\n"
+            f"{recent_text}\n\n"
+            "只回答 YES 或 NO。"
+        )
+        try:
+            response = await provider.text_chat(
+                prompt=prompt,
+                system_prompt=AI_JUDGE_SYSTEM_PROMPT,
+            )
+        except Exception as e:
+            logger.warning(f"[Proactive] AI 判断 LLM 调用失败 [{session_key}]: {e}")
+            return False
+        if not response or not response.completion_text:
+            logger.warning(f"[Proactive] AI 判断 LLM 返回空 [{session_key}]")
+            return False
+
+        text = response.completion_text.strip().upper()
+        # 解析 YES/NO：优先看开头，再看是否包含
+        if text.startswith("YES"):
+            return True
+        if text.startswith("NO"):
+            return False
+        has_yes = "YES" in text
+        has_no = "NO" in text
+        if has_yes and not has_no:
+            return True
+        if has_no and not has_yes:
+            return False
+        # 模糊或冲突 → 保守不回
+        logger.debug(f"[Proactive] AI 判断结果解析失败，保守视为 NO: {text[:30]}")
+        return False
+
+    async def _get_judge_context(self, session_key: str) -> str:
+        """获取最近群聊上下文（含 observed 被动消息），用于 AI 判断。
+
+        与 _get_recent_context 的区别：后者只取 user/assistant，看不到群成员的
+        被动消息；判断"是否插话"必须看到群里在聊什么，因此这里也纳入 observed。
+        observed 与 user 统一标记为 user（都是"别人说的话"）。
+        """
+        if not self._context_mgr:
+            return ""
+        try:
+            messages = await self._context_mgr.load_context(session_key)
+            recent = []
+            for msg in reversed(messages):
+                role = msg.get("role", "")
+                if role not in ("user", "assistant", "observed"):
+                    continue
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                if not content:
+                    continue
+                # assistant 保留原角色；user/observed 统一为 user（群成员发言）
+                label = "assistant" if role == "assistant" else "user"
+                recent.append(f"[{label}]: {content}")
                 if len(recent) >= 10:
                     break
             return "\n".join(reversed(recent))

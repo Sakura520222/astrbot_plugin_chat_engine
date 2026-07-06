@@ -98,7 +98,7 @@
                 <div class="panel-header">
                     <div class="panel-title-block">
                         <h3>主动回复</h3>
-                        <p>为单个会话启用超时或轮数触发。</p>
+                        <p>为单个会话启用超时、轮数或 AI 判断触发。</p>
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <select id="proactive-session-select" class="inline-select" onchange="onProactiveSessionChange()">
@@ -117,6 +117,10 @@
                         <label id="proactive-round-label" class="proactive-toggle-label">
                             <input type="checkbox" id="proactive-round-toggle" onchange="toggleProactiveRound()">
                             轮数触发（仅群聊）
+                        </label>
+                        <label id="proactive-ai-judge-label" class="proactive-toggle-label">
+                            <input type="checkbox" id="proactive-ai-judge-toggle" onchange="toggleProactiveAiJudge()">
+                            AI 判断插话（仅群聊）
                         </label>
                     </div>
                 </div>
