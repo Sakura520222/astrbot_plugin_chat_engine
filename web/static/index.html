@@ -31,8 +31,14 @@
             <!-- Personas -->
             <section id="tab-personas" class="tab-panel active">
                 <div class="panel-header">
-                    <h3>人格管理</h3>
-                    <button class="btn btn-primary" onclick="showPersonaModal()">+ 新建人格</button>
+                    <div class="panel-title-block">
+                        <h3>人格管理</h3>
+                        <p>管理 System Prompt 与默认人格。</p>
+                    </div>
+                    <div class="panel-actions">
+                        <button class="btn btn-secondary" onclick="refreshPage(this, loadPersonas)">刷新</button>
+                        <button class="btn btn-primary" onclick="showPersonaModal()">+ 新建人格</button>
+                    </div>
                 </div>
                 <div id="persona-list" class="card-list"></div>
             </section>
@@ -40,8 +46,11 @@
             <!-- Sessions -->
             <section id="tab-sessions" class="tab-panel">
                 <div class="panel-header">
-                    <h3>会话管理</h3>
-                    <button class="btn btn-secondary" onclick="loadSessions()">刷新</button>
+                    <div class="panel-title-block">
+                        <h3>会话管理</h3>
+                        <p>查看上下文、归档与 Token 用量。</p>
+                    </div>
+                    <button class="btn btn-secondary" onclick="refreshPage(this, loadSessions)">刷新</button>
                 </div>
                 <div id="session-list" class="card-list"></div>
                 <div id="session-pagination" class="pagination"></div>
@@ -50,12 +59,15 @@
             <!-- Memories -->
             <section id="tab-memories" class="tab-panel">
                 <div class="panel-header">
-                    <h3>记忆管理</h3>
+                    <div class="panel-title-block">
+                        <h3>记忆管理</h3>
+                        <p>查看、手动补充和维护短期 / 长期记忆。</p>
+                    </div>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <select id="memory-session-select" class="inline-select" onchange="onMemorySessionChange()">
                             <option value="">选择会话...</option>
                         </select>
-                        <button class="btn btn-secondary" onclick="loadMemorySessionList()">刷新</button>
+                        <button class="btn btn-secondary" onclick="refreshMemoryPage(this)">刷新</button>
                     </div>
                 </div>
                 <div id="memory-content" style="display:none;">
@@ -84,12 +96,15 @@
             <!-- Proactive -->
             <section id="tab-proactive" class="tab-panel">
                 <div class="panel-header">
-                    <h3>主动回复</h3>
+                    <div class="panel-title-block">
+                        <h3>主动回复</h3>
+                        <p>为单个会话启用超时或轮数触发。</p>
+                    </div>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <select id="proactive-session-select" class="inline-select" onchange="onProactiveSessionChange()">
                             <option value="">选择会话...</option>
                         </select>
-                        <button class="btn btn-secondary" onclick="loadProactiveSessionList()">刷新</button>
+                        <button class="btn btn-secondary" onclick="refreshProactivePage(this)">刷新</button>
                     </div>
                 </div>
                 <div id="proactive-settings" class="proactive-card" style="display:none;">
@@ -113,7 +128,10 @@
             <!-- Tools -->
             <section id="tab-tools" class="tab-panel">
                 <div class="panel-header">
-                    <h3>工具管理</h3>
+                    <div class="panel-title-block">
+                        <h3>工具管理</h3>
+                        <p>扫描并开关内置、插件和 MCP 工具。</p>
+                    </div>
                     <button class="btn btn-secondary" onclick="refreshTools()">重新扫描</button>
                 </div>
                 <div id="tool-list" class="card-list"></div>
@@ -122,7 +140,11 @@
             <!-- Config -->
             <section id="tab-config" class="tab-panel">
                 <div class="panel-header">
-                    <h3>配置设置</h3>
+                    <div class="panel-title-block">
+                        <h3>配置设置</h3>
+                        <p>按功能分组管理插件配置，敏感凭证不会回显。</p>
+                    </div>
+                    <button class="btn btn-secondary" onclick="refreshConfigPage(this)">刷新</button>
                 </div>
                 <div id="config-form" class="config-form"></div>
             </section>

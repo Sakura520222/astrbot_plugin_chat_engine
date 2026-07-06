@@ -13,6 +13,7 @@
     --bg-card-hover:   #1c1f2e;
     --bg-input:        #11131b;
     --bg-overlay:      rgba(0, 0, 0, 0.55);
+    --surface:         var(--bg-card-hover);
 
     /* Borders */
     --border:          #23273a;
@@ -120,6 +121,7 @@ body {
 .nav-item {
     display: flex;
     align-items: center;
+    position: relative;
     padding: 10px 20px;
     margin: 2px 8px;
     border-radius: var(--radius);
@@ -141,6 +143,17 @@ body {
     background: var(--primary-soft);
     color: var(--primary-hover);
     border-color: rgba(99, 102, 241, 0.2);
+}
+
+.nav-item.active::before {
+    content: "";
+    position: absolute;
+    left: -1px;
+    top: 8px;
+    bottom: 8px;
+    width: 3px;
+    border-radius: 3px;
+    background: var(--primary-hover);
 }
 
 .sidebar-footer {
@@ -186,6 +199,19 @@ body {
     font-size: 20px;
     font-weight: 700;
     letter-spacing: -0.02em;
+}
+
+.panel-title-block p {
+    margin-top: 4px;
+    color: var(--text-dim);
+    font-size: 13px;
+}
+
+.panel-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
 }
 
 /* Cards */
@@ -355,6 +381,15 @@ body {
     height: 28px;
 }
 
+.btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.btn:not(:disabled):active {
+    transform: translateY(1px);
+}
+
 .btn-close {
     display: inline-flex;
     align-items: center;
@@ -502,25 +537,95 @@ body {
 /* Config Form */
 
 .config-form {
-    max-width: 660px;
+    max-width: 720px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
 }
 
-.config-item {
+.config-group {
+    position: relative;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 16px 20px;
-    margin-bottom: 10px;
+    padding: 18px 20px 8px;
+    overflow: hidden;
+    transition: border-color var(--duration) var(--ease);
+}
+
+.config-group:hover {
+    border-color: var(--border-hover);
+}
+
+.config-group-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: var(--group-color, var(--primary));
+}
+
+.group-primary  { --group-color: var(--primary); }
+.group-teal     { --group-color: #2dd4bf; }
+.group-success  { --group-color: var(--success); }
+.group-warning  { --group-color: var(--warning); }
+.group-pink     { --group-color: var(--pink); }
+.group-yellow   { --group-color: #facc15; }
+.group-purple   { --group-color: #a78bfa; }
+.group-rose     { --group-color: #fb7185; }
+.group-gray     { --group-color: #94a3b8; }
+
+.config-group-header {
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.config-group-title {
+    font-size: 15px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.group-restart-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: var(--warning-soft);
+    color: var(--warning);
+}
+
+.config-group-subtitle {
+    margin-top: 4px;
+    color: var(--text-dim);
+    font-size: 12.5px;
+}
+
+.config-group-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.config-item {
+    background: var(--bg-input);
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    padding: 12px 16px;
     transition: border-color var(--duration) var(--ease);
 }
 
 .config-item:hover {
-    border-color: var(--border-hover);
+    border-color: var(--border);
 }
 
-.config-item label {
+.config-item > label {
     display: block;
-    font-size: 14px;
+    font-size: 13.5px;
     font-weight: 600;
     margin-bottom: 4px;
     color: var(--text);
@@ -529,15 +634,23 @@ body {
 .config-item .hint {
     font-size: 12px;
     color: var(--text-dim);
-    margin-bottom: 12px;
+    margin-bottom: 10px;
     line-height: 1.5;
 }
 
-.config-item input,
-.config-item select {
-    width: 100%;
+.config-input-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.config-input-row > select,
+.config-input-row > input[type="text"],
+.config-input-row > input[type="number"],
+.config-input-row > input[type="password"] {
+    flex: 1;
     padding: 9px 14px;
-    background: var(--bg-input);
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text);
@@ -546,25 +659,86 @@ body {
     transition: all var(--duration) var(--ease);
 }
 
-.config-item input:focus,
-.config-item select:focus {
+.config-input-row > select:focus,
+.config-input-row > input:focus {
     outline: none;
     border-color: var(--primary);
     box-shadow: 0 0 0 3px var(--primary-soft);
 }
 
-.config-item select {
+.config-input-row > select {
     cursor: pointer;
 }
 
-.config-item input[type="checkbox"] {
-    width: auto;
-    margin-right: 8px;
+/* 配置滑动开关（复用 toggle 思路，独立样式） */
+.cfg-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
 }
 
+.cfg-switch input {
+    position: absolute;
+    opacity: 0;
+    width: 42px;
+    height: 24px;
+    margin: 0;
+    cursor: pointer;
+}
+
+.cfg-slider {
+    width: 42px;
+    height: 24px;
+    border-radius: 24px;
+    background: var(--border);
+    position: relative;
+    transition: background 0.25s var(--ease);
+    flex-shrink: 0;
+}
+
+.cfg-slider::before {
+    content: "";
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    left: 3px;
+    top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.25s var(--ease);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+.cfg-switch input:checked + .cfg-slider {
+    background: var(--success);
+}
+
+.cfg-switch input:checked + .cfg-slider::before {
+    transform: translateX(18px);
+}
+
+.cfg-switch-text {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.secret-flag {
+    font-size: 12px;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.secret-set   { color: var(--success); }
+.secret-unset { color: var(--text-dim); }
+
 .config-actions {
-    margin-top: 24px;
-    padding-top: 16px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding-top: 8px;
     border-top: 1px solid var(--border);
 }
 
@@ -926,6 +1100,18 @@ body {
 .memory-panel-header h4 {
     font-size: 14px;
     font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.memory-count-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    background: var(--bg-input);
+    padding: 1px 8px;
+    border-radius: 10px;
 }
 
 /* Memory card */
@@ -1129,12 +1315,22 @@ body {
     flex-shrink: 0;
 }
 
-/* Empty State */
-
 .empty-state {
+    position: relative;
     text-align: center;
-    padding: 40px 20px;
+    padding: 48px 20px;
     color: var(--text-dim);
+}
+
+.empty-state::before {
+    content: "";
+    display: block;
+    width: 56px;
+    height: 28px;
+    margin: 0 auto 14px;
+    opacity: 0.5;
+    background-image: radial-gradient(circle, var(--border-hover) 2px, transparent 2px);
+    background-size: 14px 14px;
 }
 
 .empty-state p {

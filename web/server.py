@@ -17,6 +17,81 @@ from ..utils.config import cfg_bool
 class ChatWebServer:
     """独立 Web 服务器 — 提供 Chat Engine 管理 API 和前端页面"""
 
+    # 与 _conf_schema.json 保持一致的全量配置键（GET/PUT 共用，避免两处维护）
+    _CONFIG_KEYS = [
+        # 上下文与压缩
+        "compression_mode",
+        "max_turns",
+        "token_threshold_ratio",
+        "keep_recent_turns",
+        "fallback_max_context_tokens",
+        "user_id_format",
+        "require_at_in_group",
+        "web_port",
+        # 工具与命令
+        "enable_tool_calls",
+        "max_tool_rounds",
+        "enable_command_execution",
+        # 数据库
+        "db_type",
+        "mysql_url",
+        # 被动记录
+        "enable_passive_record",
+        # 分段发送
+        "enable_split_send",
+        "split_mode",
+        "split_pattern",
+        "max_segments",
+        "split_delay_ms",
+        # 文本清洗
+        "enable_text_clean",
+        "clean_emoji",
+        "clean_brackets",
+        "clean_trailing_chars",
+        "trailing_chars_pattern",
+        # 记忆
+        "enable_memory",
+        "short_term_max_count",
+        "short_term_max_chars",
+        "long_term_max_count",
+        "long_term_retrieval_top_k",
+        "long_term_fetch_k",
+        "long_term_enable_rerank",
+        "long_term_similarity_threshold",
+        "memory_summary_interval",
+        "memory_summary_recent_turns",
+        "enable_auto_summary",
+        # 主动回复
+        "enable_proactive",
+        "proactive_timeout_minutes",
+        "proactive_timeout_probability",
+        "proactive_timeout_max_consecutive",
+        "proactive_round_interval",
+        # WebUI 认证
+        "web_auth_enabled",
+        "web_username",
+        "web_password",
+        # 消息抖动
+        "enable_message_debounce",
+        "debounce_window_ms",
+        "debounce_max_messages",
+        "debounce_scope",
+        "debounce_merge_mode",
+        "debounce_separator",
+        "debounce_absorb_passive",
+        # 画图 (OpenAI 兼容)
+        "enable_image_generation",
+        "image_gen_api_base",
+        "image_gen_api_key",
+        "image_gen_model",
+        "image_gen_size",
+        "image_gen_quality",
+        "image_gen_timeout",
+    ]
+
+    # 敏感凭证：GET 不回显真实值（仅返回是否已设置），PUT 空值表示不修改
+    _SENSITIVE_KEYS = frozenset({"web_password", "image_gen_api_key"})
+
     def __init__(self, plugin, port: int = 8765):
         self.plugin = plugin
         self.port = port
@@ -605,109 +680,25 @@ class ChatWebServer:
     # 配置 API
 
     async def _api_get_config(self, request: web.Request) -> web.Response:
-        config_keys = [
-            "compression_mode",
-            "max_turns",
-            "token_threshold_ratio",
-            "keep_recent_turns",
-            "fallback_max_context_tokens",
-            "user_id_format",
-            "require_at_in_group",
-            "web_port",
-            "enable_tool_calls",
-            "max_tool_rounds",
-            "db_type",
-            "mysql_url",
-            "enable_passive_record",
-            "enable_split_send",
-            "split_mode",
-            "split_pattern",
-            "max_segments",
-            "split_delay_ms",
-            "enable_text_clean",
-            "clean_emoji",
-            "clean_brackets",
-            "clean_trailing_chars",
-            "trailing_chars_pattern",
-            "enable_memory",
-            "short_term_max_count",
-            "short_term_max_chars",
-            "long_term_max_count",
-            "long_term_retrieval_top_k",
-            "long_term_fetch_k",
-            "long_term_enable_rerank",
-            "long_term_similarity_threshold",
-            "memory_summary_interval",
-            "memory_summary_recent_turns",
-            "enable_auto_summary",
-            "enable_proactive",
-            "proactive_timeout_minutes",
-            "proactive_timeout_probability",
-            "proactive_timeout_max_consecutive",
-            "proactive_round_interval",
-            "enable_message_debounce",
-            "debounce_window_ms",
-            "debounce_max_messages",
-            "debounce_scope",
-            "debounce_merge_mode",
-            "debounce_separator",
-        ]
         config_data = {}
-        for key in config_keys:
-            config_data[key] = self.plugin.config.get(key)
+        for key in self._CONFIG_KEYS:
+            if key in self._SENSITIVE_KEYS:
+                config_data[key] = ""
+                config_data[f"{key}_set"] = bool(self.plugin.config.get(key))
+            else:
+                config_data[key] = self.plugin.config.get(key)
         return web.json_response(config_data)
 
     async def _api_update_config(self, request: web.Request) -> web.Response:
         data, err = await self._safe_json(request)
         if err:
             return err
-        allowed_keys = [
-            "compression_mode",
-            "max_turns",
-            "token_threshold_ratio",
-            "keep_recent_turns",
-            "fallback_max_context_tokens",
-            "user_id_format",
-            "require_at_in_group",
-            "enable_tool_calls",
-            "max_tool_rounds",
-            "enable_passive_record",
-            "enable_split_send",
-            "split_mode",
-            "split_pattern",
-            "max_segments",
-            "split_delay_ms",
-            "enable_text_clean",
-            "clean_emoji",
-            "clean_brackets",
-            "clean_trailing_chars",
-            "trailing_chars_pattern",
-            "enable_memory",
-            "short_term_max_count",
-            "short_term_max_chars",
-            "long_term_max_count",
-            "long_term_retrieval_top_k",
-            "long_term_fetch_k",
-            "long_term_enable_rerank",
-            "long_term_similarity_threshold",
-            "memory_summary_interval",
-            "memory_summary_recent_turns",
-            "enable_auto_summary",
-            "enable_proactive",
-            "proactive_timeout_minutes",
-            "proactive_timeout_probability",
-            "proactive_timeout_max_consecutive",
-            "proactive_round_interval",
-            "enable_message_debounce",
-            "debounce_window_ms",
-            "debounce_max_messages",
-            "debounce_scope",
-            "debounce_merge_mode",
-            "debounce_separator",
-        ]
-        for key in allowed_keys:
-            if key in data:
-                self.plugin.config[key] = data[key]
+        for key in self._CONFIG_KEYS:
+            if key not in data:
+                continue
+            if key in self._SENSITIVE_KEYS and not str(data.get(key, "")).strip():
+                continue
+            self.plugin.config[key] = data[key]
 
         # 保存配置
         try:
