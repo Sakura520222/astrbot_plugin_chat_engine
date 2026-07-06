@@ -1,5 +1,41 @@
 # 变更日志
 
+## [1.3.5] - 2026-07-06
+
+### 新增
+- **画图工具 (OpenAI 兼容)**: LLM 可通过工具调用生成与编辑图片
+  - 新增 `image_gen/client.py`，封装 OpenAI 兼容的文生图 / 图生图 HTTP 客户端
+  - LLM 工具 `generate_image`: 根据文本描述生成图片并发送到聊天
+  - LLM 工具 `edit_image`: 基于参考图二次创作（图生图），通过 `message_id` 指定上下文中的参考图，支持多图融合
+  - 用户自定义 API 地址 / Key / 模型（默认 `gpt-image-2`），API 地址自动补全 `/v1` 后缀
+  - 可配置图片尺寸（`1024x1024` / `1024x1536` / `1536x1024` / `auto`）和质量（`auto` / `low` / `medium` / `high`）
+  - 响应兼容 `b64_json`（gpt-image 系列）与 `url`（DALL·E 系列）两种格式
+  - 生成的图片经工具调用通道直接发送给用户，不注入 LLM 上下文（省 Token）
+- **LLM Provider 失败重试**: 主 Provider 调用失败时自动回退到备选模型
+  - 新增 `_get_provider_with_fallback` 与 `_get_chat_providers_with_fallback`，读取 AstrBot 全局配置 `provider_settings.fallback_chat_models` 作为回退候选
+  - `_execute_llm_turn` 重构: 参数从 `provider` 改为 `umo`（unified_msg_origin），由内部解析候选列表并按序尝试
+  - 失败判定涵盖异常、`role == "err"` 和返回 `None`，命中后自动尝试下一个候选
+  - 一旦已向用户发送任何内容（中间文本 / 链式结果）即停止切换，避免重复发送
+  - 模态过滤、Token 截断、`[msg:ID]` 注入等逻辑移入重试循环，每轮针对当前 Provider 重新计算
+  - 抖动消息处理路径（`_process_debounced_messages`）同步复用同一套候选机制
+
+### 改进
+- **Emoji 清洗改用专业库**: 文本清洗中的 Emoji 去除由手写 Unicode 正则改为 `emoji` 库（`emoji.replace_emoji`），覆盖更全、匹配更准，避免误删 ZWJ / VS16 等组合字符；库异常时回退静默跳过，不破坏输出（新增 `emoji>=2.1` 依赖）
+
+### 修复
+- **Debounce 计时器竞态修复**: 取消旧计时器后新增 `await old_task` 等待其真正停止，避免旧 timer 在 sleep 结束后与新 `force_flush` / `_on_timer` 竞争缓冲区，导致消息丢失或重复处理
+
+### 配置项新增
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `enable_image_generation` | `false` | 启用画图工具 |
+| `image_gen_api_base` | `""` | 画图 API 地址 (OpenAI 兼容，是否带 `/v1` 均可) |
+| `image_gen_api_key` | `""` | 画图 API Key |
+| `image_gen_model` | `gpt-image-2` | 画图模型名称 |
+| `image_gen_size` | `1024x1024` | 图片尺寸: `1024x1024` / `1024x1536` / `1536x1024` / `auto` |
+| `image_gen_quality` | `auto` | 图片质量: `auto` / `low` / `medium` / `high` |
+| `image_gen_timeout` | `120` | 画图请求超时 (秒) |
+
 ## [1.3.4] - 2026-06-12
 
 ### 新增

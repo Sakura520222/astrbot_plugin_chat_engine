@@ -38,6 +38,11 @@
 - **消息 ID 注入**: 用户和被动消息自动注入 `[msg:ID]` 标记，为引用回复提供锚点
 - **历史图片剥离**: 历史消息中的图片替换为 `[Image]` 文本占位符，仅当前消息保留图片，减少 Token 消耗
 
+### LLM 调用
+- **Provider 失败重试**: 主 LLM Provider 调用失败（异常 / 错误 / 空响应）且尚未向用户发送任何内容时，自动回退到 AstrBot 全局配置 `fallback_chat_models` 中的备选模型，逐个尝试直至成功
+- 模态过滤、Token 截断等针对每个候选 Provider 独立计算，适配不同模型的能力差异
+- 一旦已发出中间回复即停止切换，避免重复发送
+
 ### 记忆系统
 - **短期记忆**: 会话级别临时记忆，可配置最大条数和单条最大字符数
 - **长期记忆**: 持久化存储，支持向量语义检索（Embedding + 可选 Rerank），可配置返回条数、候选数和相似度阈值
@@ -258,6 +263,7 @@ astrbot_plugin_chat_engine/
 - **命令执行分发**: `CommandDispatcher` 扫描所有已注册命令，生成结构化指引注入 System Prompt，LLM 通过工具调用触发实际执行；自动跳过未激活插件，尊重命令权限定义；支持 `capture_result` 模式捕获 `MessageEventResult` 链用于直接发送
 - **工具调用上下文隔离**: 使用 `ContextVar` 管理 `_llm_call_with_tools` 的中间状态（待发送队列、中间消息、最终响应），确保 EventBus 并发 dispatch 下各会话上下文互不干扰
 - **中间结果即时发送**: `_llm_call_with_tools` 作为异步生成器，在工具调用期间即时 yield 中间文本和链式结果，同时完整保存工具调用周期消息（assistant + tool results）到上下文
+- **LLM Provider 失败重试**: 主 Provider 调用失败（异常 / `role == "err"` / 返回 `None`）且尚未发出内容时，按 `_get_chat_providers_with_fallback` 返回的候选列表（主 Provider + `provider_settings.fallback_chat_models`）逐个重试；模态过滤、Token 截断、`[msg:ID]` 注入每轮重算；已通过回调发出内容（`_sent_any`）后不再切换避免重复发送；抖动消息处理路径同样复用该机制
 - **多会话管理**: 归档会话持久化存储，支持 `/new`、`/list`、`/switch` 命令操作；归档时通过 LLM 自动生成话题标题；群聊管理员权限控制；`/new` 命令采用「锁内快照 → 锁外标题生成 → 锁内归档」策略避免 LLM 调用阻塞并发消息
 - **上海时区时间**: 全局统一使用上海时区 (UTC+8) 记录所有时间戳，替代原有的 UTC 时间，确保时间信息对中文用户友好
 - **消息抖动 (Debounce)**: 群聊中用户快速连发消息时，自动缓冲并合并为一次 LLM 调用；支持可配置的等待窗口、最大缓冲消息数、适用范围和合并模式；会话级 flush 锁保护防止并发冲突；WebUI 热重载支持
