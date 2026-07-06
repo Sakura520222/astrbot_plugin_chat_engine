@@ -301,12 +301,14 @@ class ProactiveManager:
 
     # 核心：生成并发送主动回复
 
-    async def _send_proactive(self, session_key: str, reason: str):
-        """生成主动回复并发送。"""
+    async def _send_proactive(self, session_key: str, reason: str) -> bool:
+        """生成主动回复并发送。成功发送返回 True；任何原因未发送（LLM 返回空、
+        清洗后为空、发送失败、异常）返回 False，供调用方决定后续动作（如是否冷却）。
+        """
         session = self._sessions.get(session_key)
         if not session:
             logger.warning(f"[Proactive] 会话 {session_key} 未注册，跳过")
-            return
+            return False
 
         umo = session.get("umo", "")
         # 需要先收到过至少一条消息才能获取真实的 UMO（平台实例 ID）
@@ -314,7 +316,7 @@ class ProactiveManager:
             logger.debug(
                 f"[Proactive] 会话 {session_key} 尚未收到过消息（UMO 为空），跳过主动回复"
             )
-            return
+            return False
 
         try:
             # 1. 获取 Provider
@@ -326,7 +328,7 @@ class ProactiveManager:
                     pass
             if not provider:
                 logger.warning("[Proactive] 无可用 Provider，跳过主动回复")
-                return
+                return False
 
             # 2. 构建系统 Prompt
             system_prompt = ""
@@ -375,18 +377,18 @@ class ProactiveManager:
             )
             if not response or not response.completion_text:
                 logger.warning("[Proactive] LLM 返回空，跳过主动回复")
-                return
+                return False
 
             text = response.completion_text.strip()
             if not text:
-                return
+                return False
 
             # 7. 文本清洗
             if self._clean_fn:
                 text = self._clean_fn(text)
 
             if not text:
-                return
+                return False
 
             # 8. 发送消息（支持分段）
             from astrbot.core.message.components import Plain
@@ -402,7 +404,7 @@ class ProactiveManager:
                 sent = await self._context.send_message(umo, chain)
                 if not sent:
                     logger.warning(f"[Proactive] 发送失败: {session_key}")
-                    return
+                    return False
             else:
                 logger.info(f"[Proactive] 分段发送: {len(segments)} 段")
                 delay_ms = max(0, min(self._cfg_int("split_delay_ms", 800), 5000))
@@ -441,8 +443,11 @@ class ProactiveManager:
                 except Exception as e:
                     logger.warning(f"[Proactive] 保存主动回复到上下文失败: {e}")
 
+            return True
+
         except Exception as e:
             logger.error(f"[Proactive] 主动回复失败 [{session_key}]: {e}")
+            return False
 
     async def _get_recent_context(self, session_key: str) -> str:
         """获取最近几轮对话的纯文本，包含 [msg:ID] 标记。"""
@@ -512,11 +517,17 @@ class ProactiveManager:
             return
 
         reason = "AI 判断当前群聊上下文适合主动插话"
-        await self._send_proactive(session_key, reason)
+        sent = await self._send_proactive(session_key, reason)
 
-        # 进入冷却（仅在判断为 YES 并完成回复后）
+        # 仅在真正发送成功后才进入冷却；生成失败/模型放弃/发送失败都不冷却，
+        # 让下次攒够消息时重新判断，避免"没发消息还白白冷却"。
         session = self._sessions.get(session_key)
         if not session:
+            return
+        if not sent:
+            logger.info(
+                f"[Proactive] 回复未发送（生成失败或模型放弃），不进入冷却 [{session_key}]"
+            )
             return
         if cooldown_sec > 0:
             until = datetime.now(_SHANGHAI_TZ) + timedelta(seconds=cooldown_sec)
