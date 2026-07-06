@@ -98,6 +98,7 @@ class ProactiveManager:
         self._sessions: dict[str, dict] = {}
 
         self._scheduled_tasks: dict[str, asyncio.Task] = {}
+        self._cooldown_wakeup_tasks: dict[str, asyncio.Task] = {}
         self._monitor_task: asyncio.Task | None = None
         self._running = False
         self._registry_dirty = False  # 脏标记：数据已变更但尚未写入磁盘
@@ -524,6 +525,52 @@ class ProactiveManager:
             logger.info(
                 f"[Proactive] AI 判断触发回复，进入冷却 {cooldown_sec}s [{session_key}]"
             )
+            # 冷却到期主动唤醒：立即判断冷却期间累计的消息，不等下一条消息
+            self._schedule_cooldown_wakeup(session_key, cooldown_sec)
+
+    def _schedule_cooldown_wakeup(self, session_key: str, cooldown_sec: int):
+        """安排冷却到期唤醒任务。取消同会话旧的唤醒任务，避免重复堆积。"""
+        old = self._cooldown_wakeup_tasks.pop(session_key, None)
+        if old and not old.done():
+            old.cancel()
+        task = asyncio.create_task(
+            self._ai_judge_cooldown_wakeup(session_key, cooldown_sec)
+        )
+        self._cooldown_wakeup_tasks[session_key] = task
+
+    async def _ai_judge_cooldown_wakeup(self, session_key: str, cooldown_sec: int):
+        """冷却到期唤醒：清空冷却标记，若累计消息够则立即触发一次判断。
+
+        这样冷却一结束就一次性判断冷却期间累计的所有消息，无需等下一条消息驱动。
+        """
+        try:
+            await asyncio.sleep(cooldown_sec)
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._cooldown_wakeup_tasks.pop(session_key, None)
+
+        session = self._sessions.get(session_key)
+        if not session or not session.get("ai_judge_enabled"):
+            return
+
+        # 冷却已到期：清空标记
+        session["ai_judge_cooldown_until"] = ""
+
+        interval = self._cfg_int("proactive_ai_judge_interval", 5)
+        count = session.get("ai_judge_count", 0)
+        if interval <= 0 or count < interval:
+            # 冷却期间累计不足：等 on_message 继续攒
+            self._mark_dirty()
+            return
+
+        # 累计够：立即触发一次判断（复用 _ai_judge_and_reply，YES 会重新进入冷却）
+        session["ai_judge_count"] = 0
+        await self._save_registry()
+        logger.info(
+            f"[Proactive] 冷却到期，累计 {count} 条消息，立即触发判断 [{session_key}]"
+        )
+        asyncio.create_task(self._ai_judge_and_reply(session_key))
 
     async def _judge_should_reply(self, session_key: str) -> bool:
         """轻量 LLM 判断：当前群聊上下文是否适合主动插话。任何异常均保守返回 False。"""
@@ -604,7 +651,9 @@ class ProactiveManager:
                 # assistant 保留原角色；user/observed 统一为 user（群成员发言）
                 label = "assistant" if role == "assistant" else "user"
                 recent.append(f"[{label}]: {content}")
-                if len(recent) >= 10:
+                if len(recent) >= self._cfg_int(
+                    "proactive_ai_judge_context_messages", 10
+                ):
                     break
             return "\n".join(reversed(recent))
         except Exception:
@@ -694,6 +743,9 @@ class ProactiveManager:
         for task in self._scheduled_tasks.values():
             task.cancel()
         self._scheduled_tasks.clear()
+        for task in self._cooldown_wakeup_tasks.values():
+            task.cancel()
+        self._cooldown_wakeup_tasks.clear()
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
         await self._flush_registry()

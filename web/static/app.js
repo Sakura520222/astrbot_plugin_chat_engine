@@ -745,6 +745,7 @@ const CONFIG_FIELDS = [
     { key: 'proactive_round_interval', group: 'proactive', label: 'N 轮触发回复（仅群聊）', type: 'number', hint: '每收到 N 条消息触发一次主动回复，仅对群聊生效。0 表示禁用。需在会话设置中单独启用。' },
     { key: 'proactive_ai_judge_interval', group: 'proactive', label: 'AI 判断触发消息条数（仅群聊）', type: 'number', hint: '群聊中每收到 N 条消息，让 AI 判断一次是否适合主动插话。0 表示禁用。需在会话设置中单独启用。与「N 轮触发」二选一。' },
     { key: 'proactive_ai_judge_cooldown', group: 'proactive', label: 'AI 判断触发后冷却秒数', type: 'number', hint: 'AI 判断为「该回复」并发送后进入冷却的时间（秒）。冷却期间消息照常计数但不触发判断。0 表示无冷却。' },
+    { key: 'proactive_ai_judge_context_messages', group: 'proactive', label: 'AI 判断参考消息条数', type: 'number', hint: 'AI 判断是否插话时参考群聊最近 N 条消息（含被动消息）。冷却到期时累计的消息会一次性提交判断，建议此值 >= 触发条数。默认 10。' },
     { key: 'enable_message_debounce', group: 'debounce', label: '启用消息抖动', type: 'checkbox', hint: '开启后，短时间内的多条消息会合并为一次 LLM 调用，减少冗余回复。适用于群聊中用户快速连发消息的场景。' },
     { key: 'debounce_window_ms', group: 'debounce', label: '抖动等待窗口 (毫秒)', type: 'number', hint: '收到消息后等待多少毫秒，若期间无新消息则开始处理。推荐 1500~3000。' },
     { key: 'debounce_max_messages', group: 'debounce', label: '最大缓冲消息数', type: 'number', hint: '缓冲区最多收集多少条消息，超出后立即处理不再等待。' },
