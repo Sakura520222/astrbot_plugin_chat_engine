@@ -2469,6 +2469,32 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             "generated/sent, use message_id='last'."
         ), []
 
+    async def _get_image_urls_for_message(
+        self, event: AstrMessageEvent, message_id: str
+    ) -> tuple[str | None, list[str]]:
+        """获取指定 message_id 的图片 URL，供 edit_image / view_image 使用。
+
+        优先级：
+        1. 若 message_id 是当前 event 消息 → 直接从 event 提取原始图片组件
+           （未经 ``sanitize_contexts_by_modalities`` 处理，图片完整）
+        2. 回退到 :meth:`_resolve_message_image_urls`（内存上下文 + 数据库）
+
+        第 1 步是关键：当 Provider 不支持 image 模态时，sanitize 会把当前
+        user_msg 的图片剥离成 ``[Image]`` 文本，此时从 current_contexts 永远
+        找不到图片，必须回到原始 event 提取。
+
+        Returns:
+            ``(error_msg, urls)``。error_msg 非 None 表示失败。
+        """
+        current_id = getattr(event.message_obj, "message_id", "")
+        if message_id == current_id:
+            urls = await self._extract_image_urls(event)
+            if urls:
+                return None, urls
+            # event 提取失败（如纯文本消息被误传），继续回退到上下文查找
+        session_key = self.context_mgr.build_session_key(event)
+        return await self._resolve_message_image_urls(session_key, message_id)
+
     # 图片查看工具 — LLM Tool Call
 
     @filter.llm_tool(name="view_image")
@@ -2485,8 +2511,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         Args:
             message_id(string): The message ID containing the image. Shown as [msg:ID] tag in context messages.
         """
-        session_key = self.context_mgr.build_session_key(event)
-        err, urls = await self._resolve_message_image_urls(session_key, message_id)
+        err, urls = await self._get_image_urls_for_message(event, message_id)
         if err:
             return err
 
@@ -2585,8 +2610,8 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
                 return "The previous generated image has expired."
             image_urls = [resolved["image_url"]["url"]]
         else:
-            err, image_urls = await self._resolve_message_image_urls(
-                session_key, message_id
+            err, image_urls = await self._get_image_urls_for_message(
+                event, message_id
             )
             if err:
                 return err
