@@ -932,7 +932,7 @@ function renderImageQuota() {
         return;
     }
     const limit = Number(daily_quota) || 1;
-    container.innerHTML = items.map(it => {
+    container.innerHTML = items.map((it, idx) => {
         const pct = Math.min(100, (it.used_count / limit) * 100);
         const barColor = it.used_count >= limit ? '#e74c3c' : '#3498db';
         return `<div class="card">
@@ -947,10 +947,18 @@ function renderImageQuota() {
                 </div>
             </div>
             <div class="card-actions">
-                <button class="btn btn-small btn-danger" onclick="resetImageQuota('${escapeHtml(it.quota_key)}')">重置配额</button>
+                <button class="btn btn-small btn-danger" data-quota-idx="${idx}">重置配额</button>
             </div>
         </div>`;
     }).join('');
+
+    // 用 data 属性 + addEventListener 读取 quota_key,避免内联 onclick 嵌入不可信值(XSS)
+    container.querySelectorAll('button[data-quota-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const item = items[Number(btn.dataset.quotaIdx)];
+            if (item) resetImageQuota(item.quota_key);
+        });
+    });
 }
 
 async function resetImageQuota(quotaKey) {
