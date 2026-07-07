@@ -1,5 +1,29 @@
 # 变更日志
 
+## [1.3.7] - 2026-07-07
+
+### 新增
+- **edit_image 支持 `"last"` 关键字**: 引用本会话最近一张生成图进行二次创作
+  - LLM 调用 `edit_image(message_id="last", prompt)` 即可编辑上次 `generate_image` / `edit_image` 生成的图片，用户回复或引用你刚发的图时无需重新提供 message_id
+  - 新增 `_last_generated_images` 按会话缓存最近生成图（存入 ImageStore 得到 `image_ref`），`generate_image` 与 `edit_image` 成功后均记录，编辑结果自动成为新的 "last"
+  - 新增 `_remember_generated_image`、`_extract_urls_from_content` 辅助方法复用图片存储与解析逻辑
+  - Image Generation Guide 更新，引导 LLM 在用户回复/引用刚生成图时智能选用 `"last"`
+- **AI 判断触发的强制生成模式**: 群聊消停窗口 AI 判断触发后使用专用 prompt 强制生成
+  - 新增 `AI_JUDGE_PROACTIVE_SUFFIX`，去掉 "output empty to abort" 指令，避免判断阶段已决策该回、生成阶段却二次否定导致 `content=None` 空回复
+  - `_send_proactive` 新增 `force_reply` 参数，AI 判断触发路径启用强制生成 suffix
+
+### 改进
+- **主动回复触发原因注入策略优化**
+  - `_send_proactive` 新增 `include_reason` 参数，按需控制是否将触发原因写入生成 prompt
+  - AI 判断触发时不再注入 `Trigger reason`，仅基于群聊上下文生成自然插话，减少机器决策信息对生成结果的干扰
+
+### 修复
+- **纯文本 Provider 的图片消息标记适配**: 不支持 image 模态的 Provider 下图片信息不再丢失
+  - 新增 `_mark_images_for_text_only_provider`，在 `sanitize_contexts_by_modalities` **之前**把 `image_url` 块编码为 `[Image: msg=<id>, url=<url>]` 文本块，sanitize 看到的不再是 `image_url` 类型而保留，让 LLM 在纯文本 Provider 下仍能看到图片的 message_id 与链接，准确调用 `edit_image` / `view_image`
+  - 新增 `_shorten_image_url`，data URL 仅保留 MIME 前缀（如 `data:image/jpeg`）避免 base64 撑爆 Token，HTTP URL 原样保留
+- **图片解析优先从原始事件获取**: 新增 `_get_image_urls_for_message`，`view_image` / `edit_image` 提取当前消息图片时优先回到原始 `event`（未经 sanitize 处理、图片完整），解决纯文本 Provider 下当前消息图片被剥离为 `[Image]` 文本后上下文永远找不到的问题；提取为空再回退到上下文查找
+- **统一 message_id 类型比较以修复图片查找**: `message_id` 统一转 `str` 比较（LLM 工具参数为 `str`，`event.message_obj.message_id` 可能为 `int`），修复 int/str 不等导致 `_get_image_urls_for_message` 走不到 event 分支、图片始终查找失败的回归；补充查找失败日志便于排查
+
 ## [1.3.6] - 2026-07-06
 
 ### 改进

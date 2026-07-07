@@ -73,7 +73,7 @@
 
 ### 画图
 - LLM 工具 `generate_image`：根据文本描述生成图片并发送到聊天
-- LLM 工具 `edit_image`：基于参考图二次创作（图生图），通过 `message_id` 指定上下文中的参考图，支持多图融合
+- LLM 工具 `edit_image`：基于参考图二次创作（图生图），通过 `message_id` 指定上下文中的参考图，支持多图融合；`message_id="last"` 可引用本会话最近生成的图片，编辑结果自动成为新的「最近图」
 - 用户自定义配置 OpenAI 兼容的 API 地址、Key 和模型（默认 `gpt-image-2`）
 - 可配置图片尺寸（`1024x1024` / `1024x1536` / `1536x1024` / `auto`）和质量（`auto` / `low` / `medium` / `high`）
 - 生成的图片经工具调用通道直接发送给用户，不注入 LLM 上下文（省 Token）
@@ -253,6 +253,7 @@ astrbot_plugin_chat_engine/
 - **图片存储**: 图片转为 base64 data URL 发送给 LLM，文件按 sha256 去重存储，上下文中以 `image_ref` 引用节省空间
 - **历史图片剥离**: 历史上下文中的图片替换为 `[Image]` 文本占位符，仅当前用户消息保留图片，减少 Token 消耗
 - **图片查看工具**: LLM 可通过 `view_image` 工具按消息 ID 主动加载历史图片，图片以多模态格式嵌入 tool result
+- **纯文本 Provider 图片标记**: 不支持 image 模态的 Provider 下，`_mark_images_for_text_only_provider` 在模态过滤之前把 `image_url` 块编码为 `[Image: msg=<id>, url=<url>]` 文本块（data URL 仅保留 MIME 前缀避免撑爆 Token），让 LLM 仍能看到图片的 message_id 与链接，准确调用 `edit_image` / `view_image`
 - **引用回复**: 提取 Reply 组件中的发送者和内容，自动拼接到用户消息前缀
 - **会话锁**: `asyncio.Lock` 按 session_key 索引，确保同一会话的消息串行处理
 - **安全截断**: 调用 LLM 前通过 `TokenEstimator` 检测总量，超出阈值自动裁剪最旧消息
@@ -267,7 +268,7 @@ astrbot_plugin_chat_engine/
 - **多会话管理**: 归档会话持久化存储，支持 `/new`、`/list`、`/switch` 命令操作；归档时通过 LLM 自动生成话题标题；群聊管理员权限控制；`/new` 命令采用「锁内快照 → 锁外标题生成 → 锁内归档」策略避免 LLM 调用阻塞并发消息
 - **上海时区时间**: 全局统一使用上海时区 (UTC+8) 记录所有时间戳，替代原有的 UTC 时间，确保时间信息对中文用户友好
 - **消息抖动 (Debounce)**: 群聊中用户快速连发消息时，自动缓冲并合并为一次 LLM 调用；支持可配置的等待窗口、最大缓冲消息数、适用范围和合并模式；会话级 flush 锁保护防止并发冲突；WebUI 热重载支持
-- **画图工具**: LLM 可通过 `generate_image` 工具调用 OpenAI 兼容 API（`POST /v1/images/generations`）生成图片，或通过 `edit_image` 工具基于参考图二次创作（`POST /v1/images/edits`，multipart/form-data，支持多图融合）；参考图通过 `message_id` 从上下文加载（`_resolve_message_image_urls` 辅助方法，复用 `view_image` 的图片解析逻辑）；用户自定义 API 地址 / Key / 模型（默认 `gpt-image-2`）；API 地址自动补全 `/v1` 后缀；响应兼容 `b64_json`（gpt-image 系列）与 `url`（DALL·E 系列）两种格式；图片字节经 `Image.fromBytes` 构造组件，通过 `_tool_call_ctx.pending_sends` 投递（与 `execute_command` 同通道），兼容正常消息流与抖动消息流两条发送路径；图片不注入 LLM 上下文，节省 Token
+- **画图工具**: LLM 可通过 `generate_image` 工具调用 OpenAI 兼容 API（`POST /v1/images/generations`）生成图片，或通过 `edit_image` 工具基于参考图二次创作（`POST /v1/images/edits`，multipart/form-data，支持多图融合）；参考图通过 `message_id` 经 `_get_image_urls_for_message` 加载（优先从原始 `event` 提取未经 sanitize 的完整图片，回退到 `_resolve_message_image_urls` 查询内存上下文与数据库，解决纯文本 Provider 下当前消息图片被剥离后找不到的问题）；`message_id="last"` 引用本会话最近一张生成图（`_last_generated_images` 按会话缓存，存入 ImageStore 得到 `image_ref`），生成 / 编辑成功后自动更新为新的「最近图」；用户自定义 API 地址 / Key / 模型（默认 `gpt-image-2`）；API 地址自动补全 `/v1` 后缀；响应兼容 `b64_json`（gpt-image 系列）与 `url`（DALL·E 系列）两种格式；图片字节经 `Image.fromBytes` 构造组件，通过 `_tool_call_ctx.pending_sends` 投递（与 `execute_command` 同通道），兼容正常消息流与抖动消息流两条发送路径；图片不注入 LLM 上下文，节省 Token
 
 ## 兼容性
 
