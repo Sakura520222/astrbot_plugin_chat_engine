@@ -64,6 +64,22 @@ Answer NO when:
 
 Output ONLY "YES" or "NO" — nothing else."""
 
+AI_JUDGE_PROACTIVE_SUFFIX = """
+
+You are proactively sending a message in a GROUP chat. This is NOT a response to anyone's message.
+A separate judgment step has ALREADY decided you should chime in here. Do NOT second-guess that
+decision, and do NOT output an empty line to abort — generate the message directly.
+
+Guidelines:
+- Keep it to 1-3 short sentences — be concise
+- Be casual and natural
+- Reference something specific from recent group conversation
+- Match the tone of your persona
+- You MUST output a concrete message (not empty): the decision to speak has already been made
+- Output ONLY the message text, nothing else
+- Do NOT mention that this is a proactive/system-triggered message
+"""
+
 
 class ProactiveManager:
     """主动回复管理器 — 协调定时任务、超时监控和轮数触发。"""
@@ -302,7 +318,11 @@ class ProactiveManager:
     # 核心：生成并发送主动回复
 
     async def _send_proactive(
-        self, session_key: str, reason: str, include_reason: bool = True
+        self,
+        session_key: str,
+        reason: str,
+        include_reason: bool = True,
+        force_reply: bool = False,
     ) -> bool:
         """生成主动回复并发送。成功发送返回 True；任何原因未发送（LLM 返回空、
         清洗后为空、发送失败、异常）返回 False，供调用方决定后续动作（如是否冷却）。
@@ -311,6 +331,9 @@ class ProactiveManager:
             include_reason: 是否把 reason 作为 "Trigger reason" 放进生成 prompt。
                 AI 判断触发时应传 False —— reason 是机器内部决策，塞给生成 LLM
                 只是同义反复的"人机消息"，不如直接用群聊上下文让它自然插话。
+            force_reply: 强制生成（AI 判断触发用）。True 时改用专门 suffix，去掉
+                "output empty to abort" 指令 —— 因为判断阶段已决策该回，生成阶段
+                不应再二次否定导致 content=None。
         """
         session = self._sessions.get(session_key)
         if not session:
@@ -350,11 +373,16 @@ class ProactiveManager:
             system_prompt = f"当前时间: {format_current_time()}\n\n" + system_prompt
 
             is_group = ":private:" not in session_key
-            system_prompt += (
-                PROACTIVE_SYSTEM_SUFFIX_GROUP
-                if is_group
-                else PROACTIVE_SYSTEM_SUFFIX_PRIVATE
-            )
+            if force_reply and is_group:
+                # AI 判断已决策该回：用强制生成 suffix（去掉 abort 指令），
+                # 避免生成阶段二次否定导致 content=None
+                system_prompt += AI_JUDGE_PROACTIVE_SUFFIX
+            else:
+                system_prompt += (
+                    PROACTIVE_SYSTEM_SUFFIX_GROUP
+                    if is_group
+                    else PROACTIVE_SYSTEM_SUFFIX_PRIVATE
+                )
 
             # 3. 注入记忆
             if self._memory_mgr:
@@ -522,9 +550,11 @@ class ProactiveManager:
             logger.info(f"[Proactive] AI 判断为 NO，不插话 [{session_key}]")
             return
 
-        # AI 判断触发：不把 reason 塞进生成 prompt（那是同义反复的人机消息），
-        # 直接让 LLM 基于群聊上下文 + 人设生成自然插话
-        sent = await self._send_proactive(session_key, "", include_reason=False)
+        # AI 判断触发：不塞 Trigger reason（同义反复的人机消息），且用强制生成
+        # suffix（去掉 abort 指令）—— 判断已决策该回，生成阶段不再二次否定
+        sent = await self._send_proactive(
+            session_key, "", include_reason=False, force_reply=True
+        )
 
         # 仅在真正发送成功后才进入冷却；生成失败/模型放弃/发送失败都不冷却，
         # 让下次攒够消息时重新判断，避免"没发消息还白白冷却"。
