@@ -78,6 +78,7 @@
 - 可配置图片尺寸（`1024x1024` / `1024x1536` / `1536x1024` / `auto`）和质量（`auto` / `low` / `medium` / `high`）
 - 生成的图片经工具调用通道直接发送给用户，不注入 LLM 上下文（省 Token）
 - 兼容 gpt-image 系列（`b64_json`）与 DALL·E 系列（`url`）响应格式
+- **权限控制与每日配额**: 默认仅管理员可调用画图/改图工具；关闭管理员限制后，普通用户受每日配额约束（画图 + 改图共用额度），支持按用户或按会话两种计数维度，跨日自动重置；管理员始终不受配额限制
 
 ### 人格管理
 - 完全独立于 AstrBot 自带的人格系统
@@ -125,6 +126,7 @@
 - 用户标识格式配置
 - 工具管理
 - 记忆管理（查看、搜索）
+- 图片配额管理（查看今日用量、手动重置）
 - 主动回复会话设置
 
 ## 安装
@@ -191,6 +193,9 @@
 | `image_gen_size` | `1024x1024` | 图片尺寸: `1024x1024` / `1024x1536` / `1536x1024` / `auto` |
 | `image_gen_quality` | `auto` | 图片质量: `auto` / `low` / `medium` / `high` |
 | `image_gen_timeout` | `120` | 画图请求超时 (秒) |
+| `image_gen_admin_only` | `true` | 画图/改图仅管理员可用，关闭后允许普通用户使用（受每日配额约束） |
+| `image_gen_quota_dimension` | `user` | 普通用户配额维度: `user`（每用户各 N 次）/ `session`（每会话共享 N 次） |
+| `image_gen_daily_quota` | `10` | 普通用户每日配额（画图 + 改图共用额度，管理员不受限制） |
 | `web_port` | `8765` | WebUI 端口 |
 | `web_auth_enabled` | `false` | 启用 WebUI 登录认证 |
 | `web_username` | `admin` | WebUI 登录用户名 |
@@ -211,6 +216,7 @@ astrbot_plugin_chat_engine/
 │   ├── persona_repo.py        # 人格 CRUD
 │   ├── tool_config_repo.py    # 工具配置
 │   ├── image_repo.py          # 图片 CRUD (sha256 去重)
+│   ├── image_quota_repo.py    # 画图每日配额 CRUD (原子计数 / 跨日重置)
 │   └── image_store.py         # 图片文件存储服务
 ├── context/                   # 上下文管理
 │   ├── manager.py             # 会话 Key / 用户标识 / 压缩触发 / 被动记录 / 会话锁 / 图片解析
@@ -269,6 +275,7 @@ astrbot_plugin_chat_engine/
 - **上海时区时间**: 全局统一使用上海时区 (UTC+8) 记录所有时间戳，替代原有的 UTC 时间，确保时间信息对中文用户友好
 - **消息抖动 (Debounce)**: 群聊中用户快速连发消息时，自动缓冲并合并为一次 LLM 调用；支持可配置的等待窗口、最大缓冲消息数、适用范围和合并模式；会话级 flush 锁保护防止并发冲突；WebUI 热重载支持
 - **画图工具**: LLM 可通过 `generate_image` 工具调用 OpenAI 兼容 API（`POST /v1/images/generations`）生成图片，或通过 `edit_image` 工具基于参考图二次创作（`POST /v1/images/edits`，multipart/form-data，支持多图融合）；参考图通过 `message_id` 经 `_get_image_urls_for_message` 加载（优先从原始 `event` 提取未经 sanitize 的完整图片，回退到 `_resolve_message_image_urls` 查询内存上下文与数据库，解决纯文本 Provider 下当前消息图片被剥离后找不到的问题）；`message_id="last"` 引用本会话最近一张生成图（`_last_generated_images` 按会话缓存，存入 ImageStore 得到 `image_ref`），生成 / 编辑成功后自动更新为新的「最近图」；用户自定义 API 地址 / Key / 模型（默认 `gpt-image-2`）；API 地址自动补全 `/v1` 后缀；响应兼容 `b64_json`（gpt-image 系列）与 `url`（DALL·E 系列）两种格式；图片字节经 `Image.fromBytes` 构造组件，通过 `_tool_call_ctx.pending_sends` 投递（与 `execute_command` 同通道），兼容正常消息流与抖动消息流两条发送路径；图片不注入 LLM 上下文，节省 Token
+- **画图权限与配额**: `generate_image` / `edit_image` 入口接入 `_check_image_tool_access`，管理员直接放行，普通用户在 `image_gen_admin_only` 关闭时受每日配额约束；新增 `CEImageQuota` 模型与 `ImageQuotaRepository`，采用 `UPDATE ... SET used = used + 1` 原子计数 + 并发插入重试，按 `image_gen_quota_dimension`（`user` / `session`）确定计数键，跨日自然重置；配额回退策略区分错误类型——`ImageGenError` 业务错误不退还（防恶意试探），网络 / 超时异常退还配额；`edit_image` 的权限检查置于图片 URL 解析之后，避免解析失败时白扣配额；WebUI「图片配额」管理页支持查看今日用量与手动重置
 
 ## 兼容性
 

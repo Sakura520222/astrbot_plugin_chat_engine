@@ -1,5 +1,29 @@
 # 变更日志
 
+## [1.3.8] - 2026-07-08
+
+### 新增
+- **画图/改图工具权限控制与每日配额**: 画图工具支持管理员权限控制与普通用户每日配额
+  - 新增配置 `image_gen_admin_only`（默认开启）：开启后 `generate_image` / `edit_image` 仅管理员可调用，管理员始终不受配额限制
+  - 新增配置 `image_gen_quota_dimension`（`user` / `session`）：普通用户每日配额的计数维度，`user` 为每个用户每天各 N 次（群聊中互不影响），`session` 为每个会话每天共享 N 次（群里所有人共用）
+  - 新增配置 `image_gen_daily_quota`（默认 10）：普通用户每天可使用画图 + 改图的总次数（共用额度）
+  - 新增 `CEImageQuota` 数据模型与 `ImageQuotaRepository`，UPDATE 原子计数 + 并发插入重试，跨日自然重置
+  - `generate_image` / `edit_image` 入口接入 `_check_image_tool_access`：管理员直接放行，普通用户预扣配额
+  - 配额回退策略：`ImageGenError` 业务错误不退还（防止恶意试探），网络 / 超时异常退还配额
+  - `edit_image` 权限检查置于图片 URL 解析之后，避免 URL 解析失败时白扣配额
+- **WebUI 图片配额管理页**: 新增「图片配额」管理页，查看今日用量并支持手动重置
+- **单元测试**: 附带 `ImageQuotaRepository` 单元测试 11 例（文件 SQLite + WAL，含并发原子性验证）
+
+### 修复
+- **图片配额重置按钮 XSS 隐患**: WebUI 配额重置按钮的内联 `onclick` 改为 `data-quota-idx` 数字索引 + `addEventListener` 闭包读取 `items[idx].quota_key`，避免 `escapeHtml` 转义后的 `&#39;` 在 HTML 属性解析时解码回单引号打破 JS 字符串
+
+### 配置项新增
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `image_gen_admin_only` | `true` | 画图/改图仅管理员可用，关闭后允许普通用户使用（受每日配额约束） |
+| `image_gen_quota_dimension` | `user` | 普通用户配额维度: `user` / `session` |
+| `image_gen_daily_quota` | `10` | 普通用户每日配额（画图 + 改图共用额度） |
+
 ## [1.3.7] - 2026-07-07
 
 ### 新增
