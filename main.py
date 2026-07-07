@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import base64
 import contextvars
 import copy
 import inspect
@@ -113,6 +114,9 @@ class ChatEnginePlugin(Star):
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
         self._last_tool_images: list[dict] | None = (
             None  # 当前工具调用产生的图片（单次执行生命周期）
+        )
+        self._last_generated_images: dict[str, dict] = (
+            {}  # {session_key: image_ref} 最近生成图，供 edit_image(message_id="last") 使用
         )
         self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
@@ -2199,7 +2203,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
 ## Image Generation Guide
 
 - **generate_image**: When the user asks you to draw, paint, create, design, or generate an image (e.g. "画一只猫", "帮我画张图", "生成一张夕阳的图片", "画个头像"), call `generate_image(prompt)`. The image is sent directly to the user — you only need to briefly acknowledge, do NOT try to render the image as text. Decide the prompt language and content yourself based on the user's request. Only call this tool when the user explicitly wants an image — do not invoke it for purely textual questions.
-- **edit_image**: When the user provides or references an existing image and asks to modify, remix, redesign, or transform it (e.g. "把这张图背景换成海边", "参考这张图重画", "改一下这张"), call `edit_image(message_id, prompt)` with the [msg:ID] of the message containing the reference image. The result is sent directly to the user. Use the current message's [msg:ID] if it carries the image; otherwise use the historical message's [msg:ID] (visible as [msg:ID] tags in context). Multiple reference images in one message are supported (multi-image fusion).
+- **edit_image**: When the user provides or references an existing image and asks to modify, remix, redesign, or transform it (e.g. "把这张图背景换成海边", "参考这张图重画", "改一下这张", "去掉呆毛"), call `edit_image(message_id, prompt)`. Pick the reference image smartly: if the user is replying to / referencing the image you just generated or sent in your previous turn, use `message_id="last"`; otherwise use the [msg:ID] of the message carrying the reference image (current message's [msg:ID] if it has the image, else the historical [msg:ID]). The result is sent directly to the user and becomes the new "last" image. Multiple reference images in one message are supported (multi-image fusion).
 """
 
     @filter.llm_tool(name="save_memory")
@@ -2365,55 +2369,11 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
 
     # 图片加载辅助
 
-    async def _resolve_message_image_urls(
-        self, session_key: str, message_id: str
-    ) -> tuple[str | None, list[str]]:
-        """从当前 tool-call 内存上下文或数据库加载指定消息的图片 URL 列表。
-
-        查找顺序：
-        1. 当前轮内存上下文（``_tool_call_ctx.current_contexts``）——包含尚未落库的
-           当前 user_msg，**用户刚发的图片只能从这里找到**
-        2. 数据库历史上下文——已落库消息，图片以 ``image_ref`` 形式存储
-
-        解析 ``image_ref``（文件存储引用）与 ``image_url``（data URL / HTTP URL），
-        统一返回为 URL 字符串列表，供 view_image / edit_image 复用。
-
-        Returns:
-            ``(error_msg, urls)``。error_msg 非 None 表示加载失败，urls 为空。
-        """
-        # 收集候选消息：当前轮内存上下文 + 数据库历史
-        candidates: list[dict] = []
-        _ctx = _tool_call_ctx.get()
-        if _ctx is not None:
-            candidates.extend(_ctx.current_contexts or [])
-
-        try:
-            db_messages = await self.context_mgr.repo.get_context(session_key)
-            candidates.extend(db_messages)
-        except Exception as e:
-            # 内存上下文仍可能命中，不直接失败
-            logger.debug(f"[ChatEngine] 加载数据库上下文失败: {e}")
-
-        target_msg = None
-        for msg in candidates:
-            if msg.get("message_id") == message_id:
-                target_msg = msg
-                break
-
-        if not target_msg:
-            return (
-                f"Message ID '{message_id}' not found in current session context. "
-                "Available IDs can be found in [msg:ID] tags."
-            ), []
-
-        content = target_msg.get("content")
-        if not isinstance(content, list):
-            return "This message does not contain any images.", []
-
-        image_store = self.context_mgr.image_store
-        if not image_store:
-            return "Image storage is not available.", []
-
+    @staticmethod
+    async def _extract_urls_from_content(
+        content: list, image_store
+    ) -> list[str]:
+        """从消息 content 列表中提取图片 URL（解析 image_ref，直取 image_url）。"""
         urls: list[str] = []
         for part in content:
             if not isinstance(part, dict):
@@ -2428,11 +2388,86 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
                 url = part.get("image_url", {}).get("url", "")
                 if url:
                     urls.append(url)
+        return urls
 
-        if not urls:
-            return "No images found in this message (images may have been lost or expired).", []
+    async def _remember_generated_image(
+        self, session_key: str, image_bytes: bytes
+    ) -> None:
+        """记录会话最近生成图，供后续 edit_image(message_id="last") 使用。
 
-        return None, urls
+        将生成图存入 ImageStore 得到 image_ref，按 session_key 记录。
+        存储失败不影响主流程（图片仍会正常发送）。
+        """
+        try:
+            image_store = self.context_mgr.image_store
+            if not image_store:
+                return
+            data_url = (
+                f"data:image/png;base64,"
+                f"{base64.b64encode(image_bytes).decode()}"
+            )
+            ref = await image_store.store_image(data_url)
+            self._last_generated_images[session_key] = ref
+        except Exception as e:
+            logger.debug(f"[ChatEngine] 记录生成图失败: {e}")
+
+    async def _resolve_message_image_urls(
+        self, session_key: str, message_id: str
+    ) -> tuple[str | None, list[str]]:
+        """从当前 tool-call 内存上下文或数据库加载指定消息的图片 URL 列表。
+
+        查找顺序：
+        1. 当前轮内存上下文（``_tool_call_ctx.current_contexts``）——包含尚未落库的
+           当前 user_msg，**用户刚发的图片只能从这里找到**
+        2. 数据库历史上下文——已落库消息，图片以 ``image_ref`` 形式存储
+
+        同一 message_id 可能同时存在于内存（图片可能被 ``_strip_history_images``
+        剥成 ``[Image]`` 占位）和数据库（完整 image_ref），因此**逐一尝试所有匹配
+        消息**，第一个提取到图片的就返回，避免被剥离版提前挡住。
+
+        Returns:
+            ``(error_msg, urls)``。error_msg 非 None 表示加载失败，urls 为空。
+        """
+        image_store = self.context_mgr.image_store
+        if not image_store:
+            return "Image storage is not available.", []
+
+        # 收集候选消息：当前轮内存上下文 + 数据库历史
+        candidates: list[dict] = []
+        _ctx = _tool_call_ctx.get()
+        if _ctx is not None:
+            candidates.extend(_ctx.current_contexts or [])
+        try:
+            db_messages = await self.context_mgr.repo.get_context(session_key)
+            candidates.extend(db_messages)
+        except Exception as e:
+            # 内存上下文仍可能命中，不直接失败
+            logger.debug(f"[ChatEngine] 加载数据库上下文失败: {e}")
+
+        # 找出所有同 message_id 的消息，逐一尝试提取图片
+        matching = [
+            msg for msg in candidates if msg.get("message_id") == message_id
+        ]
+        if not matching:
+            return (
+                f"Message ID '{message_id}' not found in current session context. "
+                "Available IDs can be found in [msg:ID] tags. "
+                "To edit the last image you generated/sent, use message_id='last'."
+            ), []
+
+        for target_msg in matching:
+            content = target_msg.get("content")
+            if not isinstance(content, list):
+                continue
+            urls = await self._extract_urls_from_content(content, image_store)
+            if urls:
+                return None, urls
+
+        return (
+            "No extractable images in this message (they may have been stripped "
+            "to [Image] placeholders or lost). To edit the last image you "
+            "generated/sent, use message_id='last'."
+        ), []
 
     # 图片查看工具 — LLM Tool Call
 
@@ -2502,6 +2537,9 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             return "Image generated but no delivery channel available."
 
         _ctx.pending_sends.append(("chain", [Image.fromBytes(image_bytes)]))
+        await self._remember_generated_image(
+            self.context_mgr.build_session_key(event), image_bytes
+        )
         logger.info(
             f"[ChatEngine] 画图已生成 ({len(image_bytes)} 字节)，已投递到发送队列"
         )
@@ -2522,19 +2560,36 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         The result is sent directly to the user — you only need to briefly acknowledge.
 
         Args:
-            message_id(string): The message ID containing the reference image(s).
-                Shown as [msg:ID] tag in context messages.
+            message_id(string): The message ID containing the reference image(s),
+                shown as [msg:ID] tag in context messages. Use the special value "last"
+                to edit the most recent image you generated/sent in this session
+                (useful when the user replies to your generated image and asks to tweak it).
             prompt(string): Text description of how to edit or remix the image.
         """
         if not self.image_client:
             return "Image editing is not enabled (api_base/api_key not configured)."
 
         session_key = self.context_mgr.build_session_key(event)
-        err, image_urls = await self._resolve_message_image_urls(
-            session_key, message_id
-        )
-        if err:
-            return err
+
+        # message_id="last"：取本会话最近一张生成图（用户回复/引用你刚发的图时常用）
+        if message_id == "last":
+            image_store = self.context_mgr.image_store
+            ref = self._last_generated_images.get(session_key)
+            if not ref or not image_store:
+                return (
+                    "No previous generated image in this session. "
+                    "Ask the user to provide or reference an image."
+                )
+            resolved = await image_store.resolve_image_ref(ref)
+            if not resolved or resolved.get("type") != "image_url":
+                return "The previous generated image has expired."
+            image_urls = [resolved["image_url"]["url"]]
+        else:
+            err, image_urls = await self._resolve_message_image_urls(
+                session_key, message_id
+            )
+            if err:
+                return err
 
         try:
             image_bytes = await self.image_client.edit(prompt, image_urls)
@@ -2552,6 +2607,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             return "Image edited but no delivery channel available."
 
         _ctx.pending_sends.append(("chain", [Image.fromBytes(image_bytes)]))
+        await self._remember_generated_image(session_key, image_bytes)
         logger.info(
             f"[ChatEngine] 二次创作已生成 ({len(image_bytes)} 字节)，"
             f"参考图 {len(image_urls)} 张"
