@@ -87,6 +87,7 @@ function activateTab(tab) {
     else if (tab === 'memories') restoreMemoryTab();
     else if (tab === 'proactive') restoreProactiveTab();
     else if (tab === 'tools') loadTools();
+    else if (tab === 'image-quota') loadImageQuota();
     else if (tab === 'config') loadConfig();
 }
 
@@ -771,6 +772,9 @@ const CONFIG_FIELDS = [
     { key: 'image_gen_size', group: 'image', label: '图片尺寸', type: 'select', options: ['1024x1024', '1024x1536', '1536x1024', 'auto'], restart: true, hint: '生成图片的尺寸。auto 由模型自动决定。不同模型支持的尺寸可能不同，调用失败时请尝试其他尺寸。' },
     { key: 'image_gen_quality', group: 'image', label: '图片质量', type: 'select', options: ['auto', 'low', 'medium', 'high'], restart: true, hint: '生成图片的质量等级。auto 由模型自动决定。不同模型支持的质量等级可能不同。' },
     { key: 'image_gen_timeout', group: 'image', label: '画图请求超时 (秒)', type: 'number', restart: true, hint: '调用图片生成 API 的超时时间。图片生成通常较慢，建议 60~180 秒。' },
+    { key: 'image_gen_admin_only', group: 'image', label: '画图/改图仅管理员可用', type: 'checkbox', hint: '开启后，画图和改图工具仅管理员可调用。关闭则允许普通用户使用，受下方每日配额约束。管理员始终不受配额限制。' },
+    { key: 'image_gen_quota_dimension', group: 'image', label: '普通用户配额维度', type: 'select', options: ['user', 'session'], hint: 'user: 每个用户每天各 N 次（群聊中互不影响）。session: 每个会话每天共享 N 次（群里所有人共用）。仅当「仅管理员可用」关闭时生效。' },
+    { key: 'image_gen_daily_quota', group: 'image', label: '普通用户每日配额', type: 'number', hint: '普通用户每天可使用画图+改图的总次数（共用额度）。仅当「仅管理员可用」关闭时生效。管理员不受此限制。' },
     { key: 'web_port', group: 'webui', label: 'WebUI 端口', type: 'number', restart: true, hint: '插件管理 WebUI 的独立端口。修改后需重启插件。' },
     { key: 'db_type', group: 'webui', label: '数据库类型', type: 'select', options: ['sqlite', 'mysql'], restart: true, hint: 'sqlite: 本地文件数据库。mysql: 远程 MySQL 数据库。修改后需重启插件。' },
     { key: 'mysql_url', group: 'webui', label: 'MySQL 连接 URL', type: 'text', restart: true, hint: '格式: mysql+aiomysql://user:password@host:port/dbname。修改后需重启插件。' },
@@ -890,6 +894,73 @@ async function saveConfig() {
         await loadConfig();
     } catch (e) {
         toast('保存失败: ' + e.message, 'error');
+    }
+}
+
+
+// Image Quota Management
+
+
+let imageQuotaData = null;
+
+async function loadImageQuota() {
+    try {
+        imageQuotaData = await api('GET', '/api/image-quota');
+        renderImageQuota();
+    } catch (e) {
+        toast('加载图片配额失败: ' + e.message, 'error');
+    }
+}
+
+function renderImageQuota() {
+    if (!imageQuotaData) return;
+    const { items = [], daily_quota, dimension, admin_only, date } = imageQuotaData;
+    const dimLabel = dimension === 'session' ? '按会话' : '按用户';
+
+    const summary = document.getElementById('image-quota-summary');
+    summary.innerHTML = `
+        <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center;">
+            <span><strong>日期:</strong> ${escapeHtml(date)}</span>
+            <span><strong>配额维度:</strong> ${dimLabel}</span>
+            <span><strong>每日上限:</strong> ${daily_quota} 次/天</span>
+            <span><strong>访问限制:</strong> ${admin_only ? '仅管理员可用' : '允许普通用户'}</span>
+        </div>`;
+
+    const container = document.getElementById('image-quota-list');
+    if (!items.length) {
+        container.innerHTML = `<div class="empty-state"><p>今日暂无普通用户使用记录。</p></div>`;
+        return;
+    }
+    const limit = Number(daily_quota) || 1;
+    container.innerHTML = items.map(it => {
+        const pct = Math.min(100, (it.used_count / limit) * 100);
+        const barColor = it.used_count >= limit ? '#e74c3c' : '#3498db';
+        return `<div class="card">
+            <div class="card-header">
+                <div class="card-title">${escapeHtml(it.identifier)} <span class="badge">${escapeHtml(it.dimension)}</span></div>
+                <div class="card-meta">${it.updated_at ? new Date(it.updated_at).toLocaleString() : ''}</div>
+            </div>
+            <div class="card-body">
+                已用 <strong>${it.used_count}</strong> / ${daily_quota} 次
+                <div style="margin-top:8px;height:6px;background:#eee;border-radius:3px;overflow:hidden;">
+                    <div style="width:${pct}%;height:100%;background:${barColor};"></div>
+                </div>
+            </div>
+            <div class="card-actions">
+                <button class="btn btn-small btn-danger" onclick="resetImageQuota('${escapeHtml(it.quota_key)}')">重置配额</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function resetImageQuota(quotaKey) {
+    if (!confirm('确定重置该配额记录吗？用量将归零。')) return;
+    try {
+        await api('POST', '/api/image-quota/reset', { quota_key: quotaKey });
+        toast('配额已重置');
+        await loadImageQuota();
+    } catch (e) {
+        toast('重置失败: ' + e.message, 'error');
     }
 }
 

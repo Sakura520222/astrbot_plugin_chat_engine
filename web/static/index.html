@@ -19,6 +19,7 @@
                 <li class="nav-item" data-tab="memories">记忆管理</li>
                 <li class="nav-item" data-tab="proactive">主动回复</li>
                 <li class="nav-item" data-tab="tools">工具管理</li>
+                <li class="nav-item" data-tab="image-quota">图片配额</li>
                 <li class="nav-item" data-tab="config">配置设置</li>
             </ul>
             <div class="sidebar-footer" id="sidebar-footer" style="display:none">
@@ -139,6 +140,19 @@
                     <button class="btn btn-secondary" onclick="refreshTools()">重新扫描</button>
                 </div>
                 <div id="tool-list" class="card-list"></div>
+            </section>
+
+            <!-- Image Quota -->
+            <section id="tab-image-quota" class="tab-panel">
+                <div class="panel-header">
+                    <div class="panel-title-block">
+                        <h3>图片配额</h3>
+                        <p>查看普通用户今日画图/改图用量，可手动重置配额。管理员不受配额限制。</p>
+                    </div>
+                    <button class="btn btn-secondary" onclick="refreshPage(this, loadImageQuota)">刷新</button>
+                </div>
+                <div id="image-quota-summary" class="config-group group-gray" style="margin-bottom:16px;padding:12px 16px;"></div>
+                <div id="image-quota-list" class="card-list"></div>
             </section>
 
             <!-- Config -->

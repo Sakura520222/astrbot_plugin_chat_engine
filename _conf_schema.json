@@ -399,5 +399,28 @@
         "type": "int",
         "default": 120,
         "hint": "调用图片生成 API 的超时时间。图片生成通常较慢，建议 60~180 秒。"
+    },
+    "image_gen_admin_only": {
+        "description": "画图/改图仅管理员可用",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，画图(generate_image)和改图(edit_image)工具仅管理员可调用。关闭则允许普通用户使用，受下方每日配额约束。管理员始终不受配额限制。"
+    },
+    "image_gen_quota_dimension": {
+        "description": "普通用户配额维度",
+        "type": "string",
+        "_special": {
+            "select": {
+                "options": ["user", "session"]
+            }
+        },
+        "default": "user",
+        "hint": "普通用户每日配额的计数维度。user: 每个用户每天各 N 次（群聊中互不影响）。session: 每个会话每天共享 N 次（群里所有人共用）。仅当「画图/改图仅管理员可用」关闭时生效。"
+    },
+    "image_gen_daily_quota": {
+        "description": "普通用户每日配额",
+        "type": "int",
+        "default": 10,
+        "hint": "普通用户每天可使用画图+改图的总次数（共用额度）。仅当「画图/改图仅管理员可用」关闭时生效。管理员不受此限制。"
     }
 }

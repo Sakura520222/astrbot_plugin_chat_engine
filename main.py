@@ -2600,6 +2600,73 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             "The images have been injected into your context for viewing."
         )
 
+    # 画图/改图权限与配额
+
+    def _build_image_quota_key(self, event: AstrMessageEvent) -> tuple[str, str]:
+        """构建配额计数 key 与当日日期字符串(上海时区)。
+
+        dimension=user: key = ``user:{sender_id}``(每个用户独立配额)
+        dimension=session: key = ``session:{session_key}``(每会话共享配额)
+        """
+        dimension = str(self.config.get("image_gen_quota_dimension", "user"))
+        if dimension == "session":
+            quota_key = f"session:{self.context_mgr.build_session_key(event)}"
+        else:
+            quota_key = f"user:{event.get_sender_id()}"
+        return quota_key, shanghai_now_iso()[:10]
+
+    async def _check_image_tool_access(
+        self, event: AstrMessageEvent
+    ) -> str | None:
+        """检查画图/改图工具访问权限并预扣每日配额。
+
+        返回 None 表示通过(配额已预扣);返回字符串为拒绝原因(回传给 LLM)。
+
+        - 管理员(is_admin)直接放行,不扣配额
+        - image_gen_admin_only=true 时普通用户拒绝
+        - 否则原子 +1 预扣,超限则回退并拒绝
+
+        采用「先 incr 再判断」而非「先 get 再 incr」,利用 incr 的原子性
+        避免并发下多个请求同时通过检查导致超额。
+        """
+        # 管理员放行,不计配额
+        if event.is_admin():
+            return None
+
+        # 普通用户:检查 admin_only 开关
+        if self._cfg_bool("image_gen_admin_only", True):
+            return (
+                "Image generation tools are admin-only. "
+                "Please ask an admin to enable access for normal users."
+            )
+
+        # 配额预扣:原子 +1 后判断是否超限
+        quota_key, date_str = self._build_image_quota_key(event)
+        limit = self._cfg_int("image_gen_daily_quota", 10)
+        new_count = await self.db.image_quota_repo.incr_used(quota_key, date_str)
+        if new_count > limit:
+            # 超限,回退本次预扣
+            await self.db.image_quota_repo.decr_used(quota_key, date_str)
+            return (
+                f"Daily image generation quota exceeded ({limit}/{limit}). "
+                "Please try again tomorrow."
+            )
+        return None
+
+    async def _refund_image_quota(self, event: AstrMessageEvent) -> None:
+        """退还预扣的配额(图片 API 调用因网络/超时等异常失败时调用)。
+
+        管理员无预扣,直接跳过。ImageGenError(业务错误,如内容违规)不退还,
+        仅退还网络/超时等非业务异常,避免恶意试探不消耗配额。
+        """
+        if event.is_admin():
+            return
+        quota_key, date_str = self._build_image_quota_key(event)
+        try:
+            await self.db.image_quota_repo.decr_used(quota_key, date_str)
+        except Exception as e:
+            logger.warning(f"[ChatEngine] 退还画图配额失败: {e}")
+
     # 画图工具 — LLM Tool Call
 
     @filter.llm_tool(name="generate_image")
@@ -2619,12 +2686,20 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         if not self.image_client:
             return "Image generation is not enabled (api_base/api_key not configured)."
 
+        # 权限与配额检查(管理员放行;普通用户预扣每日配额)
+        access_err = await self._check_image_tool_access(event)
+        if access_err:
+            return access_err
+
         try:
             image_bytes = await self.image_client.generate(prompt)
         except ImageGenError as e:
+            # 业务错误(如内容违规)— 不退还配额,防止恶意试探
             logger.warning(f"[ChatEngine] 画图失败: {e}")
             return f"Image generation failed: {e}"
         except Exception as e:
+            # 网络/超时等异常 — 退还预扣配额
+            await self._refund_image_quota(event)
             logger.error(f"[ChatEngine] 画图异常: {e}", exc_info=True)
             return f"Image generation error: {type(e).__name__}"
 
@@ -2690,12 +2765,21 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             if err:
                 return err
 
+        # 权限与配额检查(管理员放行;普通用户预扣每日配额)
+        # 放在图片 URL 解析之后:URL 解析失败时不扣配额,避免白扣
+        access_err = await self._check_image_tool_access(event)
+        if access_err:
+            return access_err
+
         try:
             image_bytes = await self.image_client.edit(prompt, image_urls)
         except ImageGenError as e:
+            # 业务错误(如内容违规)— 不退还配额
             logger.warning(f"[ChatEngine] 二次创作失败: {e}")
             return f"Image editing failed: {e}"
         except Exception as e:
+            # 网络/超时等异常 — 退还预扣配额
+            await self._refund_image_quota(event)
             logger.error(f"[ChatEngine] 二次创作异常: {e}", exc_info=True)
             return f"Image editing error: {type(e).__name__}"
 

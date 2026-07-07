@@ -6,7 +6,15 @@ global SQLModel metadata. This prevents the CancelledError crash.
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, MetaData, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Integer,
+    MetaData,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ..utils import shanghai_now as _shanghai_now
@@ -89,3 +97,24 @@ class ToolConfig(ChatEngineBase):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     source: Mapped[str] = mapped_column(String(32), default="builtin")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now)
+
+
+class CEImageQuota(ChatEngineBase):
+    """图片生成配额计数 — 普通用户每日画图/改图用量。
+
+    quota_key + date 唯一:同一计数对象(用户或会话)每天一行。
+    quota_key 格式由调用方决定,如 ``user:{sender_id}`` / ``session:{session_key}``。
+    date 为上海时区 ``YYYY-MM-DD``,跨日自然产生新行实现"每日重置"。
+    """
+
+    __tablename__ = "ce_image_quotas"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    quota_key: Mapped[str] = mapped_column(String(512), index=True)
+    date: Mapped[str] = mapped_column(String(10))  # YYYY-MM-DD (上海时区)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now)
+
+    __table_args__ = (
+        UniqueConstraint("quota_key", "date", name="uq_image_quota_key_date"),
+    )

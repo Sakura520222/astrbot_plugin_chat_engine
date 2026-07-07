@@ -11,6 +11,7 @@ from aiohttp import web
 
 from astrbot.api import logger
 
+from ..utils import shanghai_now_iso
 from ..utils.config import cfg_bool
 
 
@@ -91,6 +92,9 @@ class ChatWebServer:
         "image_gen_size",
         "image_gen_quality",
         "image_gen_timeout",
+        "image_gen_admin_only",
+        "image_gen_quota_dimension",
+        "image_gen_daily_quota",
     ]
 
     # 敏感凭证：GET 不回显真实值（仅返回是否已设置），PUT 空值表示不修改
@@ -257,10 +261,82 @@ class ChatWebServer:
             "/api/proactive/{key:.*}/ai_judge", self._api_set_proactive_ai_judge
         )
 
+        #  图片配额管理
+        self.app.router.add_get("/api/image-quota", self._api_list_image_quota)
+        self.app.router.add_post(
+            "/api/image-quota/reset", self._api_reset_image_quota
+        )
+
         #  前端页面
         self.app.router.add_get("/login", self._serve_login)
         self.app.router.add_get("/", self._serve_index)
         self.app.router.add_get("/{filename}", self._serve_static)
+
+    # 图片配额 API
+
+    async def _api_list_image_quota(self, request: web.Request) -> web.Response:
+        """列出指定日期(默认今日)所有画图/改图配额用量记录。
+
+        返回当前配额相关配置(daily_quota / dimension / admin_only)供前端展示。
+        """
+        date = request.query.get("date") or shanghai_now_iso()[:10]
+        try:
+            records = await self.plugin.db.image_quota_repo.list_today(date)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        items = []
+        for r in records:
+            key = r.quota_key
+            if key.startswith("user:"):
+                dimension, identifier = "user", key[len("user:") :]
+            elif key.startswith("session:"):
+                dimension, identifier = "session", key[len("session:") :]
+            else:
+                dimension, identifier = "unknown", key
+            items.append(
+                {
+                    "quota_key": key,
+                    "dimension": dimension,
+                    "identifier": identifier,
+                    "date": r.date,
+                    "used_count": r.used_count,
+                    "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                }
+            )
+        return web.json_response(
+            {
+                "date": date,
+                "items": items,
+                "daily_quota": self.plugin.config.get("image_gen_daily_quota", 10),
+                "dimension": self.plugin.config.get(
+                    "image_gen_quota_dimension", "user"
+                ),
+                "admin_only": cfg_bool(
+                    self.plugin.config, "image_gen_admin_only", True
+                ),
+            }
+        )
+
+    async def _api_reset_image_quota(self, request: web.Request) -> web.Response:
+        """重置指定 quota_key 当日配额(删行,用量归零)。
+
+        请求体: {"quota_key": "user:123", "date": "2026-07-07"(可选,默认今日)}
+        """
+        data, err = await self._safe_json(request)
+        if err:
+            return err
+        quota_key = str(data.get("quota_key", "")).strip()
+        if not quota_key:
+            return web.json_response({"error": "quota_key 不能为空"}, status=400)
+        date = str(data.get("date", "")).strip() or shanghai_now_iso()[:10]
+        try:
+            ok = await self.plugin.db.image_quota_repo.reset(quota_key, date)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+        if not ok:
+            return web.json_response({"error": "指定记录不存在"}, status=404)
+        return web.json_response({"ok": True})
 
     async def start(self):
         """启动 Web 服务器"""
