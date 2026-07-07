@@ -195,6 +195,59 @@ class ChatEnginePlugin(Star):
             result.append(msg)
         return result
 
+    @staticmethod
+    def _shorten_image_url(url: str) -> str:
+        """压缩过长的 data URL（只保留 MIME 前缀），HTTP URL 原样保留。"""
+        if url.startswith("data:"):
+            # data:image/jpeg;base64,/9j/... → data:image/jpeg
+            head = url.split(",", 1)[0]
+            return head or "data:image"
+        return url
+
+    @staticmethod
+    def _mark_images_for_text_only_provider(
+        messages: list[dict], modalities: list[str] | None
+    ) -> tuple[list[dict], int]:
+        """对不支持 image 模态的 provider，把 image_url 块替换为带标识的文本块。
+
+        在 ``sanitize_contexts_by_modalities`` **之前**调用：先把 image_url 编码为
+        ``[Image: msg=<id>, url=<url>]`` 文本块，sanitize 看到的就不再是 image_url
+        类型，不会再替换成裸 ``[Image]``，从而让 LLM 在纯文本 provider 下仍能看到
+        图片的 message_id 与链接，便于准确调用 edit_image / view_image。
+
+        支持图片模态时直接返回原消息（保留 image_url 块供 provider 读取）。
+        data URL 只保留 MIME 前缀（``data:image/jpeg``），避免 base64 撑爆 token。
+
+        Returns:
+            ``(处理后的消息列表, 被标记的图片块数量)``
+        """
+        if not modalities or "image" in modalities:
+            return messages, 0
+
+        result: list[dict] = []
+        marked = 0
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                result.append(msg)
+                continue
+            msg_id = msg.get("message_id", "")
+            new_parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    url = part.get("image_url", {}).get("url", "")
+                    url_repr = ChatEnginePlugin._shorten_image_url(url)
+                    if msg_id:
+                        marker = f"[Image: msg={msg_id}, url={url_repr}]"
+                    else:
+                        marker = f"[Image: url={url_repr}]"
+                    new_parts.append({"type": "text", "text": marker})
+                    marked += 1
+                else:
+                    new_parts.append(part)
+            result.append({**msg, "content": new_parts})
+        return result, marked
+
     def _enrich_context_with_ids(self, context_messages: list[dict]) -> list[dict]:
         """为上下文消息列表中的用户/被动消息注入 [msg:ID] 标记。
 
@@ -900,20 +953,25 @@ class ChatEnginePlugin(Star):
                 try:
                     # 模态过滤（不同 Provider 可能支持不同模态，每轮重算）
                     modalities = await self.context_mgr.get_modalities(provider)
-                    llm_contexts = list(context_messages)
-                    llm_user_msg = user_msg
                     all_messages = copy.deepcopy(list(context_messages) + [user_msg])
+                    all_messages, marked_images = self._mark_images_for_text_only_provider(
+                        all_messages, modalities
+                    )
+                    if marked_images and log_tag == "[ChatEngine]":
+                        logger.info(
+                            f"{log_tag} 文本模态图片标记: {marked_images} 个图片块"
+                        )
                     sanitized, stats = sanitize_contexts_by_modalities(
                         all_messages, modalities
                     )
+                    llm_contexts = sanitized[:-1]
+                    llm_user_msg = sanitized[-1]
                     if stats.changed:
                         if log_tag == "[ChatEngine]":
                             logger.info(
                                 f"{log_tag} 模态过滤: 替换 {stats.fixed_image_blocks} 个图片块, "
                                 f"{stats.fixed_audio_blocks} 个音频块"
                             )
-                        llm_contexts = sanitized[:-1]
-                        llm_user_msg = sanitized[-1]
 
                     # 剥离历史图片
                     llm_contexts = self._strip_history_images(llm_contexts)
