@@ -301,9 +301,16 @@ class ProactiveManager:
 
     # 核心：生成并发送主动回复
 
-    async def _send_proactive(self, session_key: str, reason: str) -> bool:
+    async def _send_proactive(
+        self, session_key: str, reason: str, include_reason: bool = True
+    ) -> bool:
         """生成主动回复并发送。成功发送返回 True；任何原因未发送（LLM 返回空、
         清洗后为空、发送失败、异常）返回 False，供调用方决定后续动作（如是否冷却）。
+
+        Args:
+            include_reason: 是否把 reason 作为 "Trigger reason" 放进生成 prompt。
+                AI 判断触发时应传 False —— reason 是机器内部决策，塞给生成 LLM
+                只是同义反复的"人机消息"，不如直接用群聊上下文让它自然插话。
         """
         session = self._sessions.get(session_key)
         if not session:
@@ -365,7 +372,11 @@ class ProactiveManager:
             recent_text = await self._get_recent_context(session_key)
 
             # 5. 构建 prompt
-            prompt_parts = [f"Trigger reason: {reason}"]
+            #    include_reason=False 时不塞 Trigger reason（避免把机器决策伪装成
+            #    user 输入），直接用群聊上下文让 LLM 生成自然插话
+            prompt_parts = []
+            if include_reason and reason:
+                prompt_parts.append(f"Trigger reason: {reason}")
             if recent_text:
                 prompt_parts.append(f"Recent conversation:\n{recent_text}")
             prompt = "\n\n".join(prompt_parts)
@@ -511,8 +522,9 @@ class ProactiveManager:
             logger.info(f"[Proactive] AI 判断为 NO，不插话 [{session_key}]")
             return
 
-        reason = "AI 判断当前群聊上下文适合主动插话"
-        sent = await self._send_proactive(session_key, reason)
+        # AI 判断触发：不把 reason 塞进生成 prompt（那是同义反复的人机消息），
+        # 直接让 LLM 基于群聊上下文 + 人设生成自然插话
+        sent = await self._send_proactive(session_key, "", include_reason=False)
 
         # 仅在真正发送成功后才进入冷却；生成失败/模型放弃/发送失败都不冷却，
         # 让下次攒够消息时重新判断，避免"没发消息还白白冷却"。
