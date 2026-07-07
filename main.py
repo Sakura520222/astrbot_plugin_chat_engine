@@ -2503,8 +2503,12 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             logger.debug(f"[ChatEngine] 加载数据库上下文失败: {e}")
 
         # 找出所有同 message_id 的消息，逐一尝试提取图片
+        # message_id 统一转 str 比较（event 侧可能是 int）
+        message_id_str = str(message_id)
         matching = [
-            msg for msg in candidates if msg.get("message_id") == message_id
+            msg
+            for msg in candidates
+            if str(msg.get("message_id", "")) == message_id_str
         ]
         if not matching:
             return (
@@ -2544,14 +2548,26 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         Returns:
             ``(error_msg, urls)``。error_msg 非 None 表示失败。
         """
-        current_id = getattr(event.message_obj, "message_id", "")
-        if message_id == current_id:
+        # message_id 可能为 str（LLM 工具参数）或 int（event.message_obj.message_id），
+        # 统一转 str 比较避免 int/str 不等导致走不到 event 分支
+        message_id_str = str(message_id)
+        current_id = str(getattr(event.message_obj, "message_id", ""))
+        if message_id_str == current_id:
             urls = await self._extract_image_urls(event)
             if urls:
                 return None, urls
-            # event 提取失败（如纯文本消息被误传），继续回退到上下文查找
+            logger.info(
+                f"[ChatEngine] 当前消息图片提取为空: msg={message_id_str}，"
+                "回退到上下文查找"
+            )
         session_key = self.context_mgr.build_session_key(event)
-        return await self._resolve_message_image_urls(session_key, message_id)
+        err, urls = await self._resolve_message_image_urls(session_key, message_id_str)
+        if err:
+            logger.info(
+                f"[ChatEngine] 图片查找失败: msg={message_id_str}, "
+                f"current_id={current_id}, err={err}"
+            )
+        return err, urls
 
     # 图片查看工具 — LLM Tool Call
 
