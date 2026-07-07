@@ -425,18 +425,13 @@ class ProactiveManager:
             session["round_count"] = 0
             await self._save_registry()
 
-            # 10. 保存到上下文
+            # 10. 保存到上下文（只存 assistant 回复，不伪造 user 触发消息，
+            #     避免 [Proactive Reply Trigger] 这类系统标记污染上下文、误导后续判断）
             if self._context_mgr:
                 try:
-                    user_msg = {
-                        "role": "user",
-                        "message_id": "",
-                        "content": f"[Proactive Reply Trigger] {reason}",
-                    }
                     assistant_msg = {"role": "assistant", "content": text}
-                    await self._context_mgr.append_and_save(
+                    await self._context_mgr.append_assistant_message(
                         session_key,
-                        user_msg,
                         assistant_msg,
                         provider=provider,
                     )

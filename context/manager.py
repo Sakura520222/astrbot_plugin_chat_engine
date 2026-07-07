@@ -304,6 +304,23 @@ class ChatContextManager:
         """
         await self._load_compress_save(session_key, [user_msg], provider=provider)
 
+    async def append_assistant_message(
+        self,
+        session_key: str,
+        assistant_msg: dict,
+        provider=None,
+    ) -> None:
+        """追加一条助手消息（用于主动回复等无对应用户输入的场景）。
+
+        与 append_and_save 的区别：不追加伪造的 user 触发消息，避免把
+        "[Proactive Reply Trigger] ..." 这类系统标记伪装成用户发言而污染
+        上下文，进而误导后续 LLM 对话与 AI 判断。主动回复只需让 bot 记得
+        自己说过什么即可，不需要虚构一条用户消息。
+        """
+        await self._load_compress_save(
+            session_key, [assistant_msg], provider=provider
+        )
+
     def reload_compressor(self):
         """重新加载压缩器 (配置变更后调用)"""
         self.compressor = ContextCompressorFactory.create(
