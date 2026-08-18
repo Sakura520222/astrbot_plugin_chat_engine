@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "display_name": "Chat Engine"
+  },
+  "pages": {
+    "chat-engine": {
+      "title": "Chat Engine 管理面板"
+    }
+  }
+}

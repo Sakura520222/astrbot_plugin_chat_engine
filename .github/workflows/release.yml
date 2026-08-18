@@ -71,6 +71,7 @@ jobs:
             context/ \
             db/ \
             debounce/ \
+            image_gen/ \
             memory/ \
             pages/ \
             persona/ \

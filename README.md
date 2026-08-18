@@ -116,18 +116,22 @@
 - 支持清理句尾多余字符，可自定义正则
 
 ### WebUI 管理面板
-- 独立 aiohttp 服务，可配置端口
-- 登录认证: 支持配置用户名和密码，保护管理面板访问
-- 人格管理 (CRUD)
-- 会话管理 (查看、删除)
-- 归档管理 (查看归档列表、预览上下文、恢复、删除)
-- LLM 预览（查看发送给 LLM 的完整上下文、System Prompt、工具列表和 Token 估算）
-- 压缩配置
-- 用户标识格式配置
-- 工具管理
-- 记忆管理（查看、搜索）
-- 图片配额管理（查看今日用量、手动重置）
-- 主动回复会话设置
+- **AstrBot 插件 Pages**: 嵌入式管理面板，通过 Dashboard 访问
+- **访问入口**: AstrBot Dashboard → 插件 → astrbot_plugin_chat_engine → 打开页面「Chat Engine 管理面板」
+- **认证与权限**: 认证与访问控制由 Dashboard 承担，无需独立端口与密码配置
+- **功能范围**:
+  - 人格管理 (CRUD)
+  - 会话管理 (查看、删除)
+  - 归档管理 (查看归档列表、预览上下文、恢复、删除)
+  - LLM 预览（查看发送给 LLM 的完整上下文、System Prompt、工具列表和 Token 估算）
+  - 压缩配置
+  - 用户标识格式配置
+  - 工具管理
+  - 记忆管理（查看、搜索）
+  - 图片配额管理（查看今日用量、手动重置）
+  - 主动回复会话设置
+- **主题支持**: 浅色/深色主题，跟随 Dashboard 主题切换
+- **系统要求**: 需要 AstrBot >= 4.27.0
 
 ## 安装
 
@@ -196,10 +200,6 @@
 | `image_gen_admin_only` | `true` | 画图/改图仅管理员可用，关闭后允许普通用户使用（受每日配额约束） |
 | `image_gen_quota_dimension` | `user` | 普通用户配额维度: `user`（每用户各 N 次）/ `session`（每会话共享 N 次） |
 | `image_gen_daily_quota` | `10` | 普通用户每日配额（画图 + 改图共用额度，管理员不受限制） |
-| `web_port` | `8765` | WebUI 端口 |
-| `web_auth_enabled` | `false` | 启用 WebUI 登录认证 |
-| `web_username` | `admin` | WebUI 登录用户名 |
-| `web_password` | `""` | WebUI 登录密码 |
 | `db_type` | `sqlite` | 数据库类型: `sqlite` / `mysql` |
 | `mysql_url` | `""` | MySQL 连接 URL |
 
@@ -242,9 +242,8 @@ astrbot_plugin_chat_engine/
 │   └── command_dispatcher.py  # 命令扫描与分发 (LLM 自然语言执行插件命令)
 ├── utils/                     # 工具函数
 │   └── __init__.py            # 通用工具函数 (上海时区时间格式化等)
-└── web/                       # WebUI
-    ├── server.py              # aiohttp REST API (含 LLM 预览 + 记忆管理 + 归档管理 + 登录认证)
-    └── static/                # 前端 HTML/CSS/JS
+└── web/                       # WebUI (AstrBot 插件 Pages)
+    └── api.py                 # REST API (含 LLM 预览 + 记忆管理 + 归档管理)
 ```
 
 ## 技术细节
@@ -279,7 +278,7 @@ astrbot_plugin_chat_engine/
 
 ## 兼容性
 
-- AstrBot v4.25+
+- AstrBot v4.27.0+ (WebUI 管理面板需要插件 Pages 支持)
 - 平台: QQ OneBot (aiocqhttp) / Telegram (未测试)
 - 数据库: SQLite / MySQL
 - Python 3.10+

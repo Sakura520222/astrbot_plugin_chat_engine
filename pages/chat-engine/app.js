@@ -1,27 +1,33 @@
 // Chat Engine WebUI — Frontend Application v2
 
-
-const API_BASE = '';
+// 注意:bridge SDK 由 AstrBot 注入,加载顺序不保证先于本文件 — 必须调用时动态获取
+async function api(method, path, body = null, params = null) {
+    const bridge = window.AstrBotPluginPage;
+    if (method === 'GET') return bridge.apiGet(path, params || undefined);
+    return bridge.apiPost(path, body || {});
+}
 
 // Utility Functions
 
-async function api(method, path, body = null) {
-    const opts = {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-    };
-    const token = localStorage.getItem('auth_token');
-    if (token) opts.headers['Authorization'] = `Bearer ${token}`;
-    if (body) opts.body = JSON.stringify(body);
-    const resp = await fetch(`${API_BASE}${path}`, opts);
-    if (resp.status === 401) {
-        localStorage.removeItem('auth_token');
-        window.location.href = '/login';
-        throw new Error('未授权');
-    }
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-    return data;
+// sandbox iframe 未授权 allow-modals,原生 confirm() 被静默禁用且恒返回 false — 用自建对话框替代
+function confirmDialog(message) {
+    return new Promise(resolve => {
+        const modal = document.getElementById('confirm-modal');
+        const okBtn = document.getElementById('confirm-modal-ok');
+        const cancelBtn = document.getElementById('confirm-modal-cancel');
+        document.getElementById('confirm-modal-msg').textContent = message;
+        modal.classList.remove('hidden');
+        const onOk = () => done(true);
+        const onCancel = () => done(false);
+        const done = (result) => {
+            modal.classList.add('hidden');
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
+            resolve(result);
+        };
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+    });
 }
 
 function toast(msg, type = 'success') {
@@ -218,7 +224,7 @@ async function savePersona(e) {
 
     try {
         if (id) {
-            await api('PUT', `/api/personas/${id}`, { name, system_prompt, is_default });
+            await api('POST', `/api/personas/${id}/update`, { name, system_prompt, is_default });
             toast('人格已更新');
         } else {
             await api('POST', '/api/personas', { name, system_prompt, is_default });
@@ -232,9 +238,9 @@ async function savePersona(e) {
 }
 
 async function deletePersona(id, name) {
-    if (!confirm(`确定要删除人格「${name}」吗？`)) return;
+    if (!(await confirmDialog(`确定要删除人格「${name}」吗？`))) return;
     try {
-        await api('DELETE', `/api/personas/${id}`);
+        await api('POST', `/api/personas/${id}/delete`);
         toast('人格已删除');
         loadPersonas();
     } catch (e) {
@@ -261,7 +267,7 @@ const sessionPageSize = 20;
 
 async function loadSessions() {
     try {
-        const data = await api('GET', `/api/sessions?page=${sessionPage}&page_size=${sessionPageSize}`);
+        const data = await api('GET', '/api/sessions', null, { page: sessionPage, page_size: sessionPageSize });
         renderSessions(data.sessions || [], data.total || 0);
     } catch (e) {
         toast('加载会话失败: ' + e.message, 'error');
@@ -325,7 +331,7 @@ function goSessionPage(page) {
 async function viewSession(key) {
     currentSessionKey = key;
     try {
-        const data = await api('GET', `/api/sessions/${encodeURIComponent(key)}`);
+        const data = await api('GET', `/api/sessions/${key}`);
         const modal = document.getElementById('session-modal');
         const detail = document.getElementById('session-detail');
 
@@ -381,9 +387,9 @@ async function viewSession(key) {
 
 async function clearSession() {
     if (!currentSessionKey) return;
-    if (!confirm('确定清空当前会话上下文？\nToken 计数将一并归零，且不会归档（不可恢复）。')) return;
+    if (!(await confirmDialog('确定清空当前会话上下文？\nToken 计数将一并归零，且不会归档（不可恢复）。'))) return;
     try {
-        await api('POST', `/api/sessions/${encodeURIComponent(currentSessionKey)}/clear`);
+        await api('POST', `/api/sessions/${currentSessionKey}/clear`);
         toast('已清空上下文');
         await viewSession(currentSessionKey);
         loadSessions();
@@ -402,7 +408,7 @@ let currentSessionKey = null;
 async function showLlmPreview() {
     if (!currentSessionKey) return;
     try {
-        const data = await api('GET', `/api/sessions/${encodeURIComponent(currentSessionKey)}/llm-preview`);
+        const data = await api('GET', `/api/sessions/${currentSessionKey}/llm-preview`);
         const container = document.getElementById('llm-preview-content');
 
         const roleColors = {
@@ -482,9 +488,9 @@ function hideLlmPreview() {
 }
 
 async function deleteSession(key) {
-    if (!confirm(`确定要删除会话「${key}」吗？`)) return;
+    if (!(await confirmDialog(`确定要删除会话「${key}」吗？`))) return;
     try {
-        await api('DELETE', `/api/sessions/${encodeURIComponent(key)}`);
+        await api('POST', `/api/sessions/${key}/delete`);
         toast('会话已删除');
         loadSessions();
     } catch (e) {
@@ -501,7 +507,7 @@ let currentArchiveSessionKey = null;
 async function viewArchives(key) {
     currentArchiveSessionKey = key;
     try {
-        const data = await api('GET', `/api/sessions/${encodeURIComponent(key)}/archives`);
+        const data = await api('GET', `/api/sessions/${key}/archives`);
         renderArchives(key, data.archives || []);
     } catch (e) {
         toast('加载归档失败: ' + e.message, 'error');
@@ -548,7 +554,7 @@ function hideArchivesModal() {
 
 async function viewArchiveDetail(archiveId) {
     try {
-        const data = await api('GET', `/api/sessions/${encodeURIComponent(currentArchiveSessionKey)}/archives/${archiveId}`);
+        const data = await api('GET', `/api/sessions/${currentArchiveSessionKey}/archives/${archiveId}`);
         const detail = document.getElementById('archive-detail-content');
         document.getElementById('archive-detail-title').textContent = `归档: ${data.title}`;
 
@@ -595,9 +601,9 @@ function hideArchiveDetail() {
 }
 
 async function restoreArchive(archiveId, title) {
-    if (!confirm(`确定要恢复归档「${title}」吗？当前活跃会话将被自动归档。`)) return;
+    if (!(await confirmDialog(`确定要恢复归档「${title}」吗？当前活跃会话将被自动归档。`))) return;
     try {
-        const data = await api('POST', `/api/sessions/${encodeURIComponent(currentArchiveSessionKey)}/archives/${archiveId}/restore`);
+        const data = await api('POST', `/api/sessions/${currentArchiveSessionKey}/archives/${archiveId}/restore`);
         toast(`已恢复会话: ${data.title}`);
         hideArchivesModal();
         loadSessions();
@@ -607,9 +613,9 @@ async function restoreArchive(archiveId, title) {
 }
 
 async function deleteArchive(archiveId, title) {
-    if (!confirm(`确定要删除归档「${title}」吗？此操作不可撤销。`)) return;
+    if (!(await confirmDialog(`确定要删除归档「${title}」吗？此操作不可撤销。`))) return;
     try {
-        await api('DELETE', `/api/sessions/${encodeURIComponent(currentArchiveSessionKey)}/archives/${archiveId}`);
+        await api('POST', `/api/sessions/${currentArchiveSessionKey}/archives/${archiveId}/delete`);
         toast('归档已删除');
         viewArchives(currentArchiveSessionKey);
     } catch (e) {
@@ -682,7 +688,7 @@ function renderTools(tools) {
 async function toggleTool(name, enabled) {
     const action = enabled ? 'enable' : 'disable';
     try {
-        await api('POST', `/api/tools/${encodeURIComponent(name)}/${action}`);
+        await api('POST', `/api/tools/${name}/${action}`);
     } catch (e) {
         toast(`操作失败: ${e.message}`, 'error');
         loadTools();
@@ -713,7 +719,7 @@ const CONFIG_GROUPS = [
     { id: 'split', label: '分段发送', color: 'yellow', subtitle: '回复拆分与打字节奏模拟' },
     { id: 'clean', label: '文本清洗', color: 'purple', subtitle: 'Emoji / 括号 / 句尾清理' },
     { id: 'image', label: '画图 (OpenAI 兼容)', color: 'rose', subtitle: 'LLM 工具调用生成图片，修改需重启生效', restart: true },
-    { id: 'webui', label: 'WebUI 与数据库', color: 'gray', subtitle: '端口 / 数据库修改需重启；认证项实时生效' },
+    { id: 'database', label: '数据库', color: 'gray', subtitle: '数据库类型修改需重启插件' },
 ];
 
 const CONFIG_FIELDS = [
@@ -775,12 +781,8 @@ const CONFIG_FIELDS = [
     { key: 'image_gen_admin_only', group: 'image', label: '画图/改图仅管理员可用', type: 'checkbox', hint: '开启后，画图和改图工具仅管理员可调用。关闭则允许普通用户使用，受下方每日配额约束。管理员始终不受配额限制。' },
     { key: 'image_gen_quota_dimension', group: 'image', label: '普通用户配额维度', type: 'select', options: ['user', 'session'], hint: 'user: 每个用户每天各 N 次（群聊中互不影响）。session: 每个会话每天共享 N 次（群里所有人共用）。仅当「仅管理员可用」关闭时生效。' },
     { key: 'image_gen_daily_quota', group: 'image', label: '普通用户每日配额', type: 'number', hint: '普通用户每天可使用画图+改图的总次数（共用额度）。仅当「仅管理员可用」关闭时生效。管理员不受此限制。' },
-    { key: 'web_port', group: 'webui', label: 'WebUI 端口', type: 'number', restart: true, hint: '插件管理 WebUI 的独立端口。修改后需重启插件。' },
-    { key: 'db_type', group: 'webui', label: '数据库类型', type: 'select', options: ['sqlite', 'mysql'], restart: true, hint: 'sqlite: 本地文件数据库。mysql: 远程 MySQL 数据库。修改后需重启插件。' },
-    { key: 'mysql_url', group: 'webui', label: 'MySQL 连接 URL', type: 'text', restart: true, hint: '格式: mysql+aiomysql://user:password@host:port/dbname。修改后需重启插件。' },
-    { key: 'web_auth_enabled', group: 'webui', label: '启用 WebUI 登录认证', type: 'checkbox', hint: '开启后，访问 WebUI 管理面板需要先登录。' },
-    { key: 'web_username', group: 'webui', label: 'WebUI 登录用户名', type: 'text', hint: 'WebUI 管理面板的登录用户名。' },
-    { key: 'web_password', group: 'webui', label: 'WebUI 登录密码', type: 'password', sensitive: true, hint: 'WebUI 管理面板的登录密码。留空保存表示不修改。' },
+    { key: 'db_type', group: 'database', label: '数据库类型', type: 'select', options: ['sqlite', 'mysql'], restart: true, hint: 'sqlite: 本地文件数据库。mysql: 远程 MySQL 数据库。修改后需重启插件。' },
+    { key: 'mysql_url', group: 'database', label: 'MySQL 连接 URL', type: 'text', restart: true, hint: '格式: mysql+aiomysql://user:password@host:port/dbname。修改后需重启插件。' },
 ];
 
 let currentConfig = {};
@@ -857,7 +859,7 @@ function renderConfigField(field) {
 }
 
 async function refreshConfigPage(btn = null) {
-    if (!confirm('放弃当前未保存的修改，并重新加载配置？')) return;
+    if (!(await confirmDialog('放弃当前未保存的修改，并重新加载配置？'))) return;
     await refreshPage(btn, loadConfig);
 }
 
@@ -884,12 +886,12 @@ async function saveConfig() {
     });
 
     if (restartChanged.length) {
-        const ok = confirm(`以下配置需重启插件后才会生效：\n  · ${restartChanged.join('\n  · ')}\n\n仍要保存吗？`);
+        const ok = await confirmDialog(`以下配置需重启插件后才会生效：\n  · ${restartChanged.join('\n  · ')}\n\n仍要保存吗？`);
         if (!ok) return;
     }
 
     try {
-        await api('PUT', '/api/config', data);
+        await api('POST', '/api/config/update', data);
         toast(restartChanged.length ? '配置已保存（部分项需重启插件生效）' : '配置已保存');
         await loadConfig();
     } catch (e) {
@@ -962,7 +964,7 @@ function renderImageQuota() {
 }
 
 async function resetImageQuota(quotaKey) {
-    if (!confirm('确定重置该配额记录吗？用量将归零。')) return;
+    if (!(await confirmDialog('确定重置该配额记录吗？用量将归零。'))) return;
     try {
         await api('POST', '/api/image-quota/reset', { quota_key: quotaKey });
         toast('配额已重置');
@@ -982,7 +984,7 @@ let longTermMemories = [];
 
 async function loadMemorySessionList() {
     try {
-        const data = await api('GET', '/api/sessions?page=1&page_size=100');
+        const data = await api('GET', '/api/sessions', null, { page: 1, page_size: 100 });
         const select = document.getElementById('memory-session-select');
         const currentVal = select.value;
         select.innerHTML = '<option value="">选择会话...</option>';
@@ -1017,7 +1019,7 @@ async function onMemorySessionChange() {
 
 async function loadMemories() {
     if (!currentMemorySessionKey) return;
-    const key = encodeURIComponent(currentMemorySessionKey);
+    const key = currentMemorySessionKey;
     try {
         const [shortData, longData] = await Promise.all([
             api('GET', `/api/memories/${key}/short`),
@@ -1120,12 +1122,12 @@ async function saveMemory(e) {
     const editId = document.getElementById('memory-edit-id').value;
     const content = document.getElementById('memory-content-input').value.trim();
     const pinned = type === 'long_term' && document.getElementById('memory-pinned').checked;
-    const key = encodeURIComponent(currentMemorySessionKey);
+    const key = currentMemorySessionKey;
     const path = memTypePath(type);
 
     try {
         if (editId) {
-            await api('PUT', `/api/memories/${key}/${path}/${editId}`, { content, pinned });
+            await api('POST', `/api/memories/${key}/${path}/${editId}/update`, { content, pinned });
             toast('记忆已更新');
         } else {
             await api('POST', `/api/memories/${key}/${path}`, { content, pinned });
@@ -1139,12 +1141,12 @@ async function saveMemory(e) {
 }
 
 async function deleteMemory(type, id) {
-    if (!confirm('确定要删除这条记忆吗？')) return;
+    if (!(await confirmDialog('确定要删除这条记忆吗？'))) return;
     if (!currentMemorySessionKey) return;
-    const key = encodeURIComponent(currentMemorySessionKey);
+    const key = currentMemorySessionKey;
     const path = memTypePath(type);
     try {
-        await api('DELETE', `/api/memories/${key}/${path}/${id}`);
+        await api('POST', `/api/memories/${key}/${path}/${id}/delete`);
         toast('记忆已删除');
         await loadMemories();
     } catch (e) {
@@ -1161,7 +1163,7 @@ let currentProactiveSessionKey = null;
 
 async function loadProactiveSessionList() {
     try {
-        const data = await api('GET', '/api/sessions?page=1&page_size=100');
+        const data = await api('GET', '/api/sessions', null, { page: 1, page_size: 100 });
         const select = document.getElementById('proactive-session-select');
         const currentVal = select.value;
         select.innerHTML = '<option value="">选择会话...</option>';
@@ -1225,9 +1227,9 @@ function updateProactiveToggles() {
 async function toggleProactiveTimeout() {
     if (!currentProactiveSessionKey) return;
     const enabled = document.getElementById('proactive-timeout-toggle').checked;
-    const key = encodeURIComponent(currentProactiveSessionKey);
+    const key = currentProactiveSessionKey;
     try {
-        await api('PUT', `/api/proactive/${key}/timeout`, { enabled });
+        await api('POST', `/api/proactive/${key}/timeout`, { enabled });
         toast(enabled ? '已启用超时主动发言' : '已关闭超时主动发言');
     } catch (e) {
         toast('设置失败: ' + e.message, 'error');
@@ -1238,9 +1240,9 @@ async function toggleProactiveTimeout() {
 async function toggleProactiveRound() {
     if (!currentProactiveSessionKey) return;
     const enabled = document.getElementById('proactive-round-toggle').checked;
-    const key = encodeURIComponent(currentProactiveSessionKey);
+    const key = currentProactiveSessionKey;
     try {
-        await api('PUT', `/api/proactive/${key}/round`, { enabled });
+        await api('POST', `/api/proactive/${key}/round`, { enabled });
         toast(enabled ? '已启用轮数触发' : '已关闭轮数触发');
     } catch (e) {
         toast('设置失败: ' + e.message, 'error');
@@ -1251,9 +1253,9 @@ async function toggleProactiveRound() {
 async function toggleProactiveAiJudge() {
     if (!currentProactiveSessionKey) return;
     const enabled = document.getElementById('proactive-ai-judge-toggle').checked;
-    const key = encodeURIComponent(currentProactiveSessionKey);
+    const key = currentProactiveSessionKey;
     try {
-        await api('PUT', `/api/proactive/${key}/ai_judge`, { enabled });
+        await api('POST', `/api/proactive/${key}/ai_judge`, { enabled });
         toast(enabled ? '已启用 AI 判断插话' : '已关闭 AI 判断插话');
     } catch (e) {
         toast('设置失败: ' + e.message, 'error');
@@ -1261,44 +1263,9 @@ async function toggleProactiveAiJudge() {
     }
 }
 
-// Auth
-
-
-async function checkAuth() {
-    try {
-        const resp = await fetch('/api/auth/status', {
-            headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` },
-        });
-        const data = await resp.json();
-        if (data.enabled && !data.authenticated) {
-            window.location.href = '/login';
-            return false;
-        }
-        if (data.enabled) {
-            const footer = document.getElementById('sidebar-footer');
-            if (footer) footer.style.display = '';
-        }
-        return true;
-    } catch (e) {
-        return true;
-    }
-}
-
-async function logout() {
-    try {
-        await api('POST', '/api/auth/logout');
-    } catch (e) {
-        // Ignore logout request errors
-    }
-    localStorage.removeItem('auth_token');
-    window.location.href = '/login';
-}
-
 // Init
 
 document.addEventListener('DOMContentLoaded', async () => {
-    const ok = await checkAuth();
-    if (!ok) return;
     const savedTab = getUiState('ce_ui_tab') || 'personas';
     const exists = document.querySelector(`.nav-item[data-tab="${savedTab}"]`);
     activateTab(exists ? savedTab : 'personas');

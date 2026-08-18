@@ -46,12 +46,6 @@
         "default": true,
         "hint": "开启后群聊中只有 @Bot 才会触发回复。关闭则回复所有群消息。"
     },
-    "web_port": {
-        "description": "WebUI 端口",
-        "type": "int",
-        "default": 8765,
-        "hint": "插件管理 WebUI 的独立端口。修改后需重启插件。"
-    },
     "enable_tool_calls": {
         "description": "启用 Tool Calls",
         "type": "bool",
@@ -223,24 +217,6 @@
         "type": "bool",
         "default": false,
         "hint": "开启后，支持 LLM 定时回复、超时主动发言、N 轮触发回复等功能。"
-    },
-    "web_auth_enabled": {
-        "description": "启用 WebUI 登录认证",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后，访问 WebUI 管理面板需要先登录。"
-    },
-    "web_username": {
-        "description": "WebUI 登录用户名",
-        "type": "string",
-        "default": "admin",
-        "hint": "WebUI 管理面板的登录用户名。"
-    },
-    "web_password": {
-        "description": "WebUI 登录密码",
-        "type": "string",
-        "default": "",
-        "hint": "WebUI 管理面板的登录密码。留空则密码为空。"
     },
     "proactive_timeout_minutes": {
         "description": "超时主动发言分钟数",

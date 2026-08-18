@@ -22,9 +22,6 @@
                 <li class="nav-item" data-tab="image-quota">图片配额</li>
                 <li class="nav-item" data-tab="config">配置设置</li>
             </ul>
-            <div class="sidebar-footer" id="sidebar-footer" style="display:none">
-                <button class="btn btn-secondary" onclick="logout()" style="width:100%">退出登录</button>
-            </div>
         </nav>
 
         <!-- Main Content -->
@@ -275,6 +272,21 @@
         </div>
     </div>
 
+    <!-- 通用确认对话框(sandbox iframe 禁用原生 confirm) -->
+    <div id="confirm-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>确认操作</h3>
+            </div>
+            <p id="confirm-modal-msg" style="white-space:pre-line;line-height:1.7;margin:0 0 4px;"></p>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="confirm-modal-cancel">取消</button>
+                <button type="button" class="btn btn-danger" id="confirm-modal-ok">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

@@ -1,5 +1,20 @@
 # 变更日志
 
+## [1.4.0] - 2026-08-18
+
+### 重大变更
+- **WebUI 迁移至 AstrBot 插件 Pages**: 管理面板从独立 aiohttp 服务迁移至 AstrBot Dashboard 内嵌页面
+  - 访问入口: AstrBot Dashboard → 插件 → astrbot_plugin_chat_engine → 打开页面「Chat Engine 管理面板」
+  - 认证与访问控制由 Dashboard 承担，移除独立端口与登录认证
+  - 新增浅色/深色主题支持，跟随 Dashboard 主题切换
+  - 移除配置项: `web_port`、`web_auth_enabled`、`web_username`、`web_password`
+  - 系统要求: 需要 AstrBot >= 4.27.0
+
+### 移除
+- 独立 WebUI 服务器 (`web/server.py`)
+- 前端静态文件 (`web/static/`)
+- 端口与认证配置项 (见「重大变更」)
+
 ## [1.3.8] - 2026-07-08
 
 ### 新增

@@ -7,7 +7,7 @@
 - Tool Calls (扫描所有工具，原生 function calling)
 - 上下文压缩 (轮数限制 / Token 阈值 LLM 总结)
 - 记忆系统 (短期记忆 / 长期记忆 / LLM 工具主动记忆 / 自动总结)
-- WebUI 管理面板 (独立 aiohttp 服务)
+- WebUI 管理面板 (AstrBot 插件 Pages)
 """
 
 import asyncio
@@ -41,7 +41,7 @@ from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
 from .utils import format_current_time, shanghai_now_iso
 from .utils.config import cfg_bool, cfg_float, cfg_int
-from .web.server import ChatWebServer
+from .web.api import register_web_api_routes
 
 
 class _ToolCallContext:
@@ -84,8 +84,8 @@ _tool_call_ctx: contextvars.ContextVar[_ToolCallContext | None] = (
 @register(
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
-    "完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、多会话管理、人格系统、Tool Calls、上下文压缩、记忆系统和 WebUI 管理面板。",
-    "1.3.8",
+    "完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、多会话管理、人格系统、Tool Calls、上下文压缩、记忆系统和 Dashboard 管理面板。",
+    "1.4.0",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -110,7 +110,6 @@ class ChatEnginePlugin(Star):
         self.debouncer: MessageDebouncer = None
         self.image_client: OpenAIImageClient | None = None
         self.cmd_dispatcher: CommandDispatcher = None
-        self.web_server: ChatWebServer = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
         self._last_tool_images: list[dict] | None = (
             None  # 当前工具调用产生的图片（单次执行生命周期）
@@ -505,18 +504,14 @@ class ChatEnginePlugin(Star):
             self.image_client = None
             logger.info("[ChatEngine] 画图工具未启用")
 
-        # 启动 WebUI
-        web_port = self._cfg_int("web_port", 8765)
-        self.web_server = ChatWebServer(self, port=web_port)
-        await self.web_server.start()
+        # 注册 Dashboard 插件 Pages Web API(认证继承 Dashboard)
+        register_web_api_routes(self)
 
-        logger.info(f"[ChatEngine] 初始化完成, WebUI: http://localhost:{web_port}")
+        logger.info("[ChatEngine] 初始化完成, WebAPI 已注册至 Dashboard 插件页")
 
     async def terminate(self):
         """插件停用/重载时调用"""
         logger.info("[ChatEngine] 正在关闭...")
-        if self.web_server:
-            await self.web_server.stop()
         if self.memory_mgr:
             await self.memory_mgr.close()
         if self.proactive_mgr:
