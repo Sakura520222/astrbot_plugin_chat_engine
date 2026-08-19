@@ -664,22 +664,25 @@ function renderTools(tools) {
     for (const [source, items] of Object.entries(groups)) {
         if (!items.length) continue;
         html += `<div class="tool-group-title">${sourceLabels[source] || source} (${items.length})</div>`;
-        html += items.map(t => `
-            <div class="card tool-card">
+        html += items.map(t => {
+            const unavailable = t.available === false;
+            return `
+            <div class="card tool-card${unavailable ? ' tool-card-unavailable' : ''}">
                 <label class="tool-switch">
-                    <input type="checkbox" ${t.enabled ? 'checked' : ''} onchange="toggleTool('${escapeHtml(t.name)}', this.checked)">
+                    <input type="checkbox" ${t.enabled ? 'checked' : ''} ${unavailable ? 'disabled' : ''} onchange="toggleTool('${escapeHtml(t.name)}', this.checked)">
                     <span class="slider"></span>
                 </label>
                 <div class="tool-card-info">
                     <div class="tool-card-title">
                         ${escapeHtml(t.name)}
                         <span class="badge badge-${t.source}">${t.source}</span>
-                        ${!t.enabled ? '<span class="badge badge-disabled">已禁用</span>' : ''}
+                        ${unavailable ? '<span class="badge badge-unavailable" title="所属插件未启用，或工具已在 AstrBot 中停用">不可用</span>' : ''}
+                        ${!t.enabled && !unavailable ? '<span class="badge badge-disabled">已禁用</span>' : ''}
                     </div>
                     <div class="tool-card-desc">${escapeHtml(t.description || '无描述')}</div>
                 </div>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
     }
 
     container.innerHTML = html;

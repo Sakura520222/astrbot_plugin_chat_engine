@@ -26,6 +26,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core import sp
 from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
 
 from .context.manager import ChatContextManager
@@ -1333,6 +1334,44 @@ class ChatEnginePlugin(Star):
         self._accumulate_token_usage(ctx, system_prompt, current_contexts, response)
         ctx.final_response = response
 
+    async def _check_tool_permission(
+        self, tool_name: str, event: AstrMessageEvent | None
+    ) -> str | None:
+        """检查 AstrBot Dashboard 配置的工具权限，返回错误信息或 None (放行)。
+
+        与官方 FunctionToolManager._check_tool_permission / _PermissionGuardedTool
+        行为对齐：仅非 builtin 工具受 tool_permissions 配置约束（builtin 工具
+        自带权限检查，本插件执行时走 tool.call() 分支同样会经过）；未配置的
+        工具默认 member (放行)，仅显式配置为 admin 的工具要求管理员身份。
+        """
+        tool_manager = self.context.get_llm_tool_manager()
+        try:
+            if tool_manager.is_builtin_tool(tool_name):
+                return None
+        except Exception:
+            # 判定失败时按官方默认 member 处理，不阻断
+            return None
+
+        try:
+            perms_raw = await sp.global_get("tool_permissions", {})
+        except Exception:
+            return None
+        defaults = perms_raw.get("_default", {}) if isinstance(perms_raw, dict) else {}
+        if defaults.get(tool_name) != "admin":
+            return None
+
+        if event is None or not event.is_admin():
+            sender_id = (
+                event.get_sender_id() if event is not None else "unknown"
+            )
+            return (
+                f"error: Permission denied. The tool '{tool_name}' requires admin "
+                f"privileges. Your ID: {sender_id}. "
+                "该工具被设置为仅管理员可用，请告知用户联系管理员执行，"
+                "或在 AstrBot 管理面板调整该工具权限。"
+            )
+        return None
+
     async def _execute_tool(
         self,
         tool_name: str,
@@ -1361,6 +1400,15 @@ class ChatEnginePlugin(Star):
                     {"error": f"工具 '{tool_name}' 未找到"},
                     ensure_ascii=False,
                 )
+
+            # Dashboard 中配置为"仅管理员"的工具，非管理员调用时拒绝
+            # (对齐 AstrBot 官方 _PermissionGuardedTool 的权限守卫)
+            perm_error = await self._check_tool_permission(tool_name, event)
+            if perm_error:
+                logger.warning(
+                    f"[ChatEngine] 拒绝非管理员调用工具 '{tool_name}'"
+                )
+                return json.dumps({"error": perm_error}, ensure_ascii=False)
 
             # 调用工具的 handler
             if hasattr(tool, "handler") and tool.handler:

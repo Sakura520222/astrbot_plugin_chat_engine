@@ -316,6 +316,16 @@ body {
     color: var(--danger);
 }
 
+.badge-unavailable {
+    background: var(--bg-inset);
+    color: var(--text-3);
+    border: 1px solid var(--border);
+}
+
+.tool-card-unavailable .tool-card-desc {
+    opacity: 0.55;
+}
+
 /* Buttons */
 
 .btn {

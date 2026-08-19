@@ -4,6 +4,7 @@ Scans builtin tools, plugin-registered tools, and MCP tools.
 
 from astrbot.api import logger
 from astrbot.core.agent.tool import ToolSet
+from astrbot.core.star.star import star_map
 
 
 class ToolScanner:
@@ -16,6 +17,30 @@ class ToolScanner:
                               self.context.get_llm_tool_manager()
         """
         self.manager = llm_tool_manager
+
+    @staticmethod
+    def _is_tool_available(tool) -> bool:
+        """判断工具当前是否可用。
+
+        需同时满足两个条件：
+        1. tool.active 为 True — AstrBot 在插件被禁用（turn_off_plugin）
+           或工具被单独停用时置为 False
+        2. 所属插件已激活 — AstrBot 重启后仅按 inactivated_llm_tools 恢复
+           active 标志，被禁用插件的工具仍以 active=True 注册在 func_list，
+           需通过 star_map 的 activated 状态兜底判断
+
+        builtin / MCP 工具无所属插件（handler_module_path 为空），仅检查 active。
+        """
+        if not getattr(tool, "active", True):
+            return False
+        module_path = getattr(tool, "handler_module_path", None)
+        if module_path:
+            plugin_meta = star_map.get(module_path)
+            if plugin_meta is not None and not getattr(
+                plugin_meta, "activated", False
+            ):
+                return False
+        return True
 
     def scan_all_tools(self) -> list[dict]:
         """扫描所有注册的工具 (builtin + plugin + MCP)
@@ -56,7 +81,7 @@ class ToolScanner:
             "description": tool.description or "",
             "parameters": tool.parameters if isinstance(tool.parameters, dict) else {},
             "source": source,
-            "active": getattr(tool, "active", True),
+            "available": self._is_tool_available(tool),
         }
 
     def build_active_tool_set(self, enabled_names: set[str]) -> ToolSet:
@@ -75,7 +100,7 @@ class ToolScanner:
         try:
             for tool in self.manager.iter_builtin_tools():
                 if tool.name in enabled_names and tool.name not in seen:
-                    if getattr(tool, "active", True):
+                    if self._is_tool_available(tool):
                         tool_set.add_tool(tool)
                         seen.add(tool.name)
         except Exception:
@@ -85,7 +110,7 @@ class ToolScanner:
         try:
             for tool in self.manager.func_list:
                 if tool.name in enabled_names and tool.name not in seen:
-                    if getattr(tool, "active", True):
+                    if self._is_tool_available(tool):
                         tool_set.add_tool(tool)
                         seen.add(tool.name)
         except Exception:
@@ -103,6 +128,9 @@ class ToolScanner:
         lines = []
         for info in tools_info:
             if info["name"] not in enabled_names:
+                continue
+            # 所属插件未启用 / 工具已被 AstrBot 停用的工具不暴露给 LLM
+            if not info.get("available", True):
                 continue
             desc = info["description"] or "无描述"
             params = info.get("parameters", {})
