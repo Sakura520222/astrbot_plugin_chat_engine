@@ -398,6 +398,7 @@ class ChatEnginePlugin(Star):
             config=self.config,
             provider_getter=_get_provider,
             image_store=self.db.image_store,
+            astrbot_config_getter=lambda: self.context.get_config(),
         )
 
         # 工具管理器
@@ -1157,6 +1158,19 @@ class ChatEnginePlugin(Star):
 
     # LLM 调用 + Tool Call 循环
 
+    @staticmethod
+    def _dump_tool_calls(response) -> list[dict]:
+        """把 LLMResponse 的 tool_calls 转为 OpenAI dict 格式（存入上下文）。
+
+        使用 4.27.1+ 的 to_openai_tool_calls_model；旧 to_openai_tool_calls 已被
+        AstrBot 标记废弃（4.27.1 起触发运行时警告）。exclude_none 确保输出形状
+        与旧 dict 版本一致（extra_content 为 None 时不出现）。
+        """
+        return [
+            tc.model_dump(exclude_none=True)
+            for tc in response.to_openai_tool_calls_model()
+        ]
+
     def _accumulate_token_usage(
         self, ctx: _ToolCallContext, system_prompt: str, contexts: list[dict], response
     ) -> None:
@@ -1171,7 +1185,7 @@ class ChatEnginePlugin(Star):
         if hasattr(response, "role") and response.role == "err":
             return
         tool_calls = (
-            response.to_openai_tool_calls()
+            self._dump_tool_calls(response)
             if getattr(response, "tools_call_name", None)
             else None
         )
@@ -1255,7 +1269,7 @@ class ChatEnginePlugin(Star):
             assistant_msg = {
                 "role": "assistant",
                 "content": assistant_content,
-                "tool_calls": response.to_openai_tool_calls(),
+                "tool_calls": self._dump_tool_calls(response),
             }
             current_contexts.append(assistant_msg)
             ctx.intermediate_msgs.append(assistant_msg)

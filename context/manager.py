@@ -7,9 +7,11 @@ import asyncio
 from astrbot.api import logger
 from astrbot.api.message_components import Reply
 from astrbot.api.platform import MessageType
+from astrbot.core.utils.llm_metadata import LLM_METADATAS
 
 from ..db.persona_repo import PersonaRepository
 from ..db.session_repo import SessionRepository
+from ..utils.config import cfg_int
 from .compressor import BaseCompressor, ContextCompressorFactory
 from .token_counter import TokenEstimator
 
@@ -30,12 +32,14 @@ class ChatContextManager:
         config: dict,
         provider_getter=None,
         image_store=None,
+        astrbot_config_getter=None,
     ):
         self.repo = session_repo
         self.persona_repo = persona_repo
         self.config = config
         self.provider_getter = provider_getter
         self.image_store = image_store
+        self.astrbot_config_getter = astrbot_config_getter
         self.compressor: BaseCompressor = ContextCompressorFactory.create(
             config, provider_getter
         )
@@ -136,13 +140,29 @@ class ChatContextManager:
     async def get_max_context_tokens(self, provider) -> int:
         """获取模型最大上下文 Token 数。
 
-        优先从 provider 配置获取，成功时缓存到实例变量并回填到插件配置，
-        确保 provider 不可用时也有合理的备选值，同时 WebUI 可显示检测到的值。
+        查找顺序（对齐 AstrBot 本体的三级逻辑 astr_main_agent）：
+        1. provider 配置中用户手填的 max_context_tokens；
+        2. AstrBot LLM_METADATAS 模型元数据 — 本插件抑制了 AstrBot 默认
+           agent 流程，本体在流程内的回填不会执行，需自行查询。元数据由
+           AstrBot 启动时异步拉取并就地更新，进程内共享，直接读取零开销；
+        3. 缓存的备选值（provider 不可用时兜底）；
+        4. AstrBot 全局 provider_settings.fallback_max_context_tokens。
+
+        取到有效值时缓存到实例变量并回填到插件配置，确保 provider 不可用
+        时也有合理的备选值，同时 WebUI 可显示检测到的值。
         """
         try:
             max_tokens = provider.provider_config.get("max_context_tokens", 0)
         except Exception:
             max_tokens = 0
+        if max_tokens <= 0:
+            # 未手填（0 = 自动）→ 从模型元数据查询
+            try:
+                model_info = LLM_METADATAS.get(provider.get_model())
+                if model_info:
+                    max_tokens = model_info["limit"]["context"]
+            except Exception:
+                max_tokens = 0
         if max_tokens > 0:
             self._cached_max_context_tokens = max_tokens
             # 仅在值变化时回填并持久化，避免每条消息都写磁盘
@@ -157,6 +177,15 @@ class ChatContextManager:
         # provider 未报告，使用缓存的备选值
         if self._cached_max_context_tokens is not None:
             return self._cached_max_context_tokens
+        # AstrBot 全局 fallback（与本体的最终兜底一致，默认 128000）
+        if self.astrbot_config_getter:
+            try:
+                astrbot_config = self.astrbot_config_getter()
+                settings = getattr(astrbot_config, "provider_settings", None)
+                if settings:
+                    return cfg_int(settings, "fallback_max_context_tokens", 128000)
+            except Exception:
+                pass
         return 128000
 
     async def get_modalities(self, provider) -> list[str]:
