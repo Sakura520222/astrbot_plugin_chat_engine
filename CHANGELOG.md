@@ -1,6 +1,6 @@
 # 变更日志
 
-## [1.4.0] - 2026-08-18
+## [1.4.0] - 2026-08-19
 
 ### 重大变更
 - **WebUI 迁移至 AstrBot 插件 Pages**: 管理面板从独立 aiohttp 服务迁移至 AstrBot Dashboard 内嵌页面
@@ -10,10 +10,33 @@
   - 移除配置项: `web_port`、`web_auth_enabled`、`web_username`、`web_password`
   - 系统要求: 需要 AstrBot >= 4.27.0
 
+### 新增
+- **LLM 管道钩子广播**: 对齐 AstrBot 官方管道，在 LLM 调用前后广播钩子，解决本插件抑制官方 LLM 管道后、依赖钩子的插件（如 meme_manager 语义表情包）收不到通知而失效的问题
+  - 广播 `on_llm_request`（含 `OnWaitingLLMRequestEvent`）、`on_llm_response`、`on_decorating_result`、`after_message_sent` 四类钩子
+  - 钩子对 `system_prompt` / `func_tool` 的改写会被采用，插件可借此注入提示词、移除不可用工具
+  - 消息装饰钩子附加的非文本组件（如表情图片）随消息一同发送；结果以 `LLM_RESULT` 挂到事件供插件读取，钩子结束后取回改写内容并 `clear_result`，避免框架 respond 阶段重复发送
+  - 每条消息只广播一次，Provider 回退时复用首次结果；钩子终止事件传播时静默放弃本轮回复（返回空而非报错，避免被当成 LLM 失败）；钩子广播异常仅记录日志，不影响正常聊天
+- **工具权限守卫**: AstrBot Dashboard 中配置为「仅管理员」的工具，非管理员通过 LLM 调用时返回权限错误并引导联系管理员
+  - 对齐官方 `_PermissionGuardedTool` 行为：仅非 builtin 工具受 `tool_permissions` 配置约束（builtin 工具自带权限检查），未配置的工具默认放行
+
+### 改进
+- **工具可用性实时判定**: 新增 `ToolScanner._is_tool_available`，同时检查工具 `active` 标志与所属插件激活状态（经 `star_map` 兜底——AstrBot 重启后仅恢复 `inactivated_llm_tools` 的 active 标志，被禁用插件的工具仍以 active=True 注册）
+  - `get_enabled_names` 重构为「用户禁用偏好（数据库、带缓存）+ 可用性（每次实时扫描）」，插件启停后立即生效，无需重启
+  - 不可用工具不再暴露给 LLM：工具集构建与系统提示中的工具指引文本同步过滤
+  - WebUI 工具卡片对不可用工具显示「不可用」徽章并禁用开关
+- **上下文窗口查询对齐本体**: `get_max_context_tokens` 采用与 AstrBot `astr_main_agent` 一致的查找顺序：provider 手填 `max_context_tokens` → 模型元数据 `LLM_METADATAS`（AstrBot 启动时拉取、进程内共享，读取零开销）→ 缓存备选值 → 全局 `provider_settings.fallback_max_context_tokens`
+  - 本插件抑制了 AstrBot 默认 agent 流程，本体流程内的元数据回填不会执行，此前在未手填配置时只能落到固定 128000 兜底
+- **tool_calls 序列化 API 迁移**: 存入上下文的 tool_calls 由已废弃的 `to_openai_tool_calls()`（4.27.1 起触发运行时废弃警告）迁移到 `to_openai_tool_calls_model()` + `exclude_none`，输出形状与旧版一致
+
 ### 移除
 - 独立 WebUI 服务器 (`web/server.py`)
 - 前端静态文件 (`web/static/`)
 - 端口与认证配置项 (见「重大变更」)
+
+### 配置项新增
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `broadcast_llm_hooks` | `true` | 广播 AstrBot LLM 管道钩子，兼容依赖钩子的插件（如 meme_manager 表情包） |
 
 ## [1.3.8] - 2026-07-08
 

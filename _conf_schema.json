@@ -58,6 +58,12 @@
         "default": 10,
         "hint": "单次对话中工具调用的最大循环次数。"
     },
+    "broadcast_llm_hooks": {
+        "description": "广播 LLM 管道钩子",
+        "type": "bool",
+        "default": true,
+        "hint": "对齐 AstrBot 官方管道，在 LLM 调用前后广播 on_llm_request / on_llm_response / on_decorating_result / after_message_sent 钩子，使依赖钩子的插件（如 meme_manager 语义表情包）正常工作。"
+    },
     "db_type": {
         "description": "数据库类型",
         "type": "string",

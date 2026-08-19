@@ -156,6 +156,7 @@
 | `require_at_in_group` | `true` | 群聊是否需要 @Bot |
 | `enable_tool_calls` | `true` | 启用原生 Function Calling |
 | `max_tool_rounds` | `10` | 最大工具调用轮数 |
+| `broadcast_llm_hooks` | `true` | 广播 AstrBot LLM 管道钩子，兼容依赖钩子的插件（如 meme_manager 表情包） |
 | `enable_passive_record` | `false` | 启用被动记录群聊消息 |
 | `enable_split_send` | `false` | 启用分段发送 |
 | `split_mode` | `sentence` | 分段模式: `sentence` / `newline` / `smart` |

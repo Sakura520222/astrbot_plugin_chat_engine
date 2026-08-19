@@ -25,9 +25,16 @@ import emoji as _emoji_lib
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain, Reply
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core import sp
+from astrbot.core.message.message_event_result import (
+    MessageEventResult,
+    ResultContentType,
+)
+from astrbot.core.pipeline.context_utils import call_event_hook
 from astrbot.core.provider.modalities import sanitize_contexts_by_modalities
+from astrbot.core.star.star_handler import EventType
 
 from .context.manager import ChatContextManager
 from .context.token_counter import TokenEstimator
@@ -830,6 +837,73 @@ class ChatEnginePlugin(Star):
             except Exception:
                 pass
 
+    # AstrBot 管道钩子广播 — 兼容依赖 LLM 管道钩子的插件
+
+    @staticmethod
+    def _extract_prompt_text(user_msg: dict) -> str:
+        """从 user_msg dict 提取纯文本，供 ProviderRequest.prompt 使用。"""
+        content = user_msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        return ""
+
+    async def _broadcast_llm_request_hooks(
+        self,
+        event: AstrMessageEvent,
+        system_prompt: str,
+        contexts: list[dict],
+        user_msg: dict,
+        tool_set,
+    ) -> tuple[str, object] | None:
+        """广播 AstrBot 官方 LLM 请求钩子，兼容依赖钩子的插件。
+
+        ChatEngine 抑制了 AstrBot 默认 LLM 管道（should_call_llm + 直连
+        text_chat），依赖 on_llm_request 钩子的插件（如 meme_manager 的
+        语义表情包）因此收不到通知。这里复刻官方管道行为，广播
+        OnWaitingLLMRequestEvent 与 OnLLMRequestEvent，并采用钩子对
+        ``req.system_prompt`` / ``req.func_tool`` 的改写——插件可借此注入
+        提示词、移除不可用工具等。每条消息只广播一次（与官方管道一致）。
+
+        Returns:
+            (system_prompt, tool_set) 钩子改写后的值；None 表示钩子终止了
+            事件传播，应放弃本轮回复（与官方管道行为一致）。
+        """
+        try:
+            if await call_event_hook(event, EventType.OnWaitingLLMRequestEvent):
+                logger.info("[ChatEngine] OnWaitingLLMRequest 钩子终止了事件")
+                return None
+            model = None
+            try:
+                provider = self.context.get_using_provider(
+                    event.unified_msg_origin
+                )
+                if provider is not None:
+                    model = provider.get_model()
+            except Exception:
+                model = None
+            req = ProviderRequest(
+                prompt=self._extract_prompt_text(user_msg) or None,
+                session_id=event.get_session_id(),
+                contexts=list(contexts),
+                system_prompt=system_prompt,
+                func_tool=tool_set,
+                model=model,
+            )
+            if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
+                logger.info("[ChatEngine] OnLLMRequest 钩子终止了事件")
+                return None
+            return req.system_prompt, req.func_tool
+        except Exception as e:
+            # 钩子广播不应让聊天挂掉：记录后按原参数继续
+            logger.warning(f"[ChatEngine] LLM 请求钩子广播异常，跳过钩子: {e}")
+            return system_prompt, tool_set
+
     # 共享 LLM 处理流程
 
     async def _execute_llm_turn(
@@ -942,6 +1016,30 @@ class ChatEnginePlugin(Star):
             _llm_ctx = None
             used_provider = None
             last_err: object = None
+
+            # 广播官方 LLM 管道钩子（每条消息一次，Provider 回退复用结果）
+            # on_llm_request 类插件（如 meme_manager 语义表情包）依赖钩子注入
+            # 提示词 / 调整工具集；钩子终止事件时返回 "" 而非 None，
+            # 避免上层把钩子拦截当成 LLM 失败而发送错误提示。
+            broadcast_hooks = bool(event) and self._cfg_bool(
+                "broadcast_llm_hooks", True
+            )
+            if broadcast_hooks:
+                hooked = await self._broadcast_llm_request_hooks(
+                    event,
+                    system_prompt,
+                    context_messages,
+                    user_msg,
+                    tool_set,
+                )
+                if hooked is None:
+                    return ""
+                system_prompt, tool_set = hooked
+                # 钩子可能移除了工具（如索引未就绪时 meme_manager 会移除
+                # search_memes），重新计算工具数保证日志准确
+                tool_count = (
+                    len(tool_set.names()) if tool_set and not tool_set.empty() else 0
+                )
 
             for _p_idx, provider in enumerate(providers):
                 _provider_id = (
@@ -1064,12 +1162,60 @@ class ChatEnginePlugin(Star):
                 logger.error(f"{log_tag} LLM 错误: {err_text}")
                 return None
 
+            # 广播 LLM 响应钩子:让 on_llm_response 类插件处理/改写响应
+            # (如 meme_manager 提取 &&meme:id&& 标记并从文本中剥离)
+            if broadcast_hooks:
+                try:
+                    if await call_event_hook(
+                        event, EventType.OnLLMResponseEvent, final_response
+                    ):
+                        logger.info(
+                            f"{log_tag} LLM 响应钩子终止了事件，放弃本轮发送"
+                        )
+                        return ""
+                except Exception as e:
+                    logger.warning(f"{log_tag} LLM 响应钩子广播异常: {e}")
+
             # 处理响应文本
             response_text = final_response.completion_text or ""
             if log_tag == "[ChatEngine]":
                 logger.info(f"{log_tag} LLM 响应长度: {len(response_text)}")
 
             response_text = self._clean_response(response_text)
+
+            # 广播消息装饰钩子:让 on_decorating_result 类插件清理待发文本、
+            # 附加图片等组件 (如 meme_manager 剥离表情标记、附加表情图片)。
+            # 结果以 LLM_RESULT 类型挂到 event 上供插件读取，钩子结束后
+            # 取回改写内容并 clear_result，防止框架 respond 阶段重复发送。
+            _decorating_components: list = []
+            if broadcast_hooks and response_text:
+                try:
+                    _deco = MessageEventResult(chain=[Plain(response_text)])
+                    _deco.set_result_content_type(ResultContentType.LLM_RESULT)
+                    event.set_result(_deco)
+                    _stopped = await call_event_hook(
+                        event, EventType.OnDecoratingResultEvent
+                    )
+                    _after = event.get_result()
+                    if _after is not None:
+                        _texts = []
+                        for comp in _after.chain or []:
+                            if isinstance(comp, Plain):
+                                _texts.append(comp.text)
+                            else:
+                                _decorating_components.append(comp)
+                        response_text = "".join(_texts).strip()
+                    event.clear_result()
+                    if _stopped or event.is_stopped():
+                        logger.info(
+                            f"{log_tag} 消息装饰钩子终止了事件，放弃本轮发送"
+                        )
+                        return ""
+                except Exception as e:
+                    logger.warning(
+                        f"{log_tag} 消息装饰钩子广播异常: {e}", exc_info=True
+                    )
+                    event.clear_result()
 
             # 检查引用回复
             pending_quote_id = self._pending_quotes.pop(session_key, None)
@@ -1091,12 +1237,31 @@ class ChatEnginePlugin(Star):
                 # LLM 返回空但设置了引用——清除 pending
                 self._pending_quotes.pop(session_key, None)
 
+            # 发送装饰钩子附加的组件 (如 meme_manager 混合模式的表情图片)
+            for _comp in _decorating_components:
+                if on_image_component:
+                    await on_image_component(_comp)
+
             # 发送图片结果
-            if hasattr(final_response, "result_chain") and final_response.result_chain:
+            _has_result_chain = bool(
+                getattr(final_response, "result_chain", None)
+            )
+            if _has_result_chain:
                 for comp in final_response.result_chain.chain:
                     if isinstance(comp, Image):
                         if on_image_component:
                             await on_image_component(comp)
+
+            # 广播消息发送后钩子 (如 meme_manager 发送待发表情图片、清理临时文件)。
+            # 注: 正常路径的文本段此时仍在调用方队列中、由 handler yield 后才真正
+            # 发出，因此图片可能先于文本到达平台——两路径共用此广播点，保持单点实现。
+            if broadcast_hooks and (
+                response_text or _decorating_components or _has_result_chain
+            ):
+                try:
+                    await call_event_hook(event, EventType.OnAfterMessageSentEvent)
+                except Exception as e:
+                    logger.warning(f"{log_tag} 消息发送后钩子广播异常: {e}")
 
             # 保存上下文
             all_new_msgs = [user_msg]

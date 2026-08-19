@@ -736,6 +736,7 @@ const CONFIG_FIELDS = [
     { key: 'enable_passive_record', group: 'context', label: '被动记录群聊消息', type: 'checkbox', hint: '开启后，群聊中未触发回复的消息也会记录到上下文，丰富 LLM 对群聊的感知。仅对群聊生效。' },
     { key: 'enable_tool_calls', group: 'tool', label: '启用 Tool Calls', type: 'checkbox', hint: '是否启用原生 Function Calling。' },
     { key: 'max_tool_rounds', group: 'tool', label: '最大工具调用轮数', type: 'number', hint: '单次对话中工具调用最大循环次数。' },
+    { key: 'broadcast_llm_hooks', group: 'tool', label: '广播 LLM 管道钩子', type: 'checkbox', hint: '在 LLM 调用前后广播 AstrBot 官方管道钩子，使依赖钩子的插件（如 meme_manager 表情包）正常工作。' },
     { key: 'enable_command_execution', group: 'tool', label: '启用命令执行', type: 'checkbox', hint: '开启后，用户可通过自然语言让 LLM 代为执行其他插件注册的命令。每个命令自身的权限定义会被尊重（管理员限定命令仅管理员可执行）。' },
     { key: 'enable_memory', group: 'memory', label: '启用记忆功能', type: 'checkbox', restart: true, hint: '开启后，LLM 可通过工具主动记忆，并支持自动总结对话。修改需重启插件生效。' },
     { key: 'short_term_max_count', group: 'memory', label: '短期记忆最大条数', type: 'number', hint: '短期记忆最多保留多少条。超出时自动总结优先清理旧条目。' },

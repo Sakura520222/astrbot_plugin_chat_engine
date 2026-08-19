@@ -31,6 +31,7 @@ class ChatWebAPI:
         # 工具与命令
         "enable_tool_calls",
         "max_tool_rounds",
+        "broadcast_llm_hooks",
         "enable_command_execution",
         # 数据库
         "db_type",
