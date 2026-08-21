@@ -57,6 +57,29 @@ class CEImage(ChatEngineBase):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now)
 
 
+class CEImageCaption(ChatEngineBase):
+    """图片转述缓存 — 同一张图 (sha256) 在同一 Provider + 提示词下只转述一次。
+
+    与 ce_images 共用 sha256 体系;换转述 Provider 或修改提示词后键变化,
+    自动重新转述。旧行不主动清理(caption 为纯文本,体积可忽略)。
+    """
+
+    __tablename__ = "ce_image_captions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    provider_id: Mapped[str] = mapped_column(String(128))
+    prompt_hash: Mapped[str] = mapped_column(String(16))
+    caption: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_shanghai_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sha256", "provider_id", "prompt_hash", name="uq_image_caption_key"
+        ),
+    )
+
+
 class CEPersona(ChatEngineBase):
     """人格/角色定义"""
 

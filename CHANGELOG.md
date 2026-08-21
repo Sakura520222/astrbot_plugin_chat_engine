@@ -1,5 +1,21 @@
 # 变更日志
 
+## [1.4.2] - 2026-08-21
+
+### 新增
+- **图片转述 — 为纯文本模型提供视觉能力**: 复用 AstrBot 自带的「默认图片转述模型」（Dashboard「模型配置」→ `provider_settings.default_image_caption_provider_id`，留空即关闭；提示词 `image_caption_prompt`），不支持 image 模态的 Provider 下自动把图片转为文字描述
+  - **当前消息图片转述**: `_execute_llm_turn` 的 Provider 候选循环内，纯文本 Provider 且用户消息（含抖动合并消息）携带图片时，逐张独立调用转述模型，把 `image_url` 块替换为 `[Image #n: msg=<id>] <image_caption>...</image_caption>` 文本块；保留 msg id 供 `edit_image` 按消息 ID 引用；转述失败的块保留原样，由 `_mark_images_for_text_only_provider` 兜底变 `[Image: ...]` 标记
+  - **`view_image` 工具转述回看**: 纯文本 Provider 下不再直接拒绝，改为取出历史图片逐张转述、把描述文本作为工具结果返回（仍不注入 `image_url`，保持 1.4.1 确立的纯文本 Provider 不接收图片块原则）；未配置转述模型时维持原有拒绝提示
+  - **转述结果持久化缓存**: 新增 `CEImageCaption` 模型（`ce_image_captions` 表）与 `ImageCaptionRepository`，按 `(sha256, provider_id, prompt_hash)` 全局唯一——同一张图跨会话、跨重启、主路径或 `view_image` 均只转述一次；换转述 Provider 或修改提示词自动重新转述；HTTP URL 图片无法离线计算哈希，直接转述不缓存
+  - **turn 级缓存**: Provider 回退重试同批图片不重复转述/查库；转述只作用于发给纯文本模型的 deepcopy 副本，存入上下文的仍是原始 `image_ref`，多模态 Provider fallback 接手时仍看真图
+  - repo 层新增独立单元测试（`tests/test_image_caption_repo.py`，7 个用例：未命中 / 回读 / 幂等 / 隔离性 / 并发唯一）
+
+### 修复
+- **引用消息图片解析依赖已清理的 AstrBot 临时文件**: 引用回复中的 Image 组件指向临时文件（`data/temp/media_image_*`），文件不存在时原逻辑把死路径当 URL 下发，导致 `edit_image` 下载报 `NonHttpUrlClientError`、`view_image` 转述把无效路径发给转述模型、收到「请上传图片」类答非所问文本却按转述成功回传，主模型据此放弃改图改为重新生成
+  - `_image_to_data_url` 回退链收紧：原始 URL 仅接受 http/https/data 形态；本地路径文件存在时读取转 data URL，不存在返回 None 交由上层兜底
+  - 新增 Reply 链回退（`_resolve_reply_image_urls`）：当前消息图片组件不可用时，按被引用消息 ID 从内存上下文/数据库恢复持久化图片（image_ref），不再依赖易失的临时文件
+  - 格式检测与本地文件读取提取为 `utils/image.py`（零框架依赖），配套单元测试 `tests/test_image_utils.py`（9 个用例）
+
 ## [1.4.1] - 2026-08-20
 
 ### 修复

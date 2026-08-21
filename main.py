@@ -14,6 +14,7 @@ import asyncio
 import base64
 import contextvars
 import copy
+import hashlib
 import inspect
 import json
 import re
@@ -49,6 +50,7 @@ from .tools.manager import ChatToolManager
 from .tools.scanner import ToolScanner
 from .utils import format_current_time, shanghai_now_iso
 from .utils.config import cfg_bool, cfg_float, cfg_int
+from .utils.image import image_data_url_from_base64, local_image_to_data_url
 from .web.api import register_web_api_routes
 
 
@@ -1020,6 +1022,8 @@ class ChatEnginePlugin(Star):
             _llm_ctx = None
             used_provider = None
             last_err: object = None
+            # 图片转述 turn 级缓存(url → caption):Provider 回退重试同批图片不重复转述
+            _caption_cache: dict[str, str] = {}
 
             # 广播官方 LLM 管道钩子（每条消息一次，Provider 回退复用结果）
             # on_llm_request 类插件（如 meme_manager 语义表情包）依赖钩子注入
@@ -1053,6 +1057,15 @@ class ChatEnginePlugin(Star):
                     # 模态过滤（不同 Provider 可能支持不同模态，每轮重算）
                     modalities = await self.context_mgr.get_modalities(provider)
                     all_messages = copy.deepcopy(list(context_messages) + [user_msg])
+                    # 图片转述:纯文本 Provider 且配置了 AstrBot 默认图片转述模型时,
+                    # 把当前用户消息的图片块替换为转述文本;失败的块保留原样由
+                    # _mark_images_for_text_only_provider 兜底标记
+                    if modalities and "image" not in modalities:
+                        captioned = await self._caption_user_msg_images(
+                            all_messages, umo, _caption_cache
+                        )
+                        if captioned and log_tag == "[ChatEngine]":
+                            logger.info(f"{log_tag} 图片转述: {captioned} 张")
                     all_messages, marked_images = self._mark_images_for_text_only_provider(
                         all_messages, modalities
                     )
@@ -2432,31 +2445,32 @@ class ChatEnginePlugin(Star):
         return urls
 
     async def _image_to_data_url(self, comp: Image) -> str | None:
-        """将 Image 组件转换为 base64 data URL，失败时回退到原始 URL。"""
+        """将 Image 组件转换为 base64 data URL。
+
+        回退顺序：
+        1. ``convert_to_base64`` → data URL
+        2. 原始 URL —— 仅 http/https/data 形态；本地路径对画图 HTTP
+           客户端与转述 Provider 均不可用
+        3. 本地文件 —— 存在则读取转 data URL；不存在（如 AstrBot 临时
+           文件已被清理）返回 None，交由上层回退链路兜底
+        """
         try:
             b64 = await comp.convert_to_base64()
             if b64:
-                # 通过 base64 前缀检测图片格式
-                if b64.startswith("/9j/"):
-                    fmt = "jpeg"
-                elif b64.startswith("iVBOR"):
-                    fmt = "png"
-                elif b64.startswith("R0lG"):
-                    fmt = "gif"
-                elif b64.startswith("UklG"):
-                    fmt = "webp"
-                elif b64.startswith("Qk0"):
-                    fmt = "bmp"
-                else:
-                    fmt = "jpeg"
-                return f"data:image/{fmt};base64,{b64}"
+                return image_data_url_from_base64(b64)
         except Exception as e:
             logger.warning(f"[ChatEngine] 图片转 base64 失败: {e}")
-        # 回退到原始 URL
-        if hasattr(comp, "url") and comp.url:
-            return comp.url
-        if hasattr(comp, "file") and comp.file:
-            return comp.file
+
+        url = getattr(comp, "url", None)
+        if isinstance(url, str) and url.startswith(("http://", "https://", "data:")):
+            return url
+
+        file_path = getattr(comp, "file", None)
+        if isinstance(file_path, str) and file_path:
+            data_url = await local_image_to_data_url(file_path)
+            if data_url:
+                return data_url
+            logger.warning(f"[ChatEngine] 图片本地文件不可用: {file_path}")
         return None
 
     # 记忆工具 — LLM Tool Call
@@ -2767,7 +2781,9 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         优先级：
         1. 若 message_id 是当前 event 消息 → 直接从 event 提取原始图片组件
            （未经 ``sanitize_contexts_by_modalities`` 处理，图片完整）
-        2. 回退到 :meth:`_resolve_message_image_urls`（内存上下文 + 数据库）
+        2. 当前消息为引用回复且组件图片不可用 → 沿 Reply 链按被引用
+           message_id 查 :meth:`_resolve_reply_image_urls`（内存上下文 + 数据库）
+        3. 回退到 :meth:`_resolve_message_image_urls`（内存上下文 + 数据库）
 
         第 1 步是关键：当 Provider 不支持 image 模态时，sanitize 会把当前
         user_msg 的图片剥离成 ``[Image]`` 文本，此时从 current_contexts 永远
@@ -2788,6 +2804,10 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
                 f"[ChatEngine] 当前消息图片提取为空: msg={message_id_str}，"
                 "回退到上下文查找"
             )
+            # 引用回复：当前消息图片组件不可用时，沿 Reply 链恢复被引用消息的图
+            urls = await self._resolve_reply_image_urls(event)
+            if urls:
+                return None, urls
         session_key = self.context_mgr.build_session_key(event)
         err, urls = await self._resolve_message_image_urls(session_key, message_id_str)
         if err:
@@ -2796,6 +2816,216 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
                 f"current_id={current_id}, err={err}"
             )
         return err, urls
+
+    async def _resolve_reply_image_urls(
+        self, event: AstrMessageEvent
+    ) -> list[str]:
+        """沿 Reply 链查找被引用消息的持久化图片。
+
+        引用消息的 Image 组件常指向 AstrBot 临时文件，文件被清理后无法
+        还原；被引用的原消息若已被本插件记录（上下文/数据库含 image_ref），
+        可按其 message_id 恢复。
+        """
+        reply_ids = [
+            str(comp.id)
+            for comp in event.get_messages()
+            if isinstance(comp, Reply) and comp.id is not None
+        ]
+        if not reply_ids:
+            return []
+        session_key = self.context_mgr.build_session_key(event)
+        for rid in reply_ids:
+            err, urls = await self._resolve_message_image_urls(session_key, rid)
+            if not err and urls:
+                logger.info(
+                    f"[ChatEngine] 经引用消息恢复图片: reply_msg={rid}, "
+                    f"images={len(urls)}"
+                )
+                return urls
+        logger.info(f"[ChatEngine] 引用消息图片未找到: reply_ids={reply_ids}")
+        return []
+
+    # 图片转述 — 利用 AstrBot「默认图片转述模型」为纯文本 Provider 提供视觉能力
+
+    def _get_caption_provider_config(self, umo: str) -> tuple[str, str]:
+        """读取 AstrBot 全局配置中的图片转述设置。
+
+        Returns:
+            ``(provider_id, prompt)``:provider_id 为空表示未启用转述。
+        """
+        default_prompt = "Please describe the image using Chinese."
+        try:
+            config = self.context.get_config(umo)
+            ps = getattr(config, "provider_settings", None) or {}
+            prov_id = str(ps.get("default_image_caption_provider_id", "") or "")
+            prompt = str(ps.get("image_caption_prompt", "") or default_prompt)
+            return prov_id, prompt
+        except Exception as e:
+            logger.warning(f"[ChatEngine] 读取图片转述配置失败: {e}")
+            return "", ""
+
+    @staticmethod
+    def _sha256_of_image_url(url: str) -> str | None:
+        """计算图片内容的 sha256;仅支持 data URL,其他形态返回 None。"""
+        if not url.startswith("data:"):
+            return None
+        try:
+            _, b64 = url.split(",", 1)
+            return hashlib.sha256(base64.b64decode(b64)).hexdigest()
+        except Exception:
+            return None
+
+    async def _call_caption_provider(
+        self, prov_id: str, prompt: str, url: str
+    ) -> str | None:
+        """调用 AstrBot 默认图片转述模型转述单张图片。
+
+        Returns:
+            转述文本;Provider 不可用或调用失败时返回 None(不缓存,可重试)。
+        """
+        from astrbot.core.provider import Provider as ProviderType
+
+        try:
+            prov = self.context.get_provider_by_id(prov_id)
+        except Exception as e:
+            logger.warning(f"[ChatEngine] 图片转述 Provider 获取失败 ({prov_id}): {e}")
+            return None
+        if prov is None or not isinstance(prov, ProviderType):
+            logger.warning(f"[ChatEngine] 图片转述 Provider 不存在或类型不对: {prov_id}")
+            return None
+        try:
+            resp = await prov.text_chat(prompt=prompt, image_urls=[url])
+            text = (resp.completion_text or "").strip() if resp else ""
+            if text:
+                return text
+            logger.warning(f"[ChatEngine] 图片转述返回空结果: {prov_id}")
+            return None
+        except Exception as e:
+            logger.warning(f"[ChatEngine] 图片转述调用失败: {e}")
+            return None
+
+    async def _get_image_caption(
+        self,
+        url: str,
+        prov_id: str,
+        prompt: str,
+        turn_cache: dict[str, str],
+    ) -> str | None:
+        """获取单张图片的转述文本(带持久化缓存)。
+
+        查询链: turn 缓存 → (sha256, provider, prompt_hash) 查 DB →
+        调用转述 Provider → 回写 DB 与 turn 缓存。
+        data URL 直接解码算 sha256;HTTP URL 无法离线计算哈希,直接转述不缓存。
+        失败返回 None,调用方走现有兜底(图片标记 / 拒绝提示)。
+        """
+        cached = turn_cache.get(url)
+        if cached:
+            return cached
+
+        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        sha256 = self._sha256_of_image_url(url)
+        repo = self.db.image_caption_repo if self.db else None
+
+        if sha256 and repo:
+            try:
+                hit = await repo.find(sha256, prov_id, prompt_hash)
+                if hit:
+                    turn_cache[url] = hit
+                    return hit
+            except Exception as e:
+                logger.warning(f"[ChatEngine] 图片转述缓存查询失败: {e}")
+
+        caption = await self._call_caption_provider(prov_id, prompt, url)
+        if not caption:
+            return None
+
+        if sha256 and repo:
+            try:
+                await repo.save(sha256, prov_id, prompt_hash, caption)
+            except Exception as e:
+                logger.warning(f"[ChatEngine] 图片转述缓存写入失败: {e}")
+        turn_cache[url] = caption
+        return caption
+
+    async def _caption_user_msg_images(
+        self, all_messages: list[dict], umo: str, turn_cache: dict[str, str]
+    ) -> int:
+        """为纯文本 Provider 转述当前用户消息中的图片块。
+
+        把 user_msg(all_messages[-1])content 里的 image_url 块逐张独立转述,
+        替换为 ``[Image #n: msg=<id>] <image_caption>...</image_caption>``
+        文本块(保留 msg id 供 edit_image 按消息 ID 引用);转述失败的块保留
+        原样,由 _mark_images_for_text_only_provider 兜底变 [Image: ...] 标记。
+        未配置转述 Provider 时直接返回 0(功能关闭)。
+
+        Returns:
+            成功转述并替换的图片块数量。
+        """
+        prov_id, prompt = self._get_caption_provider_config(umo)
+        if not prov_id:
+            return 0
+
+        user_msg = all_messages[-1] if all_messages else None
+        if not isinstance(user_msg, dict):
+            return 0
+        content = user_msg.get("content")
+        if not isinstance(content, list):
+            return 0
+        msg_id = str(user_msg.get("message_id", "") or "")
+
+        replaced = 0
+        img_idx = 0
+        for i, part in enumerate(content):
+            if not (isinstance(part, dict) and part.get("type") == "image_url"):
+                continue
+            img_idx += 1
+            url = part.get("image_url", {}).get("url", "")
+            caption = await self._get_image_caption(url, prov_id, prompt, turn_cache)
+            if not caption:
+                continue
+            tag = f"[Image #{img_idx}: msg={msg_id}]" if msg_id else f"[Image #{img_idx}]"
+            content[i] = {
+                "type": "text",
+                "text": f"{tag} <image_caption>{caption}</image_caption>",
+            }
+            replaced += 1
+        return replaced
+
+    async def _caption_view_image(
+        self, event: AstrMessageEvent, message_id: str
+    ) -> str:
+        """纯文本 Provider 下的 view_image:用转述模型返回图片描述文本。
+
+        未配置转述 Provider 时保持原有拒绝行为;已配置时逐张转述历史图片,
+        描述文本作为工具结果返回给模型(不注入图片块,维持纯文本 Provider
+        不接收 image_url 的原则)。转述结果与主路径共用持久化缓存。
+        """
+        prov_id, prompt = self._get_caption_provider_config(event.unified_msg_origin)
+        if not prov_id:
+            logger.info(
+                "[ChatEngine] 拒绝 view_image: 当前 Provider 不支持 image 模态"
+            )
+            return (
+                "你当前模型不支持视觉，无法查看图片。"
+                "请直接基于对话中的文本内容回复，不要调用 view_image。"
+            )
+
+        err, urls = await self._get_image_urls_for_message(event, message_id)
+        if err:
+            return err
+
+        parts: list[str] = []
+        for i, url in enumerate(urls, 1):
+            caption = await self._get_image_caption(url, prov_id, prompt, {})
+            parts.append(f"[{i}] {caption}" if caption else f"[{i}] 转述失败")
+        logger.info(
+            f"[ChatEngine] view_image 转述: msg_id={message_id}, images={len(urls)}"
+        )
+        return (
+            f"Image caption(s) of message [{message_id}] "
+            "(your model has no vision; these descriptions were generated "
+            "by the caption model):\n" + "\n".join(parts)
+        )
 
     # 图片查看工具 — LLM Tool Call
 
@@ -2808,12 +3038,15 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         """View the actual image(s) from a historical message.
         Historical images appear as [Image] placeholders in context.
         Call this to load and see the real image content.
-        After calling, the image will be injected into your context for the next response.
+        If your model supports vision, the image will be injected into your
+        context for the next response; otherwise (text-only model), a caption
+        model will describe the images in text for you.
 
         Args:
             message_id(string): The message ID containing the image. Shown as [msg:ID] tag in context messages.
         """
-        # 纯文本 Provider 无法接收 image_url 注入（下一轮请求会 400），直接拒绝
+        # 纯文本 Provider 无法接收 image_url 注入（下一轮请求会 400），
+        # 改用 AstrBot 默认图片转述模型把图片描述为文本返回
         _ctx = _tool_call_ctx.get()
         _provider = _ctx.current_provider if _ctx is not None else None
         if _provider is None:
@@ -2825,13 +3058,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         if _provider is not None:
             modalities = await self.context_mgr.get_modalities(_provider)
             if modalities and "image" not in modalities:
-                logger.info(
-                    "[ChatEngine] 拒绝 view_image: 当前 Provider 不支持 image 模态"
-                )
-                return (
-                    "你当前模型不支持视觉，无法查看图片。"
-                    "请直接基于对话中的文本内容回复，不要调用 view_image。"
-                )
+                return await self._caption_view_image(event, message_id)
         err, urls = await self._get_image_urls_for_message(event, message_id)
         if err:
             return err

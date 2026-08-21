@@ -14,6 +14,7 @@ from astrbot.api import logger
 from .models import (  # noqa: F401
     CEArchivedSession,
     CEImage,
+    CEImageCaption,
     CEImageQuota,
     CEPersona,
     ChatSession,
@@ -38,6 +39,7 @@ class ChatEngineDB:
         self.image_repo = None
         self.image_store = None
         self.image_quota_repo = None
+        self.image_caption_repo = None
 
     async def initialize(self):
         """创建所有表并初始化 Repository"""
@@ -48,6 +50,7 @@ class ChatEngineDB:
             await self._migrate_columns(conn)
 
         from .archived_session_repo import ArchivedSessionRepository
+        from .image_caption_repo import ImageCaptionRepository
         from .image_quota_repo import ImageQuotaRepository
         from .image_repo import ImageRepository
         from .persona_repo import PersonaRepository
@@ -60,6 +63,7 @@ class ChatEngineDB:
         self.tool_config_repo = ToolConfigRepository(self.session_factory)
         self.image_repo = ImageRepository(self.session_factory)
         self.image_quota_repo = ImageQuotaRepository(self.session_factory)
+        self.image_caption_repo = ImageCaptionRepository(self.session_factory)
 
     def init_image_store(self, data_dir: str):
         """初始化图片存储服务（需要在 initialize 之后调用）"""
