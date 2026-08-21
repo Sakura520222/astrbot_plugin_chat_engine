@@ -64,6 +64,7 @@ class _ToolCallContext:
         "pending_sends",
         "intermediate_msgs",
         "current_contexts",
+        "current_provider",
         "final_response",
         "prompt_tokens",
         "completion_tokens",
@@ -76,6 +77,9 @@ class _ToolCallContext:
         ] = []  # 完整的 tool call 周期消息（assistant + tool results）
         self.current_contexts: list[dict] = (
             []  # 当前轮内存上下文（含尚未落库的当前 user_msg）
+        )
+        self.current_provider = (
+            None  # 本次实际使用的 Provider，供工具判断模态能力（fallback 切换后随 ctx 重建）
         )
         self.final_response = None
         # 本次 _llm_call_with_tools 累计的 Token 用量（估算），整轮结束后由
@@ -1388,6 +1392,8 @@ class ChatEnginePlugin(Star):
         current_contexts = list(contexts) + [user_msg]
         # 暴露给 tool handler（edit_image / view_image），让其能访问尚未落库的当前消息
         ctx.current_contexts = current_contexts
+        # 记录本次实际使用的 Provider（含 fallback 切换），供 view_image 等工具判断模态能力
+        ctx.current_provider = provider
         final_response = None
 
         for round_idx in range(max_tool_rounds):
@@ -2807,6 +2813,25 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         Args:
             message_id(string): The message ID containing the image. Shown as [msg:ID] tag in context messages.
         """
+        # 纯文本 Provider 无法接收 image_url 注入（下一轮请求会 400），直接拒绝
+        _ctx = _tool_call_ctx.get()
+        _provider = _ctx.current_provider if _ctx is not None else None
+        if _provider is None:
+            # 防御性回退：工具理论上只在 _llm_call_with_tools 内执行，ctx 必然存在
+            try:
+                _provider = self.context.get_using_provider()
+            except Exception:
+                _provider = None
+        if _provider is not None:
+            modalities = await self.context_mgr.get_modalities(_provider)
+            if modalities and "image" not in modalities:
+                logger.info(
+                    "[ChatEngine] 拒绝 view_image: 当前 Provider 不支持 image 模态"
+                )
+                return (
+                    "你当前模型不支持视觉，无法查看图片。"
+                    "请直接基于对话中的文本内容回复，不要调用 view_image。"
+                )
         err, urls = await self._get_image_urls_for_message(event, message_id)
         if err:
             return err

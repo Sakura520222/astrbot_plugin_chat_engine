@@ -258,7 +258,7 @@ astrbot_plugin_chat_engine/
 - **被动记录**: 未触发回复的群聊消息以 `observed` 角色存储，压缩时归入当前轮次
 - **图片存储**: 图片转为 base64 data URL 发送给 LLM，文件按 sha256 去重存储，上下文中以 `image_ref` 引用节省空间
 - **历史图片剥离**: 历史上下文中的图片替换为 `[Image]` 文本占位符，仅当前用户消息保留图片，减少 Token 消耗
-- **图片查看工具**: LLM 可通过 `view_image` 工具按消息 ID 主动加载历史图片，图片以多模态格式嵌入 tool result
+- **图片查看工具**: LLM 可通过 `view_image` 工具按消息 ID 主动加载历史图片，图片以多模态格式嵌入 tool result；不支持 image 模态的 Provider 下调用直接返回「你当前模型不支持视觉」，不注入图片，避免下一轮请求 400
 - **纯文本 Provider 图片标记**: 不支持 image 模态的 Provider 下，`_mark_images_for_text_only_provider` 在模态过滤之前把 `image_url` 块编码为 `[Image: msg=<id>, url=<url>]` 文本块（data URL 仅保留 MIME 前缀避免撑爆 Token），让 LLM 仍能看到图片的 message_id 与链接，准确调用 `edit_image` / `view_image`
 - **引用回复**: 提取 Reply 组件中的发送者和内容，自动拼接到用户消息前缀
 - **会话锁**: `asyncio.Lock` 按 session_key 索引，确保同一会话的消息串行处理

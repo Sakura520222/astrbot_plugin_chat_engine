@@ -1,5 +1,12 @@
 # 变更日志
 
+## [1.4.1] - 2026-08-20
+
+### 修复
+- **纯文本模型调用 `view_image` 导致整轮回复失败**: `view_image` 注入的图片在 `_llm_call_with_tools` 内部直接嵌入 tool result，绕过了 `sanitize_contexts_by_modalities` 模态过滤（其仅处理 `_execute_llm_turn` 组装的历史上下文），不支持视觉的模型（如 deepseek-v4-flash）下一轮请求携带 `image_url` 被 API 400 拒绝，且因错误发生在 `_sent_any` 之前持续回退直至所有 Provider 失败
+  - 复用既有 `get_modalities` 模态检测机制：`view_image` 工具入口校验当前 Provider 模态（判断逻辑与 `_mark_images_for_text_only_provider` 一致），不含 image 模态时直接返回「你当前模型不支持视觉」并引导 LLM 基于文本回复，不再注入图片
+  - 新增 `_ToolCallContext.current_provider`（ContextVar），`_llm_call_with_tools` 记录本次实际使用的 Provider（含 fallback 切换），供工具在并发 dispatch 下准确判断模态能力
+
 ## [1.4.0] - 2026-08-19
 
 ### 重大变更
