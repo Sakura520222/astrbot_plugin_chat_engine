@@ -36,9 +36,7 @@ async def repo():
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.run_sync(chat_engine_metadata.create_all)
-    factory = async_sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     yield ImageCaptionRepository(factory)
     await engine.dispose()
     for suffix in ("", "-wal", "-shm"):

@@ -1,5 +1,22 @@
 # 变更日志
 
+## [1.4.3] - 2026-10-22
+
+### 重大变更
+- **活跃回合实时引导（Active-turn Redirect / Steer，参考 NousResearch/Hermes Agent）**: AI 回合执行期间新到达的触发消息不再"暂存 → 等回合结束 → 独立回复"，而是**实时进入当前运行的逻辑回合**，模型可及时改变执行方向
+  - **Redirect（模型请求中抢占）**: 模型请求执行期间收到新消息，立即取消当前在飞请求，在**同一逻辑回合内**重建输入（含新消息与已完成工作）重试——不触发 Provider Fallback（走哨兵而非异常路径）、不消耗工具轮次（迭代退款）、不重放未完成推理；响应已返回但重定向同时到达的"交叉"场景丢弃过时响应，迟到响应永不覆盖最新结果
+  - **Steer（工具批次边界引导）**: 工具执行期间收到新消息不中断工具（避免 orphan tool result），批次完成的安全边界作为真实 `role:user` 消息注入（合法 `assistant(tool_calls) → tool → user` 序列），下一 `text_chat` 可见；已执行工具结果保留不重放
+  - **运行期标注（STEER_NOTE）**: 注入行携带自描述标注——按新消息更新工作而非汇总汇报：保留未被取消的原有需求、区分"已执行/已交付"避免重复发送或漏发、按主题自然分段交付无须强行合并成一条回复、不解释内部处理过程不报幕；标注随历史持久化并声明回放语义
+  - **边界兜底（自动追答）**: 回合收尾阶段（FINALIZING/循环外发送）到达、无法在回合内消费的消息退回 inflight 缓冲，回合结束后自动发起后续回复（`max_inflight_followup_rounds` 限制连续轮数，用户真实消息开启新一轮时清零），或随下次用户消息注入引导，不静默丢弃
+  - **仅消费一次 / 失败可恢复**: 注入消息经 `intermediate_msgs` 持久化，上下文保存成功（commit）才完成消费；保存失败或 Provider 全部失败时退回缓冲或 `requeue` 至下一候选重注入；发送期间收到新消息时停止发送未发出的旧回复片段
+  - 新增 [context/active_turn.py](context/active_turn.py)（`ActiveTurnController` 状态机: IDLE/MODEL_RUNNING/TOOL_RUNNING/SENDING/FINALIZING，代际注册表，原子 submit/take_pending/requeue），`InflightMessage` 扩展 `user_text`/`umo`/`event`/`is_group` 字段
+  - 新增单元测试 8 项（阶段路由/取消判定/交叉/预算无限/requeue 保序/注册表代际）与端到端场景测试 6 项（模型抢占/工具边界引导/交叉丢弃/多消息合并/非异常语义/失败重注入），断言覆盖实际模型输入与消息序列而非仅回复次数
+  - `enable_inflight_guidance` 配置语义更新为实时引导（模型请求中 Redirect 抢占重建、工具边界 Steer 注入、收尾消息走兜底）；系统要求 AstrBot >= 4.28（回退模型读取依赖新版配置结构，同时保留 4.27 旧键兼容）
+
+### 修复
+- **AstrBot 4.28 回退对话模型失效**: AstrBot 4.28 将回退模型从 `provider_settings.fallback_chat_models` 迁移至 `agent_runner.config.model.fallback_provider_ids`（旧键由 migra_helper 迁移删除），插件仍读旧键导致候选列表永远只有主 Provider——主 Provider 故障（如 503）后无回退、用户收不到任何回复；现按会话路由配置档案读取新键（`runner_type=local` 时），空则回退 4.27 旧键
+- **开启 AstrBot AI 功能后官方 AI 重复回复**: 防抖缓冲、inflight 暂存、并发竞态、被动记录等延迟处理路径调用 `should_call_llm(False)` 恢复了官方 LLM 管道，私聊中 `is_at_or_wake_command` 恒为真且插件尚未发送内容，官方管道三条件全满足立即回复一条、插件回合结束再回一条，造成多个不同 AI 交叉回复；现入口处无条件抑制（`should_call_llm(True)`），任何路径不再恢复
+
 ## [1.4.2] - 2026-08-21
 
 ### 新增

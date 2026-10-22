@@ -64,6 +64,24 @@
         "default": true,
         "hint": "对齐 AstrBot 官方管道，在 LLM 调用前后广播 on_llm_request / on_llm_response / on_decorating_result / after_message_sent 钩子，使依赖钩子的插件（如 meme_manager 语义表情包）正常工作。"
     },
+    "enable_inflight_guidance": {
+        "description": "启用并发消息实时引导（Redirect/Steer）",
+        "type": "bool",
+        "default": true,
+        "hint": "AI 回合执行期间新到达的有效触发消息实时进入当前逻辑回合：模型请求中抢占重建输入（Redirect），工具批次边界作为真实 user 消息注入（Steer）；回合收尾阶段无法消费的消息走兜底缓冲（自动追答/下次注入）。"
+    },
+    "max_inflight_guidance_messages": {
+        "description": "并发消息单轮引导最大数量",
+        "type": "int",
+        "default": 10,
+        "hint": "单次后续请求中处理暂存消息的最大数量。超出此上限的较早消息将自动归档到会话历史，避免丢弃。"
+    },
+    "max_inflight_followup_rounds": {
+        "description": "自动追答连续轮数上限",
+        "type": "int",
+        "default": 5,
+        "hint": "AI 回合结束后自动处理暂存消息的最大连续轮数，防止无限追答；0 表示禁用自动追答（暂存消息仅随下次用户消息注入引导）。用户真实消息开启新一轮（进入防抖或直连处理）时计数清零。"
+    },
     "db_type": {
         "description": "数据库类型",
         "type": "string",

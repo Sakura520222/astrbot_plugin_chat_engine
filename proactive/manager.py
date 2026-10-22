@@ -348,6 +348,13 @@ class ProactiveManager:
             )
             return False
 
+        if self._context_mgr and hasattr(self._context_mgr, "inflight_mgr"):
+            if self._context_mgr.inflight_mgr.is_inflight(session_key):
+                logger.debug(
+                    f"[Proactive] 会话 {session_key} 正在进行 AI 请求 (in-flight)，跳过主动回复"
+                )
+                return False
+
         try:
             # 1. 获取 Provider
             provider = None

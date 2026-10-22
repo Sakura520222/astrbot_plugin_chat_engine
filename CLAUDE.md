@@ -35,7 +35,8 @@ python -m pytest tests/test_image_quota_repo.py::test名  # 单测试
 3. 会话管理命令（`/new` `/list` `/switch N` `/clear` `/stats`，群聊管理员限定）
 4. 命令透传：检查 `activated_handlers` 中的 `CommandFilter`/`RegexFilter`/`CommandGroupFilter`（跳过 chat_engine 自身 handler），有则放手让其他插件/框架处理
 5. `should_respond` 判定（群聊需 @）；不响应时并入抖动缓冲或被动记录
-6. `_execute_llm_turn`：System Prompt 组装（时间注入 / 群信息缓存 / 人格 / 记忆 / 工具指引 / 命令指引）→ `_llm_call_with_tools` → 文本清洗 → 分段发送
+6. 活跃回合路由：会话存在活跃回合（`ActiveTurnController`，[context/active_turn.py](context/active_turn.py)，参考 Hermes Agent）时，新触发消息实时进入当前逻辑回合——模型请求中 **Redirect**（取消在飞请求、丢弃过时响应/取消-响应交叉、同回合重建输入重试，不触发 Provider Fallback、不消耗工具轮次）；工具批次中 **Steer**（批次安全边界作为真实 `role:user` 消息注入并携带运行期标注 STEER_NOTE——按新消息更新工作而非汇总汇报：保留未被取消的原有需求、区分已执行/已交付、按主题自然分段交付、不补报不报幕；工具结果保留不重放）；收尾阶段（FINALIZING/循环外 SENDING）退回 inflight 缓冲走兜底（自动追答/下次注入）。Redirect/Steer 消息经 `intermediate_msgs` 持久化，持久化失败退回缓冲（仅消费一次）
+7. `_execute_llm_turn`：System Prompt 组装（时间注入 / 群信息缓存 / 人格 / 记忆 / 工具指引 / 命令指引）→ `_llm_call_with_tools` → 文本清洗 → 分段发送（发送期间收到新消息则停止未发旧片段）
 
 ### 双消息发送路径
 
@@ -70,7 +71,7 @@ python -m pytest tests/test_image_quota_repo.py::test名  # 单测试
 
 ## 跨文件同步约定（改动时容易漏）
 
-- **新增配置项**：须同步 [_conf_schema.json](_conf_schema.json)（schema）与 [web/api.py](web/api.py) 的 `_CONFIG_KEYS`（WebUI GET/PUT 白名单），README 配置表也应更新
+- **新增配置项**：须同步四处——[_conf_schema.json](_conf_schema.json)（schema）、[web/api.py](web/api.py) 的 `_CONFIG_KEYS`（WebUI GET/PUT 白名单）、[pages/chat-engine/app.js](pages/chat-engine/app.js) 的 `CONFIG_FIELDS`（WebUI 设置表单，含分组/类型/hint，配置需重启生效时加 `restart: true`），README 配置表也应更新
 - **新增模块目录**：须同步 [.github/workflows/release.yml](.github/workflows/release.yml) 的 zip 打包清单，否则发布包缺目录导致 import 失败
 - **发版**：更新 [metadata.yaml](metadata.yaml) `version` + [CHANGELOG.md](CHANGELOG.md) 顶部条目 → push main 自动构建 zip 并创建 GitHub Release（changelog 最新条目作为 release body）
 - **会话命令**：`_SESSION_CMD_*` 正则需同时匹配有/无唤醒前缀的情况（框架会剥离唤醒前缀）

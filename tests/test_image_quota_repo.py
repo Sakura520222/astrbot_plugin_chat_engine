@@ -37,9 +37,7 @@ async def repo():
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.run_sync(chat_engine_metadata.create_all)
-    factory = async_sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     yield ImageQuotaRepository(factory)
     await engine.dispose()
     for suffix in ("", "-wal", "-shm"):
@@ -74,9 +72,7 @@ async def test_incr_used_increments_existing(repo):
 
 async def test_incr_used_concurrent_safe(repo):
     """并发 5 次 incr,最终计数应为 5(无丢失更新)。"""
-    await asyncio.gather(
-        *[repo.incr_used("user:123", "2026-07-07") for _ in range(5)]
-    )
+    await asyncio.gather(*[repo.incr_used("user:123", "2026-07-07") for _ in range(5)])
     assert await repo.get_used("user:123", "2026-07-07") == 5
 
 

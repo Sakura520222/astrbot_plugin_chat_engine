@@ -143,9 +143,7 @@ class MessageDebouncer:
             return False
 
         buf.append(msg_data)
-        logger.debug(
-            f"[Debounce] 被动消息并入: {session_key}, 当前 {len(buf)} 条"
-        )
+        logger.debug(f"[Debounce] 被动消息并入: {session_key}, 当前 {len(buf)} 条")
         return True
 
     async def force_flush(self, session_key: str) -> None:

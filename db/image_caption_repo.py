@@ -17,9 +17,7 @@ class ImageCaptionRepository:
     def __init__(self, session_factory: async_sessionmaker):
         self._factory = session_factory
 
-    async def find(
-        self, sha256: str, provider_id: str, prompt_hash: str
-    ) -> str | None:
+    async def find(self, sha256: str, provider_id: str, prompt_hash: str) -> str | None:
         """查找缓存的转述文本,未命中返回 None。"""
         async with self._factory() as session:
             result = await session.execute(

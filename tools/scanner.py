@@ -36,9 +36,7 @@ class ToolScanner:
         module_path = getattr(tool, "handler_module_path", None)
         if module_path:
             plugin_meta = star_map.get(module_path)
-            if plugin_meta is not None and not getattr(
-                plugin_meta, "activated", False
-            ):
+            if plugin_meta is not None and not getattr(plugin_meta, "activated", False):
                 return False
         return True
 

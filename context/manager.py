@@ -13,6 +13,7 @@ from ..db.persona_repo import PersonaRepository
 from ..db.session_repo import SessionRepository
 from ..utils.config import cfg_int
 from .compressor import BaseCompressor, ContextCompressorFactory
+from .inflight import InflightManager
 from .token_counter import TokenEstimator
 
 
@@ -44,6 +45,7 @@ class ChatContextManager:
             config, provider_getter
         )
         self.token_counter = TokenEstimator()
+        self.inflight_mgr = InflightManager()
         self._cached_modalities: list[str] | None = None
         self._cached_max_context_tokens: int | None = None
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -300,10 +302,7 @@ class ChatContextManager:
         # 保存前: 将新消息中的 inline 图片替换为 image_ref 引用
         messages = await self._store_images_for_messages(messages)
 
-        try:
-            await self.repo.save_context(session_key, messages)
-        except Exception as e:
-            logger.error(f"[ChatEngine] 保存上下文失败 [{session_key}]: {e}")
+        await self.repo.save_context(session_key, messages)
 
         return messages
 
@@ -346,9 +345,7 @@ class ChatContextManager:
         上下文，进而误导后续 LLM 对话与 AI 判断。主动回复只需让 bot 记得
         自己说过什么即可，不需要虚构一条用户消息。
         """
-        await self._load_compress_save(
-            session_key, [assistant_msg], provider=provider
-        )
+        await self._load_compress_save(session_key, [assistant_msg], provider=provider)
 
     def reload_compressor(self):
         """重新加载压缩器 (配置变更后调用)"""

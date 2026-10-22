@@ -80,6 +80,10 @@ class ChatWebAPI:
         "debounce_merge_mode",
         "debounce_separator",
         "debounce_absorb_passive",
+        # 并发消息引导
+        "enable_inflight_guidance",
+        "max_inflight_guidance_messages",
+        "max_inflight_followup_rounds",
         # 画图 (OpenAI 兼容)
         "enable_image_generation",
         "image_gen_api_base",
@@ -304,11 +308,13 @@ class ChatWebAPI:
 
     async def clear_session(self, key):
         """清空指定会话的上下文并归零 Token 计数（保留会话行，对应 /clear）。"""
+        await self.plugin.context_mgr.inflight_mgr.reset_session(key)
         async with self.plugin.context_mgr.get_session_lock(key):
             cleared = await self.plugin.context_mgr.repo.clear_session(key)
         return {"ok": True, "cleared_messages": cleared}
 
     async def delete_session(self, key):
+        await self.plugin.context_mgr.inflight_mgr.reset_session(key)
         ok = await self.plugin.context_mgr.repo.delete_session(key)
         if not ok:
             return error_response("会话不存在", status_code=404)
@@ -413,9 +419,7 @@ class ChatWebAPI:
 
     async def list_archives(self, key):
         """列出指定会话的所有归档"""
-        archives = await self.plugin.db.archived_session_repo.list_by_session_key(
-            key
-        )
+        archives = await self.plugin.db.archived_session_repo.list_by_session_key(key)
         return {
             "archives": [
                 {
@@ -444,9 +448,7 @@ class ChatWebAPI:
         try:
             messages = json.loads(archive.messages_json)
         except (json.JSONDecodeError, TypeError):
-            return error_response(
-                "归档消息数据损坏，无法解析", status_code=500
-            )
+            return error_response("归档消息数据损坏，无法解析", status_code=500)
         # 解析 image_ref 为 data URL 以便前端显示
         if self.plugin.context_mgr.image_store:
             messages = await self.plugin.context_mgr._resolve_images_for_messages(
@@ -485,9 +487,7 @@ class ChatWebAPI:
             try:
                 target_messages = json.loads(archive.messages_json)
             except (json.JSONDecodeError, TypeError):
-                return error_response(
-                    "归档消息数据损坏，无法恢复", status_code=500
-                )
+                return error_response("归档消息数据损坏，无法恢复", status_code=500)
 
             # 归档当前上下文（使用时间戳标题，不调用 LLM）
             raw_current = await self.plugin.context_mgr.repo.get_context(key)
@@ -524,6 +524,8 @@ class ChatWebAPI:
 
             # 删除已恢复的归档
             await self.plugin.db.archived_session_repo.delete(archive_id)
+
+            await self.plugin.context_mgr.inflight_mgr.reset_session(key)
 
         return {"ok": True, "title": archive.title or "未命名"}
 
@@ -660,9 +662,7 @@ class ChatWebAPI:
         if not content:
             return error_response("内容不能为空", status_code=400)
         try:
-            mid = await mgr.save_memory(
-                key, content, "short_term", source="manual"
-            )
+            mid = await mgr.save_memory(key, content, "short_term", source="manual")
             return {"ok": True, "id": mid}
         except Exception as e:
             return error_response(str(e), status_code=500)
@@ -827,7 +827,11 @@ def register_web_api_routes(plugin) -> None:
         ("/api/personas/<id>/set_default", api.set_default_persona, ["POST"]),
         # --- 会话(长路由在前,通配在后) ---
         ("/api/sessions/<path:key>/llm-preview", api.llm_preview, ["GET"]),
-        ("/api/sessions/<path:key>/archives/<id>/restore", api.restore_archive, ["POST"]),
+        (
+            "/api/sessions/<path:key>/archives/<id>/restore",
+            api.restore_archive,
+            ["POST"],
+        ),
         ("/api/sessions/<path:key>/archives/<id>/delete", api.delete_archive, ["POST"]),
         ("/api/sessions/<path:key>/archives/<id>", api.get_archive, ["GET"]),
         ("/api/sessions/<path:key>/archives", api.list_archives, ["GET"]),
@@ -844,10 +848,26 @@ def register_web_api_routes(plugin) -> None:
         ("/api/tools/<name>/enable", api.enable_tool, ["POST"]),
         ("/api/tools/<name>/disable", api.disable_tool, ["POST"]),
         # --- 记忆(带 id 的长路由在前) ---
-        ("/api/memories/<path:key>/short/<id>/update", api.update_short_term_memory, ["POST"]),
-        ("/api/memories/<path:key>/short/<id>/delete", api.delete_short_term_memory, ["POST"]),
-        ("/api/memories/<path:key>/long/<id>/update", api.update_long_term_memory, ["POST"]),
-        ("/api/memories/<path:key>/long/<id>/delete", api.delete_long_term_memory, ["POST"]),
+        (
+            "/api/memories/<path:key>/short/<id>/update",
+            api.update_short_term_memory,
+            ["POST"],
+        ),
+        (
+            "/api/memories/<path:key>/short/<id>/delete",
+            api.delete_short_term_memory,
+            ["POST"],
+        ),
+        (
+            "/api/memories/<path:key>/long/<id>/update",
+            api.update_long_term_memory,
+            ["POST"],
+        ),
+        (
+            "/api/memories/<path:key>/long/<id>/delete",
+            api.delete_long_term_memory,
+            ["POST"],
+        ),
         ("/api/memories/<path:key>/short", api.list_short_term_memories, ["GET"]),
         ("/api/memories/<path:key>/long", api.list_long_term_memories, ["GET"]),
         ("/api/memories/<path:key>/short", api.add_short_term_memory, ["POST"]),

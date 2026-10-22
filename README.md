@@ -185,6 +185,9 @@
 | `proactive_timeout_max_consecutive` | `2` | 主动回复最大连续次数，0 不限制 |
 | `proactive_round_interval` | `0` | N 轮触发回复（仅群聊，0 禁用） |
 | `enable_command_execution` | `false` | 启用命令执行，LLM 可执行其他插件命令 |
+| `enable_inflight_guidance` | `true` | 启用并发消息实时引导（模型请求中 Redirect 抢占重建，工具边界 Steer 注入，收尾消息走兜底） |
+| `max_inflight_guidance_messages` | `10` | 并发消息单轮处理最大数量（超出部分自动归档至会话历史） |
+| `max_inflight_followup_rounds` | `5` | 自动追答连续轮数上限，0 禁用自动追答（暂存消息仅随下次用户消息注入引导）；用户真实消息开启新一轮时计数清零 |
 | `enable_message_debounce` | `false` | 启用消息抖动 |
 | `debounce_window_ms` | `2000` | 抖动等待窗口（毫秒）|
 | `debounce_max_messages` | `10` | 最大缓冲消息数 |
