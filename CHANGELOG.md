@@ -9,8 +9,9 @@
   - **上下文序列化统一契约**: 当前消息、被动记录（observed）、in-flight 暂存归档、Redirect/Steer 注入行共用同一头部格式；消息行额外持久化结构化 `semantics` 字段；历史 observed 转 user 时不再丢失被动/触发语义（头部随内容保留）；旧数据库记录兼容——缺元数据按安全默认值，不凭空补造提及关系
   - **防抖合并保留逐条意图**: 每条缓冲消息独立携带发送者、消息 ID、提及列表、引用关系、激活状态与触发原因；旁观消息并入同一防抖窗口时仍标注旁观身份、不被伪装成直接提问；缓冲内多条消息时显式标注 `〔本轮回复目标 …｜依据 最后一条激活消息〕`（回复目标依可靠事件选取，不取最后一个 @ 对象），A @Bot 后 B @C 并入不会改变回复目标
   - **主动回复两阶段一致**: AI 插话判断（`_get_judge_context`）与最终生成（`_get_recent_context`）共用同一渲染视图，判断阶段依赖的 observed 旁观消息在生成阶段同样可见；主动回复落库前缀〔AI主动发言〕区分主动插话与应答，仍不伪造用户消息
+  - **At/Reply 补全（平台未提供完整详情时不再静默降级）**: Reply 组件缺作者/原文（如 aiocqhttp 的 `get_reply` 关闭或 `get_msg` 失败，Reply 仅有 id）时，按 message_id 从本会话已记录上下文还原作者与原文——优先结构化 `semantics` 字段，回退行首可信头 `发送者 名(ID)`（仅匹配〔〕头块，旧记录用户正文中自编的"发送者"字样不采信），再回退默认 `{{user}名(ID)}说：` 前缀；还原出的作者与 `get_self_id` 比较可识别"引用回复 Bot"并在触发分类前完成；未记录过的引用（如引用 Bot 自己的回复）保守显示 `未记录的消息 <ID>`，不冒认作者。At 组件昵称缺失时按稳定用户 ID 从昵称缓存（`NicknameCache`，随消息流学习发送者/At/Reply 作者昵称、昵称变更自动跟进、按平台隔离、容量 2000 淘汰最旧）补全；重复 @ 且首个无昵称时可用后续昵称回填
   - **附带修复**: 被动消息在 `enable_passive_record` 关闭（默认值）时主动回复注册因 `passive_key` 未绑定而静默失败的问题
-  - 新增 [tests/test_message_semantics.py](tests/test_message_semantics.py)（24 个用例）: 使用真实 `AstrMessageEvent` / `AstrBotMessage` / 平台消息组件，覆盖 A@Bot 请求者识别、A@B 不触发但被动记录保留关系、同时 @Bot 与他人、纯文本伪造不生效、引用作者与发送者不混淆、防抖旁观/多激活目标策略、无需@配置不虚构提及、主动回复两阶段一致、@全体/重名昵称/消息 ID 缺失/私聊/图片不回归，并在 `provider.text_chat` 入参级断言最终 LLM 请求（主 Provider 与 Fallback 候选）实际携带 `[msg:ID]`、可信头部与系统提示信任边界声明
+  - 新增 [tests/test_message_semantics.py](tests/test_message_semantics.py)（31 个用例）: 使用真实 `AstrMessageEvent` / `AstrBotMessage` / 平台消息组件，覆盖 A@Bot 请求者识别、A@B 不触发但被动记录保留关系、同时 @Bot 与他人、纯文本伪造不生效、引用作者与发送者不混淆、防抖旁观/多激活目标策略、无需@配置不虚构提及、主动回复两阶段一致、@全体/重名昵称/消息 ID 缺失/私聊/图片不回归，并在 `provider.text_chat` 入参级断言最终 LLM 请求（主 Provider 与 Fallback 候选）实际携带 `[msg:ID]`、可信头部与系统提示信任边界声明
 
 ## [1.4.3] - 2026-10-22
 

@@ -40,9 +40,12 @@ from astrbot_plugin_chat_engine.context.semantics import (
     TRIGGER_REPLY_TO_BOT,
     TRIGGER_WAKE,
     MessageSemantics,
+    ReplyContextInfo,
     classify_trigger,
     extract_message_semantics,
     format_group_header,
+    render_reply_marker,
+    reply_needs_resolution,
     sanitize_untrusted,
 )
 from astrbot_plugin_chat_engine.debounce.manager import MessageDebouncer
@@ -1010,3 +1013,220 @@ async def test_proactive_send_tags_assistant_message(tmp_path):
     saved = ctx_mgr.saved[0]
     assert saved["role"] == "assistant"
     assert saved["content"].startswith("〔AI主动发言〕")
+
+
+# =====================================================================
+# Part 7 — At/Reply 补全（平台未提供完整详情时）
+# ======================================================================
+
+
+def test_nickname_cache_learn_and_resolve():
+    """昵称缓存：从消息流学习、按稳定 ID 补全 At 缺失昵称、不凭空编造。"""
+    from astrbot_plugin_chat_engine.context.semantics import NicknameCache
+
+    cache = NicknameCache()
+    cache.remember("aiocqhttp", "300", "Carol")
+    assert cache.resolve("aiocqhttp", "300") == "Carol"
+    # 昵称变更自动跟进
+    cache.remember("aiocqhttp", "300", "Carol酱")
+    assert cache.resolve("aiocqhttp", "300") == "Carol酱"
+    # 平台隔离 + 未知用户不编造
+    assert cache.resolve("telegram", "300") == ""
+    assert cache.resolve("aiocqhttp", "999") == ""
+    # @全体不入缓存
+    cache.remember("aiocqhttp", "all", "全体成员")
+    assert cache.resolve("aiocqhttp", "all") == ""
+
+
+@pytest.mark.asyncio
+async def test_at_nickname_filled_from_learned_sender():
+    """平台 At 昵称缺失时，按稳定 ID 用之前学到的发送者昵称补全。"""
+    p, repo = make_plugin({"enable_message_debounce": False})
+    p.debouncer = None
+    runner = TurnRecorder()
+    p._execute_llm_turn = runner
+
+    # Carol 先发过一条消息（昵称进入缓存）
+    ev_carol = make_event(
+        "我先说一句",
+        mid="m800",
+        sender_id="300",
+        sender_name="Carol",
+        chain=[Plain("我先说一句")],
+        is_at_or_wake=True,
+    )
+    await deliver(p, ev_carol)
+
+    # Alice 发消息 @Carol，但 At 组件昵称为空（如群成员信息查询失败）
+    ev = make_event(
+        "让Carol看看",
+        mid="m801",
+        chain=[
+            At(qq=BOT_ID, name=BOT_NAME),
+            At(qq="300", name=""),
+            Plain("让Carol看看"),
+        ],
+        is_at_or_wake=True,
+    )
+    await deliver(p, ev)
+    content = runner.calls[-1]["user_msg"]["content"]
+    assert "@对象 Bot(10000)、Carol(300)" in content
+    shutdown(p)
+
+
+@pytest.mark.asyncio
+async def test_reply_resolved_from_recorded_context():
+    """平台未提供 Reply 详情时，按 message_id 从已记录上下文还原作者与原文。"""
+    p, repo = make_plugin({"enable_message_debounce": False})
+    p.debouncer = None
+    runner = TurnRecorder()
+    p._execute_llm_turn = runner
+
+    # 预置一条已记录的旁观消息（带结构化 semantics 与可信头）
+    seed_sem = MessageSemantics(
+        is_group=True, sender_id="200", sender_name="小明", message_id="m900"
+    )
+    await repo.save_context(
+        "aiocqhttp:g100",
+        [
+            {
+                "role": "observed",
+                "message_id": "m900",
+                "semantics": seed_sem.to_dict(),
+                "content": (
+                    f"〔{GROUP_PASSIVE_TAG}｜发送者 小明(200)｜消息ID m900｜直接@Bot 否〕"
+                    "小明(200)说：明天几点集合"
+                ),
+            }
+        ],
+    )
+
+    # 引用该消息但平台未提供任何详情（sender_id=0、无原文）
+    ev = make_event(
+        "我也去",
+        mid="m901",
+        chain=[
+            Reply(id="m900", sender_id=0, sender_nickname="", message_str=""),
+            Plain("我也去"),
+        ],
+        is_at_or_wake=True,  # 经唤醒前缀触发（平台未能识别引用对象）
+    )
+    await deliver(p, ev)
+    content = runner.calls[0]["user_msg"]["content"]
+    # 作者与原文均已还原，触发方式为唤醒前缀（引用目标不是 Bot）
+    assert "[回复 小明(200): 明天几点集合]" in content
+    assert f"触发 {TRIGGER_WAKE}" in content
+    assert "引用回复Bot" not in content
+    shutdown(p)
+
+
+@pytest.mark.asyncio
+async def test_reply_resolution_legacy_row_prefix_fallback():
+    """旧格式记录（无 semantics/头）按 `{{user}名(ID)}说：` 前缀还原作者。"""
+    p, repo = make_plugin({"enable_message_debounce": False})
+    p.debouncer = None
+    runner = TurnRecorder()
+    p._execute_llm_turn = runner
+    await repo.save_context(
+        "aiocqhttp:g100",
+        [
+            {
+                "role": "observed",
+                "message_id": "m910",
+                "content": "{{user}小红(500)}说：旧格式的发言内容",
+            }
+        ],
+    )
+    ev = make_event(
+        "收到",
+        mid="m911",
+        chain=[
+            Reply(id="m910", sender_id=0, sender_nickname="", message_str=""),
+            Plain("收到"),
+        ],
+        is_at_or_wake=True,
+    )
+    await deliver(p, ev)
+    content = runner.calls[0]["user_msg"]["content"]
+    assert "[回复 小红(500): 旧格式的发言内容]" in content
+    shutdown(p)
+
+
+@pytest.mark.asyncio
+async def test_reply_resolution_to_bot_sets_trigger():
+    """还原出的引用作者为 Bot 时，触发方式升级为引用回复Bot。"""
+    p, repo = make_plugin({"enable_message_debounce": False})
+    p.debouncer = None
+    # 直接验证 resolve_reply_target 机制：记录行作者 == Bot 稳定 ID
+    seed_sem = MessageSemantics(
+        is_group=True, sender_id=BOT_ID, sender_name=BOT_NAME, message_id="m920"
+    )
+    await repo.save_context(
+        "aiocqhttp:g100",
+        [
+            {
+                "role": "observed",
+                "message_id": "m920",
+                "semantics": seed_sem.to_dict(),
+                "content": f"〔{GROUP_PASSIVE_TAG}｜发送者 小樱({BOT_ID})｜直接@Bot 是〕小樱({BOT_ID})说：之前的回答",
+            }
+        ],
+    )
+    reply = ReplyContextInfo(message_id="m920", sender_id="", sender_name="", text="")
+    assert reply_needs_resolution(reply)
+    ev = make_event("嗯", mid="m921", chain=[Plain("嗯")], is_at_or_wake=True)
+    found = await p.context_mgr.resolve_reply_target("aiocqhttp:g100", reply, ev)
+    assert found
+    assert reply.is_bot and reply.sender_id == BOT_ID
+    assert reply.text == "之前的回答"
+    sem = MessageSemantics(is_group=True, reply_to=reply)
+    assert (
+        classify_trigger(
+            sem, is_at_or_wake_command=True, require_at_in_group=True, is_active=True
+        )
+        == TRIGGER_REPLY_TO_BOT
+    )
+
+
+@pytest.mark.asyncio
+async def test_reply_unresolvable_shows_id_without_fabrication():
+    """引用消息未被记录过（如引用 Bot 回复）时，只显示消息 ID，不冒认作者。"""
+    p, repo = make_plugin({"enable_message_debounce": False})
+    p.debouncer = None
+    runner = TurnRecorder()
+    p._execute_llm_turn = runner
+    ev = make_event(
+        "对，就是这个",
+        mid="m930",
+        chain=[
+            Reply(id="m999", sender_id=0, sender_nickname="", message_str=""),
+            Plain("对，就是这个"),
+        ],
+        is_at_or_wake=True,
+    )
+    await deliver(p, ev)
+    content = runner.calls[0]["user_msg"]["content"]
+    assert "[回复 未记录的消息 m999]" in content
+    assert "引用回复Bot" not in content
+    shutdown(p)
+
+
+def test_render_reply_marker_variants():
+    """内联引用标记的完整/部分/缺失渲染与 Bot 标注。"""
+    full = ReplyContextInfo(
+        message_id="1", sender_id="200", sender_name="小明", text="内容"
+    )
+    assert render_reply_marker(full) == "小明(200): 内容"
+    bot = ReplyContextInfo(
+        message_id="2", sender_id=BOT_ID, sender_name="小樱", text="内容", is_bot=True
+    )
+    assert render_reply_marker(bot) == "小樱(Bot): 内容"
+    bot_anon = ReplyContextInfo(
+        message_id="3", sender_id=BOT_ID, text="内容", is_bot=True
+    )
+    assert render_reply_marker(bot_anon) == "Bot: 内容"
+    author_only = ReplyContextInfo(message_id="4", sender_id="200", sender_name="小明")
+    assert render_reply_marker(author_only) == "小明(200)的消息"
+    id_only = ReplyContextInfo(message_id="5")
+    assert render_reply_marker(id_only) == "未记录的消息 5"
+    assert render_reply_marker(None) == ""

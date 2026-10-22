@@ -3,6 +3,7 @@ user message formatting, and compression triggering.
 """
 
 import asyncio
+import re
 
 from astrbot.api import logger
 from astrbot.api.message_components import Reply
@@ -16,8 +17,12 @@ from .compressor import BaseCompressor, ContextCompressorFactory
 from .inflight import InflightManager
 from .semantics import (
     MessageSemantics,
+    NicknameCache,
+    ReplyContextInfo,
     extract_message_semantics,
     format_group_header,
+    render_reply_marker,
+    reply_needs_resolution,
     sanitize_untrusted,
 )
 from .token_counter import TokenEstimator
@@ -52,6 +57,7 @@ class ChatContextManager:
         )
         self.token_counter = TokenEstimator()
         self.inflight_mgr = InflightManager()
+        self.nicknames = NicknameCache()
         self._cached_modalities: list[str] | None = None
         self._cached_max_context_tokens: int | None = None
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -109,8 +115,12 @@ class ChatContextManager:
         """
         text = sanitize_untrusted(event.message_str or "")
 
-        # 提取引用消息上下文
-        reply_context = self._extract_reply_context(event)
+        # 提取引用消息上下文：已提供语义时使用（可能经上下文还原补全），
+        # 否则从原始 Reply 组件提取
+        if semantics is not None and semantics.reply_to is not None:
+            reply_context = render_reply_marker(semantics.reply_to)
+        else:
+            reply_context = self._extract_reply_context(event)
 
         fmt = self.config.get("user_id_format", "{{user}{NAME}({ID})}说：")
         name = event.get_sender_name() or "unknown"
@@ -151,6 +161,124 @@ class ChatContextManager:
         except Exception:
             pass
         return ""
+
+    # 引用目标还原 — 平台未提供 Reply 详情时从已记录上下文恢复
+
+    # 行首的可信元数据头块：`〔…〕`（插件生成，用户原文不会出现）
+    _ROW_HEADER_BLOCK_RE = re.compile(r"^〔([^〕]*)〕")
+    # 头块内的发送者字段：`发送者 樱花(1001)`（昵称可含空格）
+    _ROW_HEADER_SENDER_RE = re.compile(r"发送者\s*(.*?)\(([^()]*)\)")
+    # 默认 user_id_format 前缀：`{{user}樱樱(1001)}说：`（捕获昵称与 ID）
+    _ROW_LEGACY_PREFIX_RE = re.compile(r"^\{\{user\}(.+?)\(([^()]*)\)\}说：")
+    # 无模板裸前缀：`樱樱(1001)说：`（自定义 user_id_format 去掉 {{user}} 时）
+    _ROW_BARE_PREFIX_RE = re.compile(r"^[^（()]{1,30}\([^()（）]{1,64}\)说：")
+
+    @staticmethod
+    def _row_content_text(row: dict) -> str:
+        """取消息行的纯文本部分（content 为 str 或 text 块列表）。"""
+        content = row.get("content", "")
+        if isinstance(content, list):
+            return " ".join(
+                p.get("text", "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        return content if isinstance(content, str) else ""
+
+    def _row_identity(self, row: dict) -> tuple[str, str]:
+        """从已记录的消息行解析发送者 (sender_id, sender_name)。
+
+        优先读结构化 semantics 字段；缺失时从行首可信元数据头内的
+        `发送者 名(ID)` 字段还原（仅匹配行首〔〕头块，旧记录用户正文中
+        自行编写的"发送者"字样不会被采信）；再退回旧格式
+        `{{user}名(ID)}说：` 前缀。解析失败返回空串，不凭空补造。
+        """
+        sem = row.get("semantics")
+        if isinstance(sem, dict):
+            sid = str(sem.get("sender_id", "") or "").strip()
+            name = str(sem.get("sender_name", "") or "").strip()
+            if sid or name:
+                return sid, name
+        text = self._row_content_text(row)
+        header = self._ROW_HEADER_BLOCK_RE.match(text)
+        if header:
+            m = self._ROW_HEADER_SENDER_RE.search(header.group(1))
+            if m:
+                sid = m.group(2).strip()
+                name = m.group(1).strip()
+                if sid or name:
+                    return sid, name
+        m = self._ROW_LEGACY_PREFIX_RE.match(text)
+        if m:
+            return m.group(2).strip(), m.group(1).strip()
+        return "", ""
+
+    def _row_body_text(self, row: dict) -> str:
+        """取消息行去除元数据头与发送者前缀后的正文（用于引用原文还原）。"""
+        text = self._row_content_text(row)
+        # 剥离开头的可信元数据头与发送者前缀，保留正文（含嵌套引用）
+        text = re.sub(r"^〔[^〕]*〕", "", text)
+        text = self._ROW_LEGACY_PREFIX_RE.sub("", text)
+        text = self._ROW_BARE_PREFIX_RE.sub("", text)
+        return text.strip()
+
+    async def resolve_reply_target(
+        self, session_key: str, reply: ReplyContextInfo, event
+    ) -> bool:
+        """按 message_id 从本会话已记录上下文还原引用目标。
+
+        平台适配器未提供 Reply 详情时（如 aiocqhttp 的 get_reply 关闭或
+        get_msg 调用失败，Reply 仅有 id），引用的消息若曾被本插件记录
+        （user / observed 行），可按 message_id 恢复其作者与正文，并据此
+        判定是否引用了 Bot 自己（sender_id 与 get_self_id 比较）。
+
+        只填充缺失字段，不覆盖平台已提供的信息；未找到匹配行返回 False。
+        找不到的引用大概率指向 Bot 自己的回复（bot 回复不携带平台
+        message_id，无法回查），此时保守标记为未记录，不冒认作者。
+
+        Args:
+            session_key: 会话标识
+            reply: 待补全的引用目标（原地修改）
+            event: 原始消息事件（读取 self_id）
+
+        Returns:
+            是否从已记录上下文中找到了匹配的消息行。
+        """
+        if not reply_needs_resolution(reply):
+            return False
+        try:
+            self_id = str(event.get_self_id() or "").strip()
+        except Exception:
+            self_id = ""
+        try:
+            rows = await self.repo.get_context(session_key)
+        except Exception:
+            return False
+        target_id = reply.message_id
+        for row in reversed(rows):
+            if row.get("role") not in ("user", "observed"):
+                continue
+            if str(row.get("message_id", "") or "") != target_id:
+                continue
+            sid, name = self._row_identity(row)
+            if sid and not reply.sender_id:
+                reply.sender_id = sid
+                reply.is_bot = bool(self_id) and sid == self_id
+                # 学习引用作者昵称（平台未提供时的次优来源）
+                if name:
+                    try:
+                        self.nicknames.remember(
+                            str(event.get_platform_name() or ""), sid, name
+                        )
+                    except Exception:
+                        pass
+            if name and not reply.sender_name:
+                reply.sender_name = name
+            body = self._row_body_text(row)
+            if body and not reply.text:
+                reply.text = sanitize_untrusted(body)[:200]
+            return True
+        return False
 
     def should_respond(self, event) -> bool:
         """判断是否应该响应此消息。

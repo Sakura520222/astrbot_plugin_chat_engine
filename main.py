@@ -51,6 +51,8 @@ from .context.semantics import (
     MessageSemantics,
     classify_trigger,
     extract_message_semantics,
+    render_reply_marker,
+    reply_needs_resolution,
     sanitize_untrusted,
 )
 from .context.token_counter import TokenEstimator
@@ -625,7 +627,23 @@ class ChatEnginePlugin(Star):
             # 是否触发回复（策略判定）与消息语义（@对象/引用/触发方式）
             # 分开提取：@其他用户 ≠ @Bot，未要求 @Bot 的配置不虚构提及状态
             should_respond = self.context_mgr.should_respond(event)
-            semantics = extract_message_semantics(event, is_group)
+            # getattr 兼容非完整 context_mgr（测试桩等）：缺昵称缓存时跳过补全
+            _nick_resolver = getattr(self.context_mgr, "nicknames", None)
+            semantics = extract_message_semantics(
+                event, is_group, nickname_resolver=_nick_resolver
+            )
+            # At/Reply 补全: 平台未提供引用详情（sender/原文缺失）时，
+            # 按 message_id 从本会话已记录上下文还原作者与原文；
+            # 还原后可能识别出引用 Bot，须在触发分类之前完成
+            if reply_needs_resolution(semantics.reply_to):
+                try:
+                    await self.context_mgr.resolve_reply_target(
+                        self.context_mgr.build_session_key(event),
+                        semantics.reply_to,
+                        event,
+                    )
+                except Exception as e:
+                    logger.debug(f"[ChatEngine] 引用目标还原失败: {e}")
             semantics.trigger = classify_trigger(
                 semantics,
                 is_at_or_wake_command=is_at,
@@ -850,7 +868,7 @@ class ChatEnginePlugin(Star):
             # === In-flight 拦截: 会话正在执行 AI 请求时暂存新触发消息 ===
             # 必须在进入防抖/会话锁路径之前识别，避免排队等待或防抖定时器
             # 触发独立回复
-            _reply_ctx = self.context_mgr._extract_reply_context(event)
+            _reply_ctx = render_reply_marker(semantics.reply_to)
             _display_text = (
                 f"[回复 {_reply_ctx}]{message_text}" if _reply_ctx else message_text
             )
@@ -2302,7 +2320,12 @@ class ChatEnginePlugin(Star):
                     if ev is None:
                         continue
                     _raw = (getattr(ev, "message_str", "") or "").strip()
-                    _rc = self.context_mgr._extract_reply_context(ev)
+                    # 引用上下文优先用缓冲消息携带的语义（可能已还原补全）
+                    _m_sem = m.get("semantics")
+                    if _m_sem is not None and _m_sem.reply_to is not None:
+                        _rc = render_reply_marker(_m_sem.reply_to)
+                    else:
+                        _rc = self.context_mgr._extract_reply_context(ev)
                     _dt = f"[回复 {_rc}]{_raw}" if _rc else _raw
                     _stash_msg = InflightMessage(
                         id=uuid.uuid4().hex,

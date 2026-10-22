@@ -38,12 +38,47 @@ _RESERVED_R = "〕"
 # 引用消息原文在序列化时的最大长度（防止长引用撑爆上下文）
 _REPLY_TEXT_LIMIT = 200
 
+# 昵称缓存容量上限（超出时淘汰最旧条目；按 platform:user_id 索引）
+_NICKNAME_CACHE_MAX = 2000
+
 
 def sanitize_untrusted(text: str) -> str:
     """把用户原文中的保留定界符替换为普通全角括号，防止伪造可信元数据头。"""
     if not text:
         return text
     return text.replace(_RESERVED_L, "（").replace(_RESERVED_R, "）")
+
+
+class NicknameCache:
+    """平台用户昵称缓存 — 从消息流中学习（发送者 / At 组件 / Reply 作者）。
+
+    用于补全平台适配器缺失的 At 昵称（如 aiocqhttp 群成员信息查询失败时
+    ``At.name`` 为空）：昵称按稳定用户 ID 记忆，最新值覆盖旧值（昵称变更
+    自动跟进）。仅缓存"插件亲眼见过"的昵称，不做任何外部查询。
+    """
+
+    def __init__(self, max_entries: int = _NICKNAME_CACHE_MAX):
+        self._max = max_entries
+        self._names: dict[str, str] = {}
+
+    def remember(self, platform: str, user_id: str, nickname: str) -> None:
+        if not platform or not user_id or not nickname or user_id == "all":
+            return
+        key = f"{platform}:{user_id}"
+        if key in self._names and self._names[key] == nickname:
+            return
+        if len(self._names) >= self._max and key not in self._names:
+            self._names.pop(next(iter(self._names)))  # 淘汰最旧条目
+        self._names[key] = nickname
+
+    def resolve(self, platform: str, user_id: str) -> str:
+        if not platform or not user_id or user_id == "all":
+            return ""
+        return self._names.get(f"{platform}:{user_id}", "")
+
+    def __call__(self, platform: str, user_id: str) -> str:
+        """等价 resolve：作为 extract_message_semantics 的 nickname_resolver 使用。"""
+        return self.resolve(platform, user_id)
 
 
 @dataclass
@@ -191,8 +226,18 @@ def _norm_id(value) -> str:
     return "" if s in ("0", "None") else s
 
 
-def extract_message_semantics(event, is_group: bool) -> MessageSemantics:
-    """从事件原生消息链提取语义。任何组件解析失败按缺失降级，不抛异常。"""
+def extract_message_semantics(
+    event, is_group: bool, nickname_resolver=None
+) -> MessageSemantics:
+    """从事件原生消息链提取语义。任何组件解析失败按缺失降级，不抛异常。
+
+    Args:
+        event: 消息事件
+        is_group: 是否群聊消息
+        nickname_resolver: 昵称补全器（NicknameCache 实例，可调用且带
+            remember 方法）；平台 At 组件缺失昵称时按稳定 ID 补全，同时
+            从消息流学习发送者/At/Reply 作者昵称。None 时跳过补全。
+    """
     try:
         sender_id = _norm_id(event.get_sender_id())
         sender_name = (event.get_sender_name() or "").strip()
@@ -210,6 +255,14 @@ def extract_message_semantics(event, is_group: bool) -> MessageSemantics:
         self_id = _norm_id(event.get_self_id())
     except Exception:
         self_id = ""
+    try:
+        platform = str(event.get_platform_name() or "")
+    except Exception:
+        platform = ""
+
+    # 学习发送者昵称（最新值覆盖旧值，昵称变更自动跟进）
+    if nickname_resolver is not None and sender_id and sender_name:
+        nickname_resolver.remember(platform, sender_id, sender_name)
 
     try:
         components = event.get_messages() or []
@@ -221,33 +274,81 @@ def extract_message_semantics(event, is_group: bool) -> MessageSemantics:
         try:
             if isinstance(comp, At):
                 qq = _norm_id(getattr(comp, "qq", None))
-                if not qq or qq in seen_qq:
+                if not qq:
+                    continue
+                name = str(getattr(comp, "name", "") or "").strip()
+                if nickname_resolver is not None and name:
+                    nickname_resolver.remember(platform, qq, name)
+                if qq in seen_qq:
+                    # 重复 @：保留首个条目，但可用新昵称补全空名
+                    for m in sem.mentions:
+                        if m.qq == qq and not m.name and name:
+                            m.name = name
                     continue
                 seen_qq.add(qq)
                 is_all = qq == "all"
                 sem.mentions.append(
                     MentionTarget(
                         qq=qq,
-                        name=str(getattr(comp, "name", "") or "").strip(),
+                        name=name,
                         is_bot=not is_all and bool(self_id) and qq == self_id,
                         is_all=is_all,
                     )
                 )
             elif isinstance(comp, Reply) and sem.reply_to is None:
+                r_sender_id = _norm_id(getattr(comp, "sender_id", None))
+                r_sender_name = str(getattr(comp, "sender_nickname", "") or "").strip()
+                if nickname_resolver is not None and r_sender_id and r_sender_name:
+                    nickname_resolver.remember(platform, r_sender_id, r_sender_name)
                 sem.reply_to = ReplyContextInfo(
                     message_id=_norm_id(getattr(comp, "id", None)),
-                    sender_id=_norm_id(getattr(comp, "sender_id", None)),
-                    sender_name=str(getattr(comp, "sender_nickname", "") or "").strip(),
+                    sender_id=r_sender_id,
+                    sender_name=r_sender_name,
                     text=sanitize_untrusted(
                         str(getattr(comp, "message_str", "") or "")
                     )[:_REPLY_TEXT_LIMIT],
-                    is_bot=bool(self_id)
-                    and _norm_id(getattr(comp, "sender_id", None)) == self_id,
+                    is_bot=bool(self_id) and r_sender_id == self_id,
                 )
         except Exception:
             # 单个组件异常不阻断整条消息的语义提取
             continue
+
+    # At 昵称补全：平台未提供昵称时按稳定 ID 从缓存取最近已知昵称
+    if nickname_resolver is not None:
+        for m in sem.mentions:
+            if not m.name and not m.is_all and not m.is_bot:
+                m.name = nickname_resolver(platform, m.qq)
     return sem
+
+
+def reply_needs_resolution(reply: ReplyContextInfo | None) -> bool:
+    """判断引用目标是否需要从已记录上下文还原（平台未提供完整详情）。"""
+    if reply is None:
+        return False
+    return bool(reply.message_id) and (not reply.sender_id or not reply.text)
+
+
+def render_reply_marker(reply: ReplyContextInfo | None) -> str:
+    """把引用目标渲染为内联 ``[回复 …]`` 标记（与历史格式兼容）。
+
+    平台提供了完整详情时直接使用；部分缺失时尽可能给出作者或消息 ID；
+    全部缺失时返回空字符串（不显示标记）。
+    """
+    if reply is None:
+        return ""
+    if reply.is_bot:
+        author = f"{reply.sender_name}(Bot)" if reply.sender_name else "Bot"
+    else:
+        author = reply.author_label()
+    if author and reply.text:
+        return f"{author}: {reply.text}"
+    if reply.text:
+        return reply.text
+    if author:
+        return f"{author}的消息"
+    if reply.message_id:
+        return f"未记录的消息 {reply.message_id}"
+    return ""
 
 
 def classify_trigger(
