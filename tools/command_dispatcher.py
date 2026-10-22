@@ -1,7 +1,8 @@
 """命令分发器 — 扫描并执行其他插件注册的命令。
 
 允许用户通过 LLM 自然语言调用其他插件的命令。
-尊重每个命令自身的权限定义（admin / member / everyone）。
+尊重每个命令自身的权限定义（admin / group_admin / shared_group_admin /
+member / everyone，判定语义与框架 PermissionTypeFilter 对齐）。
 """
 
 import inspect
@@ -171,8 +172,8 @@ class CommandDispatcher:
                 item["description"] = cmd["description"]
             if cmd["parameters"]:
                 item["parameters"] = cmd["parameters"]
-            if cmd["permission"] == "admin":
-                item["admin_only"] = True
+            if cmd["permission"] != "everyone":
+                item["permission"] = cmd["permission"]
             result.append(item)
 
         return result
@@ -256,11 +257,26 @@ class CommandDispatcher:
 
         handler, cmd_filter, matched_name, permission = match
 
-        # 权限检查：尊重命令自身的权限定义
+        # 权限检查：尊重命令自身的权限定义（语义与框架 PermissionTypeFilter 对齐）
+        in_group = bool(event.get_group_id())
         if permission == "admin" and not event.is_admin():
             return {
                 "success": False,
                 "result": f"权限不足：命令 '{matched_name}' 仅限管理员使用。",
+            }
+        if permission == "group_admin" and in_group and not event.is_admin():
+            return {
+                "success": False,
+                "result": f"权限不足：命令 '{matched_name}' 仅限群管理员使用。",
+            }
+        if (
+            permission == "shared_group_admin"
+            and in_group
+            and not (event.is_admin() or event.get_extra("_session_isolated", False))
+        ):
+            return {
+                "success": False,
+                "result": f"权限不足：命令 '{matched_name}' 仅限群管理员使用。",
             }
 
         # 提取剩余文本作为参数
@@ -382,12 +398,16 @@ class CommandDispatcher:
         """从 handler 的 event_filters 中确定权限等级。
 
         Returns:
-            "admin" | "member" | "everyone"
+            "admin" | "group_admin" | "shared_group_admin" | "member" | "everyone"
         """
         for f in getattr(handler, "event_filters", []):
             if isinstance(f, PermissionTypeFilter):
                 if f.permission_type == PermissionType.ADMIN:
                     return "admin"
+                if f.permission_type == PermissionType.GROUP_ADMIN:
+                    return "group_admin"
+                if f.permission_type == PermissionType.SHARED_GROUP_ADMIN:
+                    return "shared_group_admin"
                 return "member"
         return "everyone"
 

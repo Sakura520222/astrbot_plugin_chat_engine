@@ -61,7 +61,7 @@ python -m pytest tests/test_image_quota_repo.py::test名  # 单测试
 | [proactive/](proactive/) | 超时 / N 轮 / AI 判断主动回复、定时回复 |
 | [image_gen/](image_gen/) | OpenAI 兼容文生图/改图 HTTP 客户端 |
 | [persona/](persona/)、[tools/](tools/) | 人格 CRUD；工具扫描与启用管理、命令分发（LLM 自然语言执行其他插件命令） |
-| [web/](web/) + [pages/](pages/) | WebUI 采用 AstrBot 插件 Pages 架构：[web/api.py](web/api.py) 用 `register_web_api` 注册路由（经 Dashboard 同源转发，认证继承 Dashboard JWT），前端静态文件在 [pages/chat-engine/](pages/chat-engine/)。无独立端口/服务器 |
+| [web/](web/) + [views/](views/) | WebUI 采用 AstrBot 插件 Views 架构（4.29 前称 Pages，`views/` 为推荐目录名）：[web/api.py](web/api.py) 用 `register_web_api` 注册路由（经 Dashboard 同源转发，认证继承 Dashboard JWT），前端静态文件在 [views/chat-engine/](views/chat-engine/)。无独立端口/服务器 |
 
 ### LLM 调用关键约定
 
@@ -71,7 +71,7 @@ python -m pytest tests/test_image_quota_repo.py::test名  # 单测试
 
 ## 跨文件同步约定（改动时容易漏）
 
-- **新增配置项**：须同步四处——[_conf_schema.json](_conf_schema.json)（schema）、[web/api.py](web/api.py) 的 `_CONFIG_KEYS`（WebUI GET/PUT 白名单）、[pages/chat-engine/app.js](pages/chat-engine/app.js) 的 `CONFIG_FIELDS`（WebUI 设置表单，含分组/类型/hint，配置需重启生效时加 `restart: true`），README 配置表也应更新
+- **新增配置项**：须同步四处——[_conf_schema.json](_conf_schema.json)（schema）、[web/api.py](web/api.py) 的 `_CONFIG_KEYS`（WebUI GET/PUT 白名单）、[views/chat-engine/app.js](views/chat-engine/app.js) 的 `CONFIG_FIELDS`（WebUI 设置表单，含分组/类型/hint，配置需重启生效时加 `restart: true`），README 配置表也应更新
 - **新增模块目录**：须同步 [.github/workflows/release.yml](.github/workflows/release.yml) 的 zip 打包清单，否则发布包缺目录导致 import 失败
 - **发版**：更新 [metadata.yaml](metadata.yaml) `version` + [CHANGELOG.md](CHANGELOG.md) 顶部条目 → push main 自动构建 zip 并创建 GitHub Release（changelog 最新条目作为 release body）
 - **会话命令**：`_SESSION_CMD_*` 正则需同时匹配有/无唤醒前缀的情况（框架会剥离唤醒前缀）
