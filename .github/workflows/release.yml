@@ -73,7 +73,7 @@ jobs:
             debounce/ \
             image_gen/ \
             memory/ \
-            pages/ \
+            views/ \
             persona/ \
             proactive/ \
             tools/ \

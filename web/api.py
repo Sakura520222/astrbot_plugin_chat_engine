@@ -883,7 +883,8 @@ def register_web_api_routes(plugin) -> None:
     ]
 
     # 路由必须以插件名为前缀:Dashboard 按 /<plugin_name>/<route> 全路径匹配转发请求,
-    # 而 Page 端 bridge endpoint 不含插件名(见官方文档 plugin-pages.md)。
+    # 而 View 端 bridge endpoint 不含插件名(bridge channel 名 astrbot-plugin-page
+    # 属线上协议,框架改名后保持不变)。
     prefix = f"/{plugin.name}"
     for route, handler, methods in routes:
         ctx.register_web_api(
