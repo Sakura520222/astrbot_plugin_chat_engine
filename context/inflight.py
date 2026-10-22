@@ -8,6 +8,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+from .semantics import MessageSemantics, format_group_header
+
 
 @dataclass
 class InflightMessage:
@@ -16,7 +18,8 @@ class InflightMessage:
     ``user_text`` / ``umo`` / ``event`` / ``is_group`` are carried so the
     buffered message can be re-dispatched into the debounce pipeline as a
     real user input for the automatic follow-up turn (not merely injected
-    as guidance text).
+    as guidance text). ``semantics`` 携带群聊消息语义（@对象/触发方式等，
+    见 context/semantics.py），供引导提示与被动归档保留逐条消息意图。
     """
 
     id: str
@@ -34,6 +37,8 @@ class InflightMessage:
     umo: str = ""
     event: Any = None
     is_group: bool = False
+    # 群聊消息语义（私聊为 None）；trigger 为空表示被动/旁观消息
+    semantics: MessageSemantics | None = None
 
 
 class _SessionInflightState:
@@ -277,6 +282,9 @@ class InflightManager:
     def build_guidance_prompt(self, messages: list[InflightMessage]) -> str:
         """Build the structured markdown prompt block for in-flight guidance.
 
+        群聊消息逐条携带可信元数据头（@对象 / 直接@Bot / 触发方式），
+        与上下文序列化保持同一契约，避免暂存消息丢失发言意图。
+
         Args:
             messages: List of InflightMessage objects.
 
@@ -298,6 +306,10 @@ class InflightManager:
         for msg in messages:
             img_prefix = "[图片] " if msg.images and "[图片]" not in msg.text else ""
             content = f"{img_prefix}{msg.text}".strip()
-            lines.append(f"- [{msg.time_str}][{msg.sender_name}]：{content}")
+            header = ""
+            if msg.is_group and msg.semantics is not None:
+                # trigger 非空 = 触发消息；空 = 被动/旁观消息
+                header = format_group_header(msg.semantics, bool(msg.semantics.trigger))
+            lines.append(f"- [{msg.time_str}][{msg.sender_name}]{header}：{content}")
 
         return "\n".join(lines)

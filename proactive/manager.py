@@ -472,10 +472,14 @@ class ProactiveManager:
             await self._save_registry()
 
             # 10. 保存到上下文（只存 assistant 回复，不伪造 user 触发消息，
-            #     避免 [Proactive Reply Trigger] 这类系统标记污染上下文、误导后续判断）
+            #     避免 [Proactive Reply Trigger] 这类系统标记污染上下文、误导后续判断；
+            #     前缀〔AI主动发言〕为插件可信元数据，区分主动插话与被动应答）
             if self._context_mgr:
                 try:
-                    assistant_msg = {"role": "assistant", "content": text}
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": f"〔AI主动发言〕{text}",
+                    }
                     await self._context_mgr.append_assistant_message(
                         session_key,
                         assistant_msg,
@@ -490,8 +494,15 @@ class ProactiveManager:
             logger.error(f"[Proactive] 主动回复失败 [{session_key}]: {e}")
             return False
 
-    async def _get_recent_context(self, session_key: str) -> str:
-        """获取最近几轮对话的纯文本，包含 [msg:ID] 标记。"""
+    async def _render_recent_messages(self, session_key: str, max_messages: int) -> str:
+        """把最近上下文渲染为统一的纯文本视图（判断与生成共用）。
+
+        同时纳入 user / observed / assistant 三类消息：observed（被动旁观）
+        与 user 统一标记为 user（都是群成员发言），被动身份由消息内嵌的
+        可信元数据头（〔群聊旁观消息…〕，见 context/semantics.py）表达。
+        AI 判断插话与最终生成回复必须看到同一份视图，避免判断阶段
+        依赖的消息在生成阶段不可见、两阶段对发言者理解不一致。
+        """
         if not self._context_mgr:
             return ""
         try:
@@ -499,26 +510,35 @@ class ProactiveManager:
             recent = []
             for msg in reversed(messages):
                 role = msg.get("role", "")
-                if role in ("user", "assistant"):
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = " ".join(
-                            p.get("text", "")
-                            for p in content
-                            if isinstance(p, dict) and p.get("type") == "text"
-                        )
-                    # 为用户消息注入 [msg:ID] 标记
-                    if role == "user" and content:
-                        msg_id = msg.get("message_id", "")
-                        if msg_id:
-                            content = f"[msg:{msg_id}] {content}"
-                    if content:
-                        recent.append(f"[{role}]: {content}")
-                if len(recent) >= 10:
+                if role not in ("user", "assistant", "observed"):
+                    continue
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                if not content:
+                    continue
+                # assistant 保留原角色；user/observed 统一为 user（群成员发言）
+                label = "assistant" if role == "assistant" else "user"
+                # 为群成员消息注入 [msg:ID] 标记（assistant 主动发言无消息 ID）
+                msg_id = msg.get("message_id", "")
+                if label == "user" and msg_id:
+                    content = f"[msg:{msg_id}] {content}"
+                recent.append(f"[{label}]: {content}")
+                if len(recent) >= max_messages:
                     break
             return "\n".join(reversed(recent))
         except Exception:
             return ""
+
+    async def _get_recent_context(self, session_key: str) -> str:
+        """获取最近几轮对话的纯文本（与 AI 判断共用同一渲染视图）。"""
+        return await self._render_recent_messages(
+            session_key, self._cfg_int("proactive_ai_judge_context_messages", 10)
+        )
 
     # AI 判断主动回复
 
@@ -693,7 +713,9 @@ class ProactiveManager:
             return False
 
         prompt = (
-            "以下是群聊最近的对话记录（user 包含群成员发言，assistant 为你之前的回复）。"
+            "以下是群聊最近的对话记录（user 为群成员发言，其中〔群聊旁观消息〕"
+            "头标注的是未触发回复的旁观发言；assistant 为你之前的回复，"
+            "〔AI主动发言〕标注的是你主动插话的内容）。"
             "请判断现在是否适合你（机器人）主动插话：\n\n"
             f"{recent_text}\n\n"
             "只回答 YES 或 NO。"
@@ -729,38 +751,15 @@ class ProactiveManager:
     async def _get_judge_context(self, session_key: str) -> str:
         """获取最近群聊上下文（含 observed 被动消息），用于 AI 判断。
 
-        与 _get_recent_context 的区别：后者只取 user/assistant，看不到群成员的
-        被动消息；判断"是否插话"必须看到群里在聊什么，因此这里也纳入 observed。
-        observed 与 user 统一标记为 user（都是"别人说的话"）。
+        与 _get_recent_context 共用同一渲染视图（_render_recent_messages）：
+        判断插话与生成回复看到的消息集合、发言者标注完全一致，
+        判断阶段依赖的关键 observed 消息在生成阶段同样可见。
+        observed 与 user 统一标记为 user（都是群成员发言），
+        被动/旁观身份由消息内嵌的可信元数据头表达。
         """
-        if not self._context_mgr:
-            return ""
-        try:
-            messages = await self._context_mgr.load_context(session_key)
-            recent = []
-            for msg in reversed(messages):
-                role = msg.get("role", "")
-                if role not in ("user", "assistant", "observed"):
-                    continue
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(
-                        p.get("text", "")
-                        for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    )
-                if not content:
-                    continue
-                # assistant 保留原角色；user/observed 统一为 user（群成员发言）
-                label = "assistant" if role == "assistant" else "user"
-                recent.append(f"[{label}]: {content}")
-                if len(recent) >= self._cfg_int(
-                    "proactive_ai_judge_context_messages", 10
-                ):
-                    break
-            return "\n".join(reversed(recent))
-        except Exception:
-            return ""
+        return await self._render_recent_messages(
+            session_key, self._cfg_int("proactive_ai_judge_context_messages", 10)
+        )
 
     # 后台超时监控
 

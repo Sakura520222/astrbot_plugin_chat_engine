@@ -14,6 +14,12 @@ from ..db.session_repo import SessionRepository
 from ..utils.config import cfg_int
 from .compressor import BaseCompressor, ContextCompressorFactory
 from .inflight import InflightManager
+from .semantics import (
+    MessageSemantics,
+    extract_message_semantics,
+    format_group_header,
+    sanitize_untrusted,
+)
 from .token_counter import TokenEstimator
 
 
@@ -79,12 +85,29 @@ class ChatContextManager:
         except Exception:
             return event.get_group_id() is not None
 
-    def format_user_message(self, event) -> str:
+    def format_user_message(
+        self,
+        event,
+        semantics: MessageSemantics | None = None,
+        is_active: bool = True,
+    ) -> str:
         """格式化用户消息。添加用户标识前缀和引用消息上下文。
 
-        格式: "{{user}{昵称}({ID})}说：[回复 {引用者}: {引用内容}]\n消息内容"
+        格式: "{可信元数据头}{NAME}({ID})说：[回复 {引用者}: {引用内容}]\\n消息内容"
+
+        群聊消息前置插件生成的可信元数据头（〔群聊消息〕/〔群聊旁观消息〕，
+        含发送者、消息 ID、@对象、是否直接@Bot、触发方式，见
+        context/semantics.py），当前消息与历史消息遵循同一契约；私聊保持
+        原格式（无提及混淆问题）。用户原文中的保留定界符会被替换，无法
+        伪造元数据头。
+
+        Args:
+            event: 消息事件
+            semantics: 调用方已提取的消息语义；None 时自行提取（此时
+                is_active 建议显式传入，被动消息须传 False）
+            is_active: 该消息是否触发本轮回复（决定头标签与触发字段）
         """
-        text = event.message_str or ""
+        text = sanitize_untrusted(event.message_str or "")
 
         # 提取引用消息上下文
         reply_context = self._extract_reply_context(event)
@@ -94,17 +117,30 @@ class ChatContextManager:
         uid = event.get_sender_id() or "unknown"
         prefix = fmt.replace("{NAME}", name).replace("{ID}", uid)
 
+        # 群聊前置可信元数据头；私聊保持原格式
+        header = ""
+        if self.is_group_message(event):
+            sem = semantics or extract_message_semantics(event, is_group=True)
+            header = format_group_header(sem, is_active)
+
         if reply_context:
-            return f"{prefix}[回复 {reply_context}]{text}"
-        return f"{prefix}{text}"
+            return f"{header}{prefix}[回复 {reply_context}]{text}"
+        return f"{header}{prefix}{text}"
 
     def _extract_reply_context(self, event) -> str:
-        """从消息事件中提取引用消息的摘要信息。"""
+        """从消息事件中提取引用消息的摘要信息（含被引用者身份）。"""
         try:
             for comp in event.get_messages():
                 if isinstance(comp, Reply):
-                    sender = comp.sender_nickname or ""
-                    quoted_text = comp.message_str or ""
+                    sender = sanitize_untrusted(comp.sender_nickname or "")
+                    sid = str(comp.sender_id or "").strip()
+                    if sid in ("", "0", "None"):
+                        sid = ""
+                    quoted_text = sanitize_untrusted((comp.message_str or "").strip())
+
+                    # 引用者标识带稳定 ID，昵称重复/变化时可区分
+                    if sid:
+                        sender = f"{sender}({sid})" if sender else sid
 
                     if sender and quoted_text:
                         return f"{sender}: {quoted_text}"

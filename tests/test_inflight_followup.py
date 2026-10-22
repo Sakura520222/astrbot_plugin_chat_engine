@@ -97,7 +97,7 @@ class FakeContextMgr:
     def should_respond(self, event) -> bool:
         return True
 
-    def format_user_message(self, event) -> str:
+    def format_user_message(self, event, semantics=None, is_active=True) -> str:
         fmt = self.config.get("user_id_format", "{{user}{NAME}({ID})}说：")
         prefix = fmt.replace("{NAME}", event.get_sender_name()).replace(
             "{ID}", event.get_sender_id()
