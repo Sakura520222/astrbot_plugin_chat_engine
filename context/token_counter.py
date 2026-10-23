@@ -31,6 +31,15 @@ class TokenEstimator:
             total += 4
         return total
 
+    def count_text(self, text: str) -> int:
+        """计算单段文本的 Token 估算值"""
+        return self._estimate_text(text)
+
+    @staticmethod
+    def estimate_counts(chinese_count: int, other_count: int) -> int:
+        """按字符计数直接估算 Token（用于聚合核算，避免逐段 int 截断漂移）"""
+        return int(chinese_count * 0.6 + other_count * 0.3)
+
     def estimate_prompt(self, system_prompt: str, contexts: list[dict]) -> int:
         """估算一次 LLM 调用的输入 token 数（system prompt + 上下文消息）。
 
@@ -55,4 +64,4 @@ class TokenEstimator:
             return 0
         chinese_count = sum(1 for c in text if "一" <= c <= "鿿")
         other_count = len(text) - chinese_count
-        return int(chinese_count * 0.6 + other_count * 0.3)
+        return self.estimate_counts(chinese_count, other_count)

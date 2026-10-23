@@ -2528,10 +2528,15 @@ class ChatEnginePlugin(Star):
             asyncio.create_task(self._process_debounced_messages(session_key, pending))
 
     async def _trim_context_to_fit(self, messages: list[dict], provider) -> list[dict]:
-        """Token 安全截断：确保上下文不超过模型阈值。
+        """Token 安全截断：确保上下文不超过模型阈值（仅本次请求临时生效）。
 
         从最旧的消息开始移除，直到总量低于阈值。
         被动记录的大量消息通常在最前面，会优先被裁剪。
+
+        注意：截断结果只用于本次 LLM 请求，不回写数据库——持久化的历史
+        收敛由压缩器在写入路径 (_load_compress_save) 完成，二者职责分离
+        (Issue #11)。正常情况下压缩器已把数据库上下文控制在阈值内，本方法
+        仅作为 Provider 限额变化 / Token 估算偏差时的兜底。
         """
         # 获取模型最大 token 数（自动从 provider 获取并回填到配置）
         max_tokens = await self.context_mgr.get_max_context_tokens(provider)
@@ -2562,6 +2567,7 @@ class ChatEnginePlugin(Star):
             logger.info(
                 f"[ChatEngine] Token 安全截断: 移除前 {cut_idx} 条消息 "
                 f"({len(messages)} -> {len(messages) - cut_idx})"
+                "（仅本次请求生效，不回写数据库）"
             )
 
         return messages[cut_idx:]
