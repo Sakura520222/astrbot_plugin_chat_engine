@@ -9,7 +9,7 @@
 6. 带图片的被动消息不因非文本内容异常或错误估算 Token
 7. 压缩结果 Token 收敛到阈值内，可重复压缩（链式摘要）
 
-本文件不依赖 AstrBot 运行环境（compressor 的 logger 导入已做降级处理）。
+本文件不依赖 AstrBot 运行环境（logger 由 conftest 注入的 astrbot.api 桩模块提供）。
 """
 
 from types import SimpleNamespace

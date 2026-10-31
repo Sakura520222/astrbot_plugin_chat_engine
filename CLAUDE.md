@@ -20,7 +20,7 @@ python -m pytest tests/test_image_quota_repo.py          # 单文件
 python -m pytest tests/test_image_quota_repo.py::test名  # 单测试
 ```
 
-测试设计约束：repo/model 层只依赖 sqlalchemy 与 utils，经 [tests/conftest.py](tests/conftest.py) 把 plugins 目录加入 sys.path，可在脱离 AstrBot 运行环境时独立执行。因此导入 `astrbot.*` 的代码目前不可单测——新增测试请放在 repo 层或保持此约束。
+测试设计约束：repo/model 层只依赖 sqlalchemy 与 utils，经 [tests/conftest.py](tests/conftest.py) 把 plugins 目录加入 sys.path，并在检测不到 astrbot 包时注入仅含 logger 的 astrbot.api 桩模块（生产代码统一 `from astrbot.api import logger`，插件规范禁止内置 logging 回退），可在脱离 AstrBot 运行环境时独立执行。因此除 logger 外仍导入其他 `astrbot.*` 的代码不可脱离环境单测——新增测试请放在 repo 层或保持此约束。
 
 无构建步骤；部署即把本目录放入 AstrBot `data/plugins/` 并在 Dashboard 启用。发版流程见下文「跨文件同步约定」。
 

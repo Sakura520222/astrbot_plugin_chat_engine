@@ -1,5 +1,11 @@
 # 变更日志
 
+## [1.4.6] - 2026-10-31
+
+### 修复
+- **日志器导入不符合插件市场上架规范**: [context/compressor.py](context/compressor.py) 此前在 `import astrbot.api.logger` 失败时回退 Python 内置 `logging.getLogger`——插件规范要求日志器必须且只能从 `astrbot.api` 导入，严禁使用内置 logging 模块（即使作为脱离 AstrBot 环境的单测降级路径）。现移除该回退分支，生产代码统一 `from astrbot.api import logger`（全仓库其余模块本就直接导入，清理后发布包内零内置 logging 用法）；脱离 AstrBot 环境的独立单测改由 [tests/conftest.py](tests/conftest.py) 在检测不到 astrbot 包时注入仅含 logger 的 `astrbot.api` 桩模块满足导入需求，tests/ 目录不随发布包分发
+- README 顶部醒目标注本插件与 AstrBot 内置聊天的互斥关系：启用后经最高优先级消息接管（priority=9999）完全替代内置聊天，恢复内置聊天需停用本插件（上架审核建议项）
+
 ## [1.4.5] - 2026-10-23
 
 ### 修复

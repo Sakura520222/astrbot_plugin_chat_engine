@@ -8,12 +8,7 @@ Two modes:
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
-try:
-    from astrbot.api import logger
-except Exception:  # 脱离 AstrBot 运行环境（独立单测）时降级为标准 logging
-    import logging
-
-    logger = logging.getLogger("astrbot_plugin_chat_engine")
+from astrbot.api import logger
 
 from .token_counter import TokenEstimator
 
