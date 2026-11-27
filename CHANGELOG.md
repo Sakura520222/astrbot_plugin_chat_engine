@@ -4,7 +4,7 @@
 
 ### 新增
 - **`get_avatar` 头像获取工具（Issue #13）**: 获取 Bot 自己（`target="bot"`）/ 当前发送者（`"sender"`）/ @ 用户（`"mentioned"`，多个 @ 对象时拒绝猜测并要求显式 `user_id`）/ 指定用户 ID（`"user_id"`）的头像，存为本会话最近参考图并**注入当轮 LLM 上下文**——视觉模型当轮即可描述 / 检查头像，纯文本 Provider 回退图片转述模型；`send_to_chat=true` 时经 `pending_sends` 额外发送原始头像（兼容正常 / 抖动两条发送路径）。平台适配第一阶段支持 QQ OneBot v11 / NapCat（QQ 官方头像服务 `q1.qlogo.cn`，Bot 用 `get_self_id`）与 Telegram（`getUserProfilePhotos` + `getFile`，Bot 自身头像因 Bot API 无此能力明确报错），不支持的平台返回明确错误、不伪造 URL。获取头像只做权限检查、不消耗绘图配额，后续 `edit_image` 仍走完整权限 + 配额逻辑
-- **头像下载完整性校验与自动重试**: aiohttp 会把服务器提前断开当作正常 EOF 静默返回半截数据（实测 Telegram CDN 大图经不稳定链路被掐断在 ~16KB，导致发出半张灰图、视觉模型解码出噪点），现校验 Content-Length 一致性、JPEG EOI 结束符与 PIL 全量解码（覆盖分块传输），校验失败自动重试一次，宁可报错不投递坏图
+- **头像下载流式分块读取、完整性校验与自动重试**: 使用 `iter_chunked` 流式分块读完响应体并在读取过程实时限制大小（避免 `StreamReader.read(n)` 单次只返回首块导致大图截断），未压缩响应校验 Content-Length 一致性，结合 JPEG EOI 结束符与 PIL 全量解码校验（覆盖分块传输），失败自动重试一次，宁可报错不投递坏图
 - **会话最近参考图抽象（`_last_ref_images`）**: 原单张「最近生成图」升级为会话级参考图列表——生成 / 编辑成功后替换，`get_avatar` 成功后追加去重（上限 4 张），`edit_image(message_id="last")` 解析全部引用：单头像直接二创，连续获取 Bot + 用户头像自动多图融合；获取失败不改写原有引用
 - **`view_image` 支持 `message_id="last"`**: 回看会话最近参考图（生成图 / 刚获取的头像），纯文本 Provider 的图片转述路径同步支持；后续轮次无需重新获取即可再次查看
 - 工具使用指引（System Prompt）同步覆盖 `get_avatar` 目标选择、头像描述 / 二创链路与 `view_image("last")` 用法
