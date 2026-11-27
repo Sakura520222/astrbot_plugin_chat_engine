@@ -114,7 +114,6 @@ def make_plugin(tool_impl=None):
     # 隔离分段/清洗/统计子系统
     p._clean_response = lambda text: text
     p._accumulate_token_usage = lambda *a, **k: None
-    p._last_tool_images = None
 
     async def _segments(text):
         yield text

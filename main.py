@@ -59,6 +59,16 @@ from .context.token_counter import TokenEstimator
 from .db.engine import ChatEngineDB
 from .debounce.manager import MessageDebouncer
 from .image_gen import ImageGenError, OpenAIImageClient
+from .image_gen.avatar import (
+    AvatarCache,
+    AvatarError,
+    decode_data_url,
+    describe_avatar_target,
+    extract_at_targets,
+    fetch_avatar,
+    merge_ref,
+    resolve_avatar_target,
+)
 from .memory.manager import MemoryManager
 from .persona.manager import ChatPersonaManager
 from .proactive.manager import ProactiveManager
@@ -88,6 +98,7 @@ class _ToolCallContext:
         "turned_messages",
         "prompt_tokens",
         "completion_tokens",
+        "tool_images",
     )
 
     def __init__(self):
@@ -107,6 +118,9 @@ class _ToolCallContext:
         # handle_all_messages 写入会话计数，供 /stats 与 WebUI 读取。
         self.prompt_tokens: int = 0
         self.completion_tokens: int = 0
+        # 当前工具产生的待注入图片（view_image / get_avatar），随每次工具
+        # 调用清空后嵌入对应 tool result；放 ContextVar 避免跨会话串图
+        self.tool_images: list[dict] | None = None
 
 
 _tool_call_ctx: contextvars.ContextVar[_ToolCallContext | None] = (
@@ -122,7 +136,7 @@ _TURN_REDIRECTED = object()
     "astrbot_plugin_chat_engine",
     "车厘子小樱",
     "完全替代 AstrBot 自带聊天功能，独立实现上下文管理、用户识别、多会话管理、人格系统、Tool Calls、上下文压缩、记忆系统和 Dashboard 管理面板。",
-    "1.4.0",
+    "1.4.7",
 )
 class ChatEnginePlugin(Star):
     """Chat Engine 插件主类"""
@@ -148,12 +162,10 @@ class ChatEnginePlugin(Star):
         self.image_client: OpenAIImageClient | None = None
         self.cmd_dispatcher: CommandDispatcher = None
         self._pending_quotes: dict[str, str] = {}  # {session_key: message_id}
-        self._last_tool_images: list[dict] | None = (
-            None  # 当前工具调用产生的图片（单次执行生命周期）
-        )
-        self._last_generated_images: dict[
-            str, dict
-        ] = {}  # {session_key: image_ref} 最近生成图，供 edit_image(message_id="last") 使用
+        self._last_ref_images: dict[str, list[dict]] = {}
+        # {session_key: [image_ref]} 会话最近参考图（生成图 / 获取的头像等），
+        # 供 edit_image(message_id="last") 使用；生成图替换、头像追加，上限见 merge_ref
+        self._avatar_cache = AvatarCache()
         self._group_info_cache: dict[str, tuple[float, str, str, bool]] = {}
         # 群聊信息缓存: session_key -> (timestamp, group_name, bot_card, is_fallback), TTL=300s
         # inflight 自动追答连续轮数: session_key -> 已连续自动发起的追答轮数，
@@ -2046,7 +2058,7 @@ class ChatEnginePlugin(Star):
                     # tool_args 已经是 dict，无需额外解析
 
                     # 每次工具调用前清空上一次工具的图片数据
-                    self._last_tool_images = None
+                    ctx.tool_images = None
 
                     # 执行工具（Steer 消息不中断工具；批次边界统一注入）
                     tool_result_text = await self._execute_tool(
@@ -2054,12 +2066,12 @@ class ChatEnginePlugin(Star):
                     )
 
                     # 构造 tool result：若工具产生了图片，直接嵌入 content 中
-                    if self._last_tool_images:
-                        img_count = len(self._last_tool_images)
+                    if ctx.tool_images:
+                        img_count = len(ctx.tool_images)
                         tool_content: str | list[dict] = [
                             {"type": "text", "text": tool_result_text},
-                        ] + self._last_tool_images
-                        self._last_tool_images = None
+                        ] + ctx.tool_images
+                        ctx.tool_images = None
                         logger.info(
                             f"[ChatEngine] 注入 {img_count} 张图片到 tool result"
                         )
@@ -2115,19 +2127,12 @@ class ChatEnginePlugin(Star):
     ) -> str | None:
         """检查 AstrBot Dashboard 配置的工具权限，返回错误信息或 None (放行)。
 
-        与官方 FunctionToolManager._check_tool_permission / _PermissionGuardedTool
-        行为对齐：仅非 builtin 工具受 tool_permissions 配置约束（builtin 工具
-        自带权限检查，本插件执行时走 tool.call() 分支同样会经过）；未配置的
+        与官方 FunctionToolManager._check_tool_permission 行为对齐：权限从
+        SharedPreferences 的 tool_permissions (_default 键) 读取，未配置的
         工具默认 member (放行)，仅显式配置为 admin 的工具要求管理员身份。
+        （本插件构建的 ToolSet 使用 func_list 原始工具而非官方
+        _PermissionGuardedTool，故执行前须自行复刻该检查。）
         """
-        tool_manager = self.context.get_llm_tool_manager()
-        try:
-            if tool_manager.is_builtin_tool(tool_name):
-                return None
-        except Exception:
-            # 判定失败时按官方默认 member 处理，不阻断
-            return None
-
         try:
             perms_raw = await sp.global_get("tool_permissions", {})
         except Exception:
@@ -3278,7 +3283,7 @@ You have access to memory tools (save_memory, search_memory, update_memory, dele
 - **delete_memory**: When the user explicitly asks to forget something.
 - **schedule_reply**: When the user asks you to remind them later, when you want to follow up on a topic, or when saying things like "一会提醒我", "过XX分钟告诉我". Also use when the conversation naturally suggests a follow-up would be welcome.
 - **reply_with_quote**: When you want to reply to a specific earlier message in the conversation. Each user message is tagged with `[msg:ID]` — call `reply_with_quote(message_id)` first, then generate your reply text. It will be sent as a quoted reply on the platform. Use this when directly addressing a specific past message (e.g. answering an earlier question, confirming something the user said). Do NOT overuse — only when there is a clear reference target.
-- **view_image**: When you see [Image] placeholders in historical context and need to see the actual image content, call `view_image(message_id)` to load it. The image will be injected into your context. Use this when the image content is relevant to your response (e.g. user asks about an earlier image, or you need visual context to answer a question).
+- **view_image**: When you see [Image] placeholders in historical context and need to see the actual image content, call `view_image(message_id)` to load it. Use `view_image(message_id="last")` to view the session's most recent reference image again (the image you generated or the avatar you fetched). The image will be injected into your context. Use this when the image content is relevant to your response (e.g. user asks about an earlier image, or you need visual context to answer a question).
 
 Important: Memory tools are per-session. Each memory should contain exactly one fact, concise and under 200 characters. Do NOT mention the existence of these tools to the user — just use them naturally when appropriate.
 """
@@ -3291,6 +3296,7 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
 
 - **generate_image**: When the user asks you to draw, paint, create, design, or generate an image (e.g. "画一只猫", "帮我画张图", "生成一张夕阳的图片", "画个头像"), call `generate_image(prompt)`. The image is sent directly to the user — you only need to briefly acknowledge, do NOT try to render the image as text. Decide the prompt language and content yourself based on the user's request. Only call this tool when the user explicitly wants an image — do not invoke it for purely textual questions.
 - **edit_image**: When the user provides or references an existing image and asks to modify, remix, redesign, or transform it (e.g. "把这张图背景换成海边", "参考这张图重画", "改一下这张", "去掉呆毛"), call `edit_image(message_id, prompt)`. Pick the reference image smartly: if the user is replying to / referencing the image you just generated or sent in your previous turn, use `message_id="last"`; otherwise use the [msg:ID] of the message carrying the reference image (current message's [msg:ID] if it has the image, else the historical [msg:ID]). The result is sent directly to the user and becomes the new "last" image. Multiple reference images in one message are supported (multi-image fusion).
+- **get_avatar**: When the user wants an avatar fetched, seen, described, or restyled (e.g. "把 Bot 的头像改成赛博朋克风格", "描述一下我的头像", "把 @某人 的头像做成动漫风"), call `get_avatar` first. Choose the target: the bot's own avatar → `target="bot"`; the requester's own avatar → `target="sender"`; a user @-mentioned in the current message → `target="mentioned"` (if several distinct users are mentioned, call again with `target="user_id"` and the exact ID — do not guess); an explicit platform user ID → `target="user_id"`. The fetched avatar is injected into your context, so you can describe or check it right away; it also becomes the latest reference image — restyle or remix it with `edit_image(message_id="last", prompt=...)` (do NOT ask the user to upload the avatar again and do NOT use generate_image for this). Fetch two avatars consecutively (e.g. bot + user) and a single edit_image("last") call fuses them. Set `send_to_chat=true` ONLY when the user asks to see the original avatar in the chat. Fetching avatars does not consume the image quota.
 """
 
     @filter.llm_tool(name="save_memory")
@@ -3475,23 +3481,58 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
                     urls.append(url)
         return urls
 
-    async def _remember_generated_image(
-        self, session_key: str, image_bytes: bytes
-    ) -> None:
-        """记录会话最近生成图，供后续 edit_image(message_id="last") 使用。
+    async def _remember_session_image(
+        self, session_key: str, data_url: str, append: bool = False
+    ) -> dict | None:
+        """登记会话最近参考图，供后续 edit_image(message_id="last") 使用。
 
-        将生成图存入 ImageStore 得到 image_ref，按 session_key 记录。
-        存储失败不影响主流程（图片仍会正常发送）。
+        生成 / 编辑图以 append=False 替换整表（作废旧引用）；get_avatar 以
+        append=True 追加（保留此前获取的头像以便多图融合）。存入 ImageStore
+        得到 image_ref 后才改写会话记录——存储失败返回 None 且不覆盖原有
+        引用。
         """
         try:
             image_store = self.context_mgr.image_store
             if not image_store:
-                return
-            data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}"
+                return None
             ref = await image_store.store_image(data_url)
-            self._last_generated_images[session_key] = ref
+            if ref.get("type") != "image_ref":
+                return None
+            self._last_ref_images[session_key] = merge_ref(
+                self._last_ref_images.get(session_key, []), ref, append=append
+            )
+            return ref
         except Exception as e:
-            logger.debug(f"[ChatEngine] 记录生成图失败: {e}")
+            logger.debug(f"[ChatEngine] 登记会话参考图失败: {e}")
+            return None
+
+    async def _remember_generated_image(
+        self, session_key: str, image_bytes: bytes
+    ) -> None:
+        """记录会话最近生成图（魔数检测真实 MIME，供 edit_image("last") 使用）。
+
+        存储失败不影响主流程（图片仍会正常发送）。
+        """
+        data_url = image_data_url_from_base64(base64.b64encode(image_bytes).decode())
+        await self._remember_session_image(session_key, data_url)
+
+    async def _resolve_last_reference_image_urls(self, session_key: str) -> list[str]:
+        """解析会话最近参考图（生成图 / 获取的头像）为 data URL 列表。
+
+        供 edit_image / view_image 的 message_id="last" 使用；单个引用过期
+        或解析失败时跳过该张，全部失效返回空列表。
+        """
+        image_store = self.context_mgr.image_store
+        refs = self._last_ref_images.get(session_key) if image_store else None
+        urls: list[str] = []
+        for ref in refs or []:
+            try:
+                resolved = await image_store.resolve_image_ref(ref)
+            except Exception:
+                resolved = None
+            if resolved and resolved.get("type") == "image_url":
+                urls.append(resolved["image_url"]["url"])
+        return urls
 
     async def _resolve_message_image_urls(
         self, session_key: str, message_id: str
@@ -3776,13 +3817,15 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         return replaced
 
     async def _caption_view_image(
-        self, event: AstrMessageEvent, message_id: str
+        self, event: AstrMessageEvent, message_id: str, urls: list[str] | None = None
     ) -> str:
         """纯文本 Provider 下的 view_image:用转述模型返回图片描述文本。
 
         未配置转述 Provider 时保持原有拒绝行为;已配置时逐张转述历史图片,
         描述文本作为工具结果返回给模型(不注入图片块,维持纯文本 Provider
         不接收 image_url 的原则)。转述结果与主路径共用持久化缓存。
+        urls 由调用方预解析时传入（如 view_image 的 "last" 路径），为 None
+        时按 message_id 自行解析。
         """
         prov_id, prompt = self._get_caption_provider_config(event.unified_msg_origin)
         if not prov_id:
@@ -3792,9 +3835,10 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
                 "请直接基于对话中的文本内容回复，不要调用 view_image。"
             )
 
-        err, urls = await self._get_image_urls_for_message(event, message_id)
-        if err:
-            return err
+        if urls is None:
+            err, urls = await self._get_image_urls_for_message(event, message_id)
+            if err:
+                return err
 
         parts: list[str] = []
         for i, url in enumerate(urls, 1):
@@ -3825,8 +3869,23 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         model will describe the images in text for you.
 
         Args:
-            message_id(string): The message ID containing the image. Shown as [msg:ID] tag in context messages.
+            message_id(string): The message ID containing the image. Shown as [msg:ID] tag in context messages. Use the special value "last" to view the session's most recent reference image — the image you just generated/sent, or the avatar just fetched via get_avatar (use this when the user asks you to describe or check that image/avatar).
         """
+        message_id = str(message_id).strip()
+
+        # message_id="last"：查看会话最近参考图（生成图 / 刚获取的头像）。
+        # 参考图不注入 LLM 上下文，模型看不到像素——描述 / 检查头像必须先走本工具。
+        urls = None
+        if message_id.lower() == "last":
+            urls = await self._resolve_last_reference_image_urls(
+                self.context_mgr.build_session_key(event)
+            )
+            if not urls:
+                return (
+                    "No previous image in this session. "
+                    "Fetch one with get_avatar, or generate one with generate_image."
+                )
+
         # 纯文本 Provider 无法接收 image_url 注入（下一轮请求会 400），
         # 改用 AstrBot 默认图片转述模型把图片描述为文本返回
         _ctx = _tool_call_ctx.get()
@@ -3840,14 +3899,19 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         if _provider is not None:
             modalities = await self.context_mgr.get_modalities(_provider)
             if modalities and "image" not in modalities:
-                return await self._caption_view_image(event, message_id)
-        err, urls = await self._get_image_urls_for_message(event, message_id)
-        if err:
-            return err
+                return await self._caption_view_image(event, message_id, urls=urls)
+        if urls is None:
+            err, urls = await self._get_image_urls_for_message(event, message_id)
+            if err:
+                return err
 
         image_parts = [{"type": "image_url", "image_url": {"url": u}} for u in urls]
-        # 暂存图片到实例变量，由 _llm_call_with_tools 直接嵌入当前 tool result
-        self._last_tool_images = image_parts
+        # 暂存图片到 tool-call 上下文，由 _llm_call_with_tools 嵌入当前 tool result
+        _ctx = _tool_call_ctx.get()
+        if _ctx is not None:
+            _ctx.tool_images = image_parts
+        else:
+            logger.error("[ChatEngine] view_image 在无 tool-call 上下文中被调用")
         logger.info(
             f"[ChatEngine] 图片查看请求: msg_id={message_id}, images={len(image_parts)}"
         )
@@ -3871,6 +3935,24 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             quota_key = f"user:{event.get_sender_id()}"
         return quota_key, shanghai_now_iso()[:10]
 
+    async def _check_image_tool_allowed(self, event: AstrMessageEvent) -> str | None:
+        """画图类工具权限检查（不含配额）。返回 None 表示放行。
+
+        - 管理员(is_admin)直接放行
+        - image_gen_admin_only=true 时普通用户拒绝
+
+        get_avatar 复用本检查但不参与每日配额；generate_image / edit_image
+        经 :meth:`_check_image_tool_access` 额外预扣配额。
+        """
+        if event.is_admin():
+            return None
+        if self._cfg_bool("image_gen_admin_only", True):
+            return (
+                "Image tools are admin-only. "
+                "Please ask an admin to enable access for normal users."
+            )
+        return None
+
     async def _check_image_tool_access(self, event: AstrMessageEvent) -> str | None:
         """检查画图/改图工具访问权限并预扣每日配额。
 
@@ -3883,16 +3965,9 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         采用「先 incr 再判断」而非「先 get 再 incr」,利用 incr 的原子性
         避免并发下多个请求同时通过检查导致超额。
         """
-        # 管理员放行,不计配额
-        if event.is_admin():
-            return None
-
-        # 普通用户:检查 admin_only 开关
-        if self._cfg_bool("image_gen_admin_only", True):
-            return (
-                "Image generation tools are admin-only. "
-                "Please ask an admin to enable access for normal users."
-            )
+        allowed_err = await self._check_image_tool_allowed(event)
+        if allowed_err:
+            return allowed_err
 
         # 配额预扣:原子 +1 后判断是否超限
         quota_key, date_str = self._build_image_quota_key(event)
@@ -3990,8 +4065,9 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
         Args:
             message_id(string): The message ID containing the reference image(s),
                 shown as [msg:ID] tag in context messages. Use the special value "last"
-                to edit the most recent image you generated/sent in this session
-                (useful when the user replies to your generated image and asks to tweak it).
+                to edit the most recent image(s) in this session — the image you just
+                generated/sent, or avatar(s) just fetched via get_avatar (multiple
+                consecutively fetched avatars are combined for multi-image fusion).
             prompt(string): Text description of how to edit or remix the image.
         """
         if not self.image_client:
@@ -3999,19 +4075,15 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
 
         session_key = self.context_mgr.build_session_key(event)
 
-        # message_id="last"：取本会话最近一张生成图（用户回复/引用你刚发的图时常用）
-        if message_id == "last":
-            image_store = self.context_mgr.image_store
-            ref = self._last_generated_images.get(session_key)
-            if not ref or not image_store:
+        # message_id="last"：取本会话最近参考图（生成图 / 刚获取的头像；
+        # 连续获取的多个头像合并为多图融合）
+        if str(message_id).strip().lower() == "last":
+            image_urls = await self._resolve_last_reference_image_urls(session_key)
+            if not image_urls:
                 return (
-                    "No previous generated image in this session. "
+                    "No previous image in this session. "
                     "Ask the user to provide or reference an image."
                 )
-            resolved = await image_store.resolve_image_ref(ref)
-            if not resolved or resolved.get("type") != "image_url":
-                return "The previous generated image has expired."
-            image_urls = [resolved["image_url"]["url"]]
         else:
             err, image_urls = await self._get_image_urls_for_message(event, message_id)
             if err:
@@ -4048,6 +4120,170 @@ Important: Memory tools are per-session. Each memory should contain exactly one 
             f"参考图 {len(image_urls)} 张"
         )
         return "Image edited and sent to the user."
+
+    # 头像获取工具 — LLM Tool Call（Issue #13）
+
+    @filter.llm_tool(name="get_avatar")
+    async def tool_get_avatar(
+        self,
+        event: AstrMessageEvent,
+        target: str = "bot",
+        user_id: str = "",
+        send_to_chat: bool = False,
+    ):
+        """Fetch an avatar image (the bot's own or a user's) from the chat platform,
+        save it as this session's latest reference image, and inject it into your
+        context so you can see and describe it directly.
+        To restyle or remix an avatar afterwards: edit_image(message_id="last", prompt=...).
+        Fetching an avatar does NOT consume the image generation quota.
+
+        Args:
+            target(string): Whose avatar to fetch. "bot" = the bot itself;
+                "sender" = the current message sender;
+                "mentioned" = a user @-mentioned in the current message — if several
+                distinct users are mentioned, do NOT guess, call again with
+                target="user_id" and the exact ID;
+                "user_id" = the user with the given platform user ID.
+            user_id(string): Platform user ID, required only when target="user_id".
+            send_to_chat(boolean): true to also send the original avatar to the chat.
+        """
+        target = str(target or "").strip().lower()
+        user_id = str(user_id or "").strip()
+        if target not in ("bot", "sender", "mentioned", "user_id"):
+            return f"Invalid target '{target}'. Use one of: bot, sender, mentioned, user_id."
+        if target == "user_id" and not user_id:
+            return 'target="user_id" requires the user_id argument.'
+
+        # 权限与画图工具保持一致（获取头像本身不消耗绘图配额）
+        allowed_err = await self._check_image_tool_allowed(event)
+        if allowed_err:
+            return allowed_err
+
+        image_store = self.context_mgr.image_store
+        if not image_store:
+            return "Avatar storage is unavailable."
+        session_key = self.context_mgr.build_session_key(event)
+
+        try:
+            self_id = str(event.get_self_id() or "")
+        except Exception:
+            self_id = ""
+        try:
+            sender_id = str(event.get_sender_id() or "")
+        except Exception:
+            sender_id = ""
+        at_targets = extract_at_targets(event.get_messages())
+
+        avatar_target, err = resolve_avatar_target(
+            target, user_id, self_id, sender_id, at_targets
+        )
+        if err:
+            return err
+
+        # 缓存键 = 平台实例 ID + 平台用户 ID，避免跨实例 / 跨账号串用
+        try:
+            platform_instance = str(event.get_platform_id() or "")
+        except Exception:
+            platform_instance = ""
+        cache_key = (platform_instance, avatar_target.uid)
+
+        image_bytes = b""
+        mime = ""
+        data_url = None
+        cached_ref = self._avatar_cache.get(cache_key)
+        if cached_ref is not None:
+            resolved = await image_store.resolve_image_ref(cached_ref)
+            if resolved and resolved.get("type") == "image_url":
+                data_url = resolved["image_url"]["url"]
+                mime = data_url[5:].split(";", 1)[0]
+
+        if data_url is None:
+            try:
+                image_bytes, mime = await fetch_avatar(
+                    event, avatar_target.kind, avatar_target.uid
+                )
+            except AvatarError as e:
+                logger.info(
+                    f"[ChatEngine] 头像获取失败: platform={event.get_platform_name()}, "
+                    f"kind={avatar_target.kind}, uid={avatar_target.uid}, reason={e}"
+                )
+                return f"Avatar fetch failed: {e}"
+            except Exception as e:
+                logger.error(f"[ChatEngine] 头像获取异常: {e}", exc_info=True)
+                return f"Avatar fetch error: {type(e).__name__}"
+            data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode()}"
+
+        # 登记为会话最近参考图（追加：保留此前获取的头像以便多图融合；
+        # 失败不改写原有引用），成功后才写入缓存
+        ref = await self._remember_session_image(session_key, data_url, append=True)
+        if ref is None:
+            return "Avatar fetched but saving it failed; please try again later."
+        self._avatar_cache.put(cache_key, ref)
+
+        if send_to_chat:
+            if not image_bytes:
+                image_bytes = decode_data_url(data_url) or b""
+            if image_bytes:
+                _ctx = _tool_call_ctx.get()
+                if _ctx is not None:
+                    _ctx.pending_sends.append(("chain", [Image.fromBytes(image_bytes)]))
+                else:
+                    logger.error("[ChatEngine] 头像发送在无 tool-call 上下文中被跳过")
+
+        logger.info(
+            f"[ChatEngine] 头像已获取: platform={event.get_platform_name()}, "
+            f"target={avatar_target.kind}, uid={avatar_target.uid}, "
+            f"mime={mime or 'cached'}, bytes={len(image_bytes) if image_bytes else 'cached'}, "
+            f"send_to_chat={bool(send_to_chat)}"
+        )
+        cached_tag = " (cached)" if cached_ref is not None else ""
+        result_msg = (
+            f"Avatar fetched{cached_tag}: {describe_avatar_target(avatar_target)}, "
+            f"{mime or 'unknown format'}. It is now the session's latest reference "
+            "image — call edit_image(message_id='last', prompt=...) to restyle or "
+            "remix it, or view_image(message_id='last') to view it again later."
+        )
+
+        # 注入当轮 LLM 上下文（与 view_image 同机制）：视觉 Provider 直接
+        # 看到头像，可当轮描述 / 检查；纯文本 Provider 回退图片转述
+        _ctx = _tool_call_ctx.get()
+        provider = _ctx.current_provider if _ctx is not None else None
+        if provider is None:
+            try:
+                provider = self.context.get_using_provider()
+            except Exception:
+                provider = None
+        modalities = None
+        if provider is not None:
+            try:
+                modalities = await self.context_mgr.get_modalities(provider)
+            except Exception:
+                modalities = None
+        if modalities and "image" not in modalities:
+            prov_id, prompt = self._get_caption_provider_config(
+                event.unified_msg_origin
+            )
+            if prov_id:
+                caption = await self._get_image_caption(data_url, prov_id, prompt, {})
+                if caption:
+                    return (
+                        result_msg
+                        + "\nAvatar caption (your model has no vision; generated "
+                        "by the caption model):\n" + caption
+                    )
+            result_msg += (
+                " Note: your model cannot view images and no caption provider "
+                "is configured, so the avatar content is not visible to you."
+            )
+        elif _ctx is not None:
+            _ctx.tool_images = [{"type": "image_url", "image_url": {"url": data_url}}]
+            result_msg += (
+                " The image has been injected into your context — you can see "
+                "and describe it directly."
+            )
+        else:
+            result_msg += " (No tool-call context available for image injection.)"
+        return result_msg
 
     # 命令执行工具 — LLM Tool Call
 

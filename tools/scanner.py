@@ -1,5 +1,5 @@
 """Tool scanner — enumerate all registered tools from AstrBot's tool system.
-Scans builtin tools, plugin-registered tools, and MCP tools.
+Scans plugin-registered tools and MCP tools via FunctionToolManager.func_list.
 """
 
 from astrbot.api import logger
@@ -29,7 +29,7 @@ class ToolScanner:
            active 标志，被禁用插件的工具仍以 active=True 注册在 func_list，
            需通过 star_map 的 activated 状态兜底判断
 
-        builtin / MCP 工具无所属插件（handler_module_path 为空），仅检查 active。
+        MCP 工具无所属插件（handler_module_path 为空），仅检查 active。
         """
         if not getattr(tool, "active", True):
             return False
@@ -41,7 +41,10 @@ class ToolScanner:
         return True
 
     def scan_all_tools(self) -> list[dict]:
-        """扫描所有注册的工具 (builtin + plugin + MCP)
+        """扫描所有注册的工具 (plugin + MCP)
+
+        当前 AstrBot 的 FunctionToolManager 只维护 func_list（插件注册 +
+        MCP 工具），没有管理器级 builtin 工具注册表。
 
         Returns:
             list[dict]: 工具信息列表，每项包含 name, description, parameters, source
@@ -49,16 +52,6 @@ class ToolScanner:
         tools = []
         seen_names: set[str] = set()
 
-        # 1. 内置工具
-        try:
-            for tool in self.manager.iter_builtin_tools():
-                if tool.name not in seen_names:
-                    tools.append(self._tool_to_info(tool, "builtin"))
-                    seen_names.add(tool.name)
-        except Exception as e:
-            logger.warning(f"[ChatEngine] 扫描内置工具失败: {e}")
-
-        # 2. 插件 + MCP 工具 (func_list)
         try:
             for tool in self.manager.func_list:
                 if tool.name not in seen_names:
@@ -68,7 +61,7 @@ class ToolScanner:
                     tools.append(self._tool_to_info(tool, source))
                     seen_names.add(tool.name)
         except Exception as e:
-            logger.warning(f"[ChatEngine] 扫描插件工具失败: {e}")
+            logger.warning(f"[ChatEngine] 扫描工具失败: {e}")
 
         return tools
 
@@ -94,17 +87,7 @@ class ToolScanner:
         tool_set = ToolSet()
         seen: set[str] = set()
 
-        # 内置工具
-        try:
-            for tool in self.manager.iter_builtin_tools():
-                if tool.name in enabled_names and tool.name not in seen:
-                    if self._is_tool_available(tool):
-                        tool_set.add_tool(tool)
-                        seen.add(tool.name)
-        except Exception:
-            pass
-
-        # 插件 + MCP 工具
+        # 插件 + MCP 工具 (func_list)
         try:
             for tool in self.manager.func_list:
                 if tool.name in enabled_names and tool.name not in seen:
