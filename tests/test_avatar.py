@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-
 from astrbot_plugin_chat_engine.image_gen import avatar as av
 from astrbot_plugin_chat_engine.image_gen.avatar import (
     AvatarCache,
@@ -500,5 +499,110 @@ async def test_download_image_raises_after_retries_exhausted():
         with pytest.raises(AvatarError, match="HTTP 500"):
             await av.download_image(f"http://127.0.0.1:{server.port}/a")
         assert state["n"] == 2
+    finally:
+        await server.close()
+
+
+# --- 多块流式读取回归（防止 aiohttp StreamReader.read(n) 只读首块截断）---
+
+
+def _large_png() -> bytes:
+    """生成 >80KB 的真实可解码 PNG，覆盖多分片传输。"""
+    import os
+    from io import BytesIO
+
+    from PIL import Image
+
+    raw_rgb = os.urandom(200 * 200 * 3)
+    img = Image.frombytes("RGB", (200, 200), raw_rgb)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    data = buf.getvalue()
+    assert len(data) > 80_000
+    return data
+
+
+async def test_download_image_reads_all_streamed_chunks():
+    """多块分片（含显式 Content-Length 与模拟 16KB TLS 分片）必须完整读完。"""
+    big_png = _large_png()
+
+    async def handler(request):
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "image/png",
+                "Content-Length": str(len(big_png)),
+            },
+        )
+        await resp.prepare(request)
+        # 按 16KB 分片并让出事件循环，复现真实 HTTPS 多记录传输
+        step = 16000
+        for i in range(0, len(big_png), step):
+            await resp.write(big_png[i : i + step])
+            await asyncio.sleep(0.002)
+        await resp.write_eof()
+        return resp
+
+    server = await _start_server([("/big.png", handler)])
+    try:
+        data, mime = await av.download_image(
+            f"http://127.0.0.1:{server.port}/big.png", attempts=1
+        )
+        assert data == big_png
+        assert mime == "image/png"
+    finally:
+        await server.close()
+
+
+async def test_download_image_rejects_oversize_chunked_without_content_length(
+    monkeypatch,
+):
+    """无 Content-Length 的分块流超出上限时应在读取过程中拒绝。"""
+    big_png = _large_png()
+    monkeypatch.setattr(av, "MAX_AVATAR_BYTES", 20_000)
+
+    async def handler(request):
+        resp = web.StreamResponse(status=200, headers={"Content-Type": "image/png"})
+        await resp.prepare(request)
+        for i in range(0, len(big_png), 8000):
+            await resp.write(big_png[i : i + 8000])
+            await asyncio.sleep(0.001)
+        await resp.write_eof()
+        return resp
+
+    server = await _start_server([("/chunked.png", handler)])
+    try:
+        with pytest.raises(AvatarError, match="max size"):
+            await av.download_image(
+                f"http://127.0.0.1:{server.port}/chunked.png", attempts=1
+            )
+    finally:
+        await server.close()
+
+
+async def test_download_image_gzip_compressed_response():
+    """带 Content-Encoding: gzip 时，不应将压缩后的 Content-Length 与解压后体积误判为截断。"""
+    import gzip
+
+    png = _tiny_png()
+    compressed = gzip.compress(png)
+    assert len(compressed) != len(png)
+
+    async def handler(request):
+        return web.Response(
+            body=compressed,
+            headers={
+                "Content-Type": "image/png",
+                "Content-Encoding": "gzip",
+            },
+        )
+
+    server = await _start_server([("/gz.png", handler)])
+    try:
+        data, mime = await av.download_image(
+            f"http://127.0.0.1:{server.port}/gz.png", attempts=1
+        )
+        assert data == png
+        assert mime == "image/png"
     finally:
         await server.close()

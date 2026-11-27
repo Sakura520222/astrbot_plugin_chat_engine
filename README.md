@@ -78,7 +78,7 @@
 ### 画图
 - LLM 工具 `generate_image`：根据文本描述生成图片并发送到聊天
 - LLM 工具 `edit_image`：基于参考图二次创作（图生图），通过 `message_id` 指定上下文中的参考图，支持多图融合；`message_id="last"` 可引用本会话最近的参考图（生成图或刚获取的头像，连续获取的多个头像自动合并做多图融合），编辑结果自动成为新的「最近图」
-- LLM 工具 `get_avatar`：获取 Bot 自己 / 当前发送者 / @ 用户 / 指定用户 ID 的头像，存为本会话最近参考图并**注入当轮 LLM 上下文**（视觉模型当轮即可描述头像，纯文本模型回退图片转述模型），可直接交给 `edit_image(message_id="last")` 二创（如「把 Bot 的头像改成赛博朋克风格」）或 `view_image(message_id="last")` 回看；`send_to_chat=true` 时额外发送原始头像；头像地址由受信平台来源生成，下载经超时 / 大小 / 重定向 / MIME / 魔数 / 传输完整性（Content-Length 一致、JPEG EOI、PIL 全量解码，防不稳定链路截断出半张图，失败自动重试一次）校验，按「平台实例 + 用户 ID」做 TTL 缓存；获取头像不消耗绘图配额；第一阶段支持 QQ OneBot v11（NapCat 等，经 QQ 头像服务）与 Telegram（用户头像经 Bot API，Bot 自身头像因 API 能力限制明确报错），不支持的平台返回明确错误
+- LLM 工具 `get_avatar`：获取 Bot 自己 / 当前发送者 / @ 用户 / 指定用户 ID 的头像，存为本会话最近参考图并**注入当轮 LLM 上下文**（视觉模型当轮即可描述头像，纯文本模型回退图片转述模型），可直接交给 `edit_image(message_id="last")` 二创（如「把 Bot 的头像改成赛博朋克风格」）或 `view_image(message_id="last")` 回看；`send_to_chat=true` 时额外发送原始头像；头像地址由受信平台来源生成，下载经超时 / 大小 / 重定向 / MIME / 魔数 / 传输完整性（流式分块读取、Content-Length 一致、JPEG EOI、PIL 全量解码，失败自动重试一次）校验，按「平台实例 + 用户 ID」做 TTL 缓存；获取头像不消耗绘图配额；第一阶段支持 QQ OneBot v11（NapCat 等，经 QQ 头像服务）与 Telegram（用户头像经 Bot API，Bot 自身头像因 API 能力限制明确报错），不支持的平台返回明确错误
 - 用户自定义配置 OpenAI 兼容的 API 地址、Key 和模型（默认 `gpt-image-2`）
 - 可配置图片尺寸（`1024x1024` / `1024x1536` / `1536x1024` / `auto`）和质量（`auto` / `low` / `medium` / `high`）
 - 生成的图片经工具调用通道直接发送给用户，不注入 LLM 上下文（省 Token）

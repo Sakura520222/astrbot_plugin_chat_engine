@@ -17,6 +17,7 @@ import aiohttp
 
 # --- 下载限制 ---
 DOWNLOAD_TIMEOUT_SEC = 15
+DOWNLOAD_CHUNK_SIZE = 64 * 1024  # 64 KiB
 MAX_AVATAR_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_REDIRECTS = 5
 
@@ -225,10 +226,10 @@ def merge_ref(
 async def download_image(url: str, attempts: int = 2) -> tuple[bytes, str]:
     """从受信 URL 下载图片并校验（超时 / 大小 / 重定向 / 响应类型 / 完整性）。
 
-    传输中断时 aiohttp 会把服务器的提前断开当作正常 EOF 静默返回半截
-    数据（实测 Telegram CDN 大图经不稳定链路常被掐断在 ~16KB），因此
-    除魔数外还须校验 Content-Length 一致性、JPEG EOI 与可解码性。
-    校验失败自动重试一次（链路抖动常可恢复）。
+    通过流式分块读完整响应体（注意 aiohttp 的 ``StreamReader.read(n)``
+    在 ``n > 0`` 时只返回单次缓冲块而不循环读至 EOF，必须使用流式迭代读完），
+    同时在读取过程中强制限制最大体积；下载完成后再校验 Content-Length 一致性、
+    魔数、JPEG EOI 与可解码性。校验或网络失败自动重试一次。
 
     Returns:
         (image_bytes, mime)。
@@ -264,10 +265,10 @@ def _check_transfer_complete(data: bytes, content_length: str | None) -> None:
 def _verify_decodable(data: bytes, mime: str) -> None:
     """校验图片可完整解码（截断 / 损坏数据在此拒绝）。
 
-    JPEG 必须以 EOI(FFD9) 结尾；Pillow 可用时再做全量解码兜底
-    （覆盖无 Content-Length 的分块传输）。Pillow 不可用时跳过。
+    JPEG 必须含 EOI(FFD9) 结尾（允许常见尾随空字节/空白填充）；Pillow 可用时
+    再做全量解码兜底（覆盖无 Content-Length 的分块传输）。Pillow 不可用时跳过。
     """
-    if mime == "image/jpeg" and not data.endswith(b"\xff\xd9"):
+    if mime == "image/jpeg" and not data.rstrip(b"\x00\r\n\t ").endswith(b"\xff\xd9"):
         raise AvatarError("avatar JPEG is truncated (missing EOI marker)")
     try:
         from io import BytesIO
@@ -302,9 +303,33 @@ async def _download_image_once(url: str) -> tuple[bytes, str]:
                             f"avatar download got non-image content-type "
                             f"'{content_type}' (possible error page)"
                         )
-                # 多读 1 字节以识别超限
-                data = await resp.content.read(MAX_AVATAR_BYTES + 1)
+                content_encoding = (
+                    (resp.headers.get("Content-Encoding") or "").strip().lower()
+                )
+                is_uncompressed = content_encoding in ("", "identity")
                 content_length = resp.headers.get("Content-Length")
+                if is_uncompressed and content_length is not None:
+                    try:
+                        declared_len = int(content_length)
+                    except (TypeError, ValueError):
+                        declared_len = -1
+                    if declared_len > MAX_AVATAR_BYTES:
+                        raise AvatarError(
+                            f"avatar exceeds max size "
+                            f"({declared_len} > {MAX_AVATAR_BYTES} bytes)"
+                        )
+                # 必须使用 iter_chunked 循环读至 EOF：aiohttp 的
+                # resp.content.read(n) 在 n > 0 时只返回单个缓冲区（HTTPS 下
+                # 通常仅首个 16 KiB TLS 记录），会导致大图全部被截断。
+                buf = bytearray()
+                async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
+                    buf.extend(chunk)
+                    if len(buf) > MAX_AVATAR_BYTES:
+                        raise AvatarError(
+                            f"avatar exceeds max size "
+                            f"({len(buf)} > {MAX_AVATAR_BYTES} bytes)"
+                        )
+                data = bytes(buf)
     except AvatarError:
         raise
     except aiohttp.TooManyRedirects:
@@ -314,11 +339,8 @@ async def _download_image_once(url: str) -> tuple[bytes, str]:
     except Exception as e:
         raise AvatarError(f"avatar download error: {type(e).__name__}") from e
 
-    _check_transfer_complete(data, content_length)
-    if len(data) > MAX_AVATAR_BYTES:
-        raise AvatarError(
-            f"avatar exceeds max size ({len(data)} > {MAX_AVATAR_BYTES} bytes)"
-        )
+    if is_uncompressed:
+        _check_transfer_complete(data, content_length)
     mime = detect_image_mime(data)
     if mime is None:
         raise AvatarError("avatar response is not a valid image (magic check failed)")
